@@ -1,0 +1,89 @@
+schema "onto/0.1";
+namespace ardupilot_ekf;
+
+// AP_NavEKF3 represents the Extended Kalman Filter for inertial navigation.
+// It maintains a state vector (attitude quaternion, velocity, position, IMU biases)
+// and a state covariance matrix P.
+kind AP_NavEKF3 {
+  identity: filterId;
+
+  property filterId: String;
+
+  // The EKF state vector is composed of:
+  // - Attitude quaternion (4 elements)
+  // - Velocity (3 elements)
+  // - Position (3 elements)
+  // - Gyro Biases (3 elements)
+  // - Accel Biases (3 elements)
+  // This totals 16 elements. As per instructions, this is modelled as a single
+  // fixed-size array to reflect the underlying Rust `[f64; 16]` structure.
+  property state: Array<Real, 16>;
+
+  // The state covariance matrix P. For a 16-element state vector, this is
+  // a 16x16 matrix. Modelled as a nested fixed-size array as per instructions.
+  property cov: Array<Array<Real, 16>, 16>;
+
+  invariants {
+    self.filterId <> null;
+
+    // Hard invariant: state estimates must remain finite (no NaN/Inf propagation).
+    // OCL's `->forAll` provides access to each element `v` in the array.
+    self.state->forAll(v | v.isFinite());
+
+    // Hard invariant: covariance matrix elements must remain finite.
+    // OCL's `->forAll` iterates over rows, and then over elements `c` in each row.
+    self.cov->forAll(row | row->forAll(c | c.isFinite()));
+
+    // HARD INVARIANT (UNEXPRESSIBLE WITH GIVEN OCL ARRAY SYNTAX):
+    // Attitude quaternion magnitude must stay near 1.0.
+    //
+    // The DSL's OCL dialect for Array<T,N> only supports collection operations
+    // like `->forAll(x | ...)` where `x` is the element itself, not its index.
+    // Direct indexed access (e.g., `self.state[0]` or `self.state.at(0)`) is
+    // not part of the provided example syntax and thus cannot be invented.
+    // Therefore, an invariant like:
+    // `self.state[0]*self.state[0] + self.state[1]*self.state[1] + self.state[2]*self.state[2] + self.state[3]*self.state[3] = 1.0;`
+    // cannot be expressed here.
+
+    // HARD INVARIANT (UNEXPRESSIBLE WITH GIVEN OCL ARRAY SYNTAX):
+    // Covariance diagonals must stay non-negative.
+    //
+    // Similar to the quaternion magnitude, expressing `self.cov[i][i] >= 0.0`
+    // for all `i` would require indexed access to both the outer and inner arrays,
+    // which is not supported by the current OCL `->forAll` constructs for arrays.
+  }
+
+  // predict(dt, gyro, accel) — propagate state and grow covariance by process noise;
+  // called at 400 Hz.
+  event predict(dt: Real, gyro: Array<Real, 3>, accel: Array<Real, 3>) {
+    pre: dt > 0.0;
+    pre: dt.isFinite();
+    pre: gyro->forAll(v | v.isFinite());
+    pre: accel->forAll(v | v.isFinite());
+
+    // Post-conditions for the actual state and covariance updates are implicitly
+    // governed by the EKF algorithm logic. The high-level contract ensures that
+    // the resulting state and covariance remain valid according to the invariants.
+    // Specific numeric post-conditions reflecting EKF equations would be overly
+    // complex and are not typically expressed at this DSL level.
+
+    modifies: self.state, self.cov;
+    effects: { Telemetry, LogRecord }; // Side effects: telemetry, persistent log records.
+  }
+
+  // fuse_gps(pos, vel, posErrM, velErrM) — Kalman update against GPS.
+  event fuse_gps(pos: Array<Real, 3>, vel: Array<Real, 3>, posErrM: Real, velErrM: Real) {
+    pre: pos->forAll(v | v.isFinite());
+    pre: vel->forAll(v | v.isFinite());
+    pre: posErrM >= 0.0;
+    pre: posErrM.isFinite();
+    pre: velErrM >= 0.0;
+    pre: velErrM.isFinite();
+
+    // Post-conditions for the specific Kalman update equations are omitted,
+    // with validity of the resulting state and covariance ensured by invariants.
+
+    modifies: self.state, self.cov;
+    effects: { Telemetry, LogRecord }; // Side effects: telemetry, persistent log records.
+  }
+}

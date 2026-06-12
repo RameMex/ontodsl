@@ -1,0 +1,220 @@
+schema "onto/0.1";
+namespace patient_monitoring_discovery;
+
+// ─── Stakeholders ─────────────────────────────────────────────────────
+agent Clinician {
+  identity: clinicianId;
+  property clinicianId: String;
+  property certificationLevel: String;
+  invariants {
+    self.clinicianId <> null;
+  }
+}
+
+agent Patient {
+  identity: patientId;
+  property patientId: String;
+  property roomNumber: String;
+  invariants {
+    self.patientId <> null;
+  }
+}
+
+// The vendor/development team — debitor of all stakeholder commitments.
+// The system kind (bedside monitor) does not exist yet.
+agent MonitorVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+  }
+}
+
+// ─── Kind for the eventual system (placeholder for category invariants) ──
+// Required so that member-quantified categories can reference its properties.
+// This is a minimal placeholder; the full system kind is declared in Requirements.
+kind BedsideMonitorSystem {
+  identity: systemId;
+  property systemId: String;
+  property implausibleThresholdLower: Real;
+  property implausibleThresholdUpper: Real;
+  property maxAlarmLatencyMs: Real;
+  property alarmThresholdsConfigured: Boolean;
+  property maxSignalLossMsBeforeAlarm: Real;
+  property silenceAutoRearmMs: Real;
+  invariants {
+    self.systemId <> null;
+  }
+}
+
+// ─── Hard Goal: Reject Implausible Readings ───────────────────────────
+// The system must reject heart-rate readings outside [20, 250] bpm.
+// The predicate references properties on BedsideMonitorSystem.
+commitment PlausibleReadingCommitment
+  debitor: MonitorVendor
+  creditor: Clinician {
+    identity: commitmentId;
+    property commitmentId: String;
+    predicate: BedsideMonitorSystem.allInstances()->forAll(s |
+      s.implausibleThresholdLower <= 20.0 and s.implausibleThresholdUpper >= 250.0
+    );
+  }
+
+// ─── Hard Goal: Threshold Alarm Latency ───────────────────────────────
+// An alarm must be raised within 2 seconds of a vital crossing its
+// configured threshold.
+commitment AlarmLatencyCommitment
+  debitor: MonitorVendor
+  creditor: Clinician {
+    identity: commitmentId;
+    property commitmentId: String;
+    predicate: BedsideMonitorSystem.allInstances()->forAll(s |
+      s.maxAlarmLatencyMs <= 2000.0
+    );
+  }
+
+// ─── Hard Goal: Sensor-Disconnect Detection ───────────────────────────
+// Loss of sensor signal for more than 5 seconds must raise a
+// 'sensor disconnected' alarm.
+commitment SensorDisconnectCommitment
+  debitor: MonitorVendor
+  creditor: Clinician {
+    identity: commitmentId;
+    property commitmentId: String;
+    predicate: BedsideMonitorSystem.allInstances()->forAll(s |
+      s.maxSignalLossMsBeforeAlarm <= 5000.0
+    );
+  }
+
+// ─── Hard Goal: Silence with Auto-Rearm ──────────────────────────────
+// A silenced alarm must auto-re-arm after 2 minutes (120000 ms)
+// regardless of the underlying condition.
+commitment SilenceAutoRearmCommitment
+  debitor: MonitorVendor
+  creditor: Clinician {
+    identity: commitmentId;
+    property commitmentId: String;
+    predicate: BedsideMonitorSystem.allInstances()->forAll(s |
+      s.silenceAutoRearmMs <= 120000.0
+    );
+  }
+
+// ─── Constraint Goal: Plausibility Window (as category) ──────────────
+// Any system kind must enforce the [20, 250] plausibility window.
+// This uses the member-quantified form so the invariants constrain
+// properties of the member kind (the future system).
+category PlausibilityConstraints where bearer: BedsideMonitorSystem {
+  invariants {
+    bearer.implausibleThresholdLower <= 20.0;
+    bearer.implausibleThresholdUpper >= 250.0;
+  }
+}
+
+// ─── Constraint Goal: Alarm Threshold Crossing (as category) ─────────
+// The system must have configurable alarm thresholds and enforce
+// the 2-second latency.
+category AlarmThresholdEnforcement where bearer: BedsideMonitorSystem {
+  invariants {
+    bearer.maxAlarmLatencyMs <= 2000.0;
+    bearer.alarmThresholdsConfigured = true;
+  }
+}
+
+// ─── Constraint Goal: Sensor Disconnect (as category) ────────────────
+// The system must detect sensor disconnect after >5 seconds of no signal.
+category SensorDisconnectDetection where bearer: BedsideMonitorSystem {
+  invariants {
+    bearer.maxSignalLossMsBeforeAlarm <= 5000.0;
+  }
+}
+
+// ─── Constraint Goal: Silence Auto-Rearm (as category) ───────────────
+// The system must auto-rearm silenced alarms after 2 minutes.
+category SilenceAutoRearm where bearer: BedsideMonitorSystem {
+  invariants {
+    bearer.silenceAutoRearmMs <= 120000.0;
+  }
+}
+
+// ─── Glossary Terms (as kinds) ────────────────────────────────────────
+kind HeartRateReading {
+  identity: readingId;
+  property readingId: String;
+  property valueBpm: Real;
+  property timestamp: Real;
+  property isPlausible: Boolean;
+  invariants {
+    self.readingId <> null;
+    self.valueBpm >= 0.0;
+    self.timestamp >= 0.0;
+  }
+}
+
+kind AlarmThreshold {
+  identity: thresholdId;
+  property thresholdId: String;
+  property vitalType: String;
+  property upperBound: Real;
+  property lowerBound: Real;
+  invariants {
+    self.thresholdId <> null;
+    self.upperBound > self.lowerBound;
+  }
+}
+
+kind SensorSignal {
+  identity: signalId;
+  property signalId: String;
+  property sensorType: String;
+  property signalPresent: Boolean;
+  property lastSignalTimestamp: Real;
+  invariants {
+    self.signalId <> null;
+  }
+}
+
+kind SilencedAlarm {
+  identity: alarmId;
+  property alarmId: String;
+  property alarmType: String;
+  property silencedTimestamp: Real;
+  property autoRearmAtMs: Real;
+  invariants {
+    self.alarmId <> null;
+    self.silencedTimestamp >= 0.0;
+  }
+}
+
+// ─── Domain Story: Normal Monitoring Flow ────────────────────────────
+happening NormalMonitoringFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+// ─── Domain Story: Sensor Disconnect Flow ────────────────────────────
+happening SensorDisconnectFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+// ─── Domain Story: Alarm Silence Flow ────────────────────────────────
+happening AlarmSilenceFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}

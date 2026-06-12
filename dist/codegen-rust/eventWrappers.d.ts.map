@@ -1,0 +1,1 @@
+{"version":3,"file":"eventWrappers.d.ts","sourceRoot":"","sources":["../../src/codegen-rust/eventWrappers.ts"],"names":[],"mappings":"AAAA;;;;;;;;;;;;;;;;;;;;;;;;GAwBG;AAEH,OAAO,KAAK,EAA0B,QAAQ,EAAsB,MAAM,iBAAiB,CAAC;AAO5F,OAAO,EACL,KAAK,gBAAgB,EAEtB,MAAM,kBAAkB,CAAC;AAmB1B,wBAAgB,uBAAuB,CAAC,IAAI,EAAE,QAAQ,EAAE,GAAG,EAAE,gBAAgB,GAAG,MAAM,CAwDrF"}

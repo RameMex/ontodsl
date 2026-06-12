@@ -1,0 +1,308 @@
+schema "onto/0.1";
+namespace engine_control_system;
+
+kind FlightPhase {
+  identity: phaseId;
+  property phaseId: String;
+  property name: String;
+
+  invariants {
+    self.phaseId <> null;
+    self.name <> null;
+  }
+}
+
+kind Sensor {
+  identity: sensorId;
+  property sensorId: String;
+  property sensorType: String;
+  property rawValue: Real;
+  property modelledValue: Real;
+  property isFaulty: Boolean;
+
+  invariants {
+    self.sensorId <> null;
+    self.sensorType <> null;
+  }
+
+  event declareFault() {
+    pre: self.isFaulty = false;
+    post: self.isFaulty = true;
+    modifies: self.isFaulty;
+  }
+
+  event clearFault(confirmedValue: Real) {
+    pre: self.isFaulty = true;
+    post: self.isFaulty = false;
+    post: self.rawValue = confirmedValue;
+    modifies: self.isFaulty, self.rawValue;
+  }
+
+  event updateRaw(value: Real) {
+    pre: self.isFaulty = false;
+    post: self.rawValue = value;
+    modifies: self.rawValue;
+  }
+
+  event updateModelled(value: Real) {
+    post: self.modelledValue = value;
+    modifies: self.modelledValue;
+  }
+}
+
+kind Engine {
+  identity: engineId;
+  property engineId: String;
+  property maxSafeSpeed: Real;
+  property currentSpeed: Real;
+  property fuelFlow: Real;
+  property maxFuelFlow: Real;
+  property thrustCommanded: Real;
+  property thrustActual: Real;
+  property isRunning: Boolean;
+  property ignitionActive: Boolean;
+  property continuousIgnitionCommanded: Boolean;
+  property overspeedProtectionFitted: Boolean;
+  property reverserDeployed: Boolean;
+  property reverserDeploymentEnabled: Boolean;
+
+  invariants {
+    self.engineId <> null;
+    self.maxSafeSpeed > 0.0;
+    self.fuelFlow >= 0.0;
+    self.maxFuelFlow > 0.0;
+    self.fuelFlow <= self.maxFuelFlow;
+    self.thrustActual >= 0.0;
+    self.thrustCommanded >= 0.0;
+    self.currentSpeed <= self.maxSafeSpeed;
+    not (self.reverserDeployed and not self.reverserDeploymentEnabled);
+  }
+
+  event commandContinuousIgnition() {
+    pre: self.isRunning = true;
+    post: self.continuousIgnitionCommanded = true;
+    post: self.ignitionActive = true;
+    modifies: self.continuousIgnitionCommanded, self.ignitionActive;
+  }
+
+  event cancelContinuousIgnition() {
+    post: self.continuousIgnitionCommanded = false;
+    modifies: self.continuousIgnitionCommanded;
+  }
+
+  event applyOverspeedProtection() {
+    pre: self.currentSpeed > self.maxSafeSpeed;
+    post: self.fuelFlow = if self.overspeedProtectionFitted then
+                            self.maxFuelFlow * 0.1
+                          else
+                            0.0
+                          endif;
+    modifies: self.fuelFlow;
+  }
+
+  event setFuelFlow(newFlow: Real) {
+    pre: newFlow >= 0.0;
+    pre: newFlow <= self.maxFuelFlow;
+    pre: self.currentSpeed <= self.maxSafeSpeed;
+    post: self.fuelFlow = newFlow;
+    modifies: self.fuelFlow;
+  }
+
+  event holdThrustInFlight() {
+    pre: self.isRunning = true;
+    post: self.thrustActual = self.thrustCommanded;
+    modifies: self.thrustActual;
+  }
+
+  event commandThrust(level: Real) {
+    pre: level >= 0.0;
+    post: self.thrustCommanded = level;
+    modifies: self.thrustCommanded;
+  }
+
+  event updateSpeed(observedSpeed: Real) {
+    pre: observedSpeed >= 0.0;
+    post: self.currentSpeed = observedSpeed;
+    modifies: self.currentSpeed;
+  }
+
+  event startEngine() {
+    pre: self.isRunning = false;
+    post: self.isRunning = true;
+    post: self.ignitionActive = true;
+    modifies: self.isRunning, self.ignitionActive;
+  }
+
+  event shutdownEngine() {
+    pre: self.isRunning = true;
+    post: self.isRunning = false;
+    post: self.fuelFlow = 0.0;
+    post: self.ignitionActive = false;
+    post: self.continuousIgnitionCommanded = false;
+    post: self.reverserDeployed = false;
+    post: self.reverserDeploymentEnabled = false;
+    modifies: self.isRunning, self.fuelFlow, self.ignitionActive,
+              self.continuousIgnitionCommanded, self.reverserDeployed,
+              self.reverserDeploymentEnabled;
+  }
+}
+
+kind Aircraft {
+  identity: aircraftId;
+  property aircraftId: String;
+  property onGround: Boolean;
+  property currentPhase: FlightPhase;
+
+  invariants {
+    self.aircraftId <> null;
+    self.currentPhase <> null;
+  }
+
+  event land() {
+    pre: self.onGround = false;
+    post: self.onGround = true;
+    modifies: self.onGround;
+  }
+
+  event takeoff() {
+    pre: self.onGround = true;
+    post: self.onGround = false;
+    modifies: self.onGround;
+  }
+
+  event setPhase(newPhase: FlightPhase) {
+    pre: newPhase <> null;
+    post: self.currentPhase = newPhase;
+    modifies: self.currentPhase;
+  }
+}
+
+kind SensorFaultRecord {
+  identity: faultRecordId;
+  property faultRecordId: String;
+  property sensorType: String;
+  property substituteValue: Real;
+  property isActive: Boolean;
+
+  invariants {
+    self.faultRecordId <> null;
+    self.sensorType <> null;
+    self.substituteValue >= 0.0;
+  }
+
+  event activate(sub: Real) {
+    pre: self.isActive = false;
+    pre: sub >= 0.0;
+    post: self.isActive = true;
+    post: self.substituteValue = sub;
+    modifies: self.isActive, self.substituteValue;
+  }
+
+  event deactivate() {
+    pre: self.isActive = true;
+    post: self.isActive = false;
+    modifies: self.isActive;
+  }
+}
+
+role ControlledEngine mediated-by EngineControlSession of Engine {
+  property engineId: String;
+  property maxSafeSpeed: Real;
+  property overspeedProtectionFitted: Boolean;
+  property currentSpeed: Real;
+  property fuelFlow: Real;
+  property maxFuelFlow: Real;
+  property reverserDeployed: Boolean;
+  property reverserDeploymentEnabled: Boolean;
+}
+
+role ControllingAircraft mediated-by EngineControlSession of Aircraft {
+  property aircraftId: String;
+  property onGround: Boolean;
+}
+
+relator EngineControlSession mediates (ControlledEngine, ControllingAircraft) {
+  identity: sessionId;
+  property sessionId: String;
+  property engine: ControlledEngine;
+  property aircraft: ControllingAircraft;
+  property status: String;
+  property faultCount: Integer;
+
+  invariants {
+    self.sessionId <> null;
+    self.engine <> null;
+    self.aircraft <> null;
+    self.status <> null;
+    self.faultCount >= 0;
+    not (self.engine.reverserDeployed and not self.aircraft.onGround);
+    self.engine.currentSpeed <= self.engine.maxSafeSpeed;
+  }
+
+  event enableThrustReverser() {
+    pre: self.status = 'ACTIVE';
+    pre: self.aircraft.onGround = true;
+    post: self.engine.reverserDeploymentEnabled = true;
+    modifies: self.engine.reverserDeploymentEnabled;
+  }
+
+  event deployThrustReverser() {
+    pre: self.status = 'ACTIVE';
+    pre: self.aircraft.onGround = true;
+    pre: self.engine.reverserDeploymentEnabled = true;
+    post: self.engine.reverserDeployed = true;
+    modifies: self.engine.reverserDeployed;
+  }
+
+  event retractThrustReverser() {
+    pre: self.status = 'ACTIVE';
+    post: self.engine.reverserDeployed = false;
+    post: self.engine.reverserDeploymentEnabled = false;
+    modifies: self.engine.reverserDeployed, self.engine.reverserDeploymentEnabled;
+  }
+
+  event noteSensorFault() {
+    pre: self.status = 'ACTIVE';
+    post: self.faultCount = self.faultCount@pre + 1;
+    modifies: self.faultCount;
+  }
+
+  event clearSensorFault() {
+    pre: self.faultCount > 0;
+    post: self.faultCount = self.faultCount@pre - 1;
+    modifies: self.faultCount;
+  }
+
+  event runOverspeedCheck(isFaulty: Boolean, rawSpeed: Real, modelledSpeed: Real) {
+    pre: self.status = 'ACTIVE';
+    post: self.engine.fuelFlow =
+            if (if isFaulty then modelledSpeed else rawSpeed endif) > self.engine.maxSafeSpeed then
+              if self.engine.overspeedProtectionFitted then
+                self.engine.maxFuelFlow * 0.1
+              else
+                0.0
+              endif
+            else
+              self.engine.fuelFlow@pre
+            endif;
+    modifies: self.engine.fuelFlow;
+  }
+
+  event activateSession() {
+    pre: self.status = 'INACTIVE';
+    post: self.status = 'ACTIVE';
+    modifies: self.status;
+  }
+
+  event deactivateSession() {
+    pre: self.status = 'ACTIVE';
+    post: self.status = 'INACTIVE';
+    modifies: self.status;
+  }
+}
+
+relation sessionEngineMed: <<mediation>> from EngineControlSession [1] to ControlledEngine [1];
+relation sessionAircraftMed: <<mediation>> from EngineControlSession [1] to ControllingAircraft [1];
+relation engineSensors: <<composition>> from Engine [1] to Sensor [1..*];
+relation aircraftEngines: <<composition>> from Aircraft [1] to Engine [1..*];
+relation engineFaultRecords: <<composition>> from Engine [1] to SensorFaultRecord [0..*];

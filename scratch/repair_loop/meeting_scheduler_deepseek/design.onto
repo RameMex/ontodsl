@@ -1,0 +1,354 @@
+schema "onto/0.1";
+namespace meeting_scheduler_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// MEETING SCHEDULER — DESIGN STAGE (FINAL CORRECTED)
+// Components (kinds) decomposing the system into cohesive responsibilities.
+// Interfaces (relators) mediate communication between components.
+// Data flows (happenings) model end-to-end stories across components.
+// =====================================================================
+
+// ─── Component: MeetingRequestManager ─────────────────────────────────
+// Owns the lifecycle of a meeting request: initiator identity, status,
+// date range, and outcome.
+kind MeetingRequestManager {
+  identity: requestId;
+  property requestId: String;
+  property initiatorId: String;
+  property dateRangeStr: String;
+  property status: String;           // 'IDLE' | 'COLLECTING' | 'PROPOSED' | 'CONFIRMED'
+  property conflictReported: Boolean;
+  property feasibleDateCount: Integer;
+
+  invariants {
+    self.requestId <> null;
+    self.initiatorId <> null;
+    self.dateRangeStr <> null;
+    self.status = 'IDLE'
+      or self.status = 'COLLECTING'
+      or self.status = 'PROPOSED'
+      or self.status = 'CONFIRMED';
+    self.feasibleDateCount >= 0;
+  }
+
+  // FR-1: Initiator requests a meeting.
+  // Refines ScheduleWithinConstraints (GOAL-1) by starting the flow.
+  event createRequest(initiatorId: String, rangeStr: String): Boolean
+    refines meeting_scheduler_discovery::ScheduleWithinConstraints {
+    pre: self.status = 'IDLE';
+    pre: initiatorId <> null;
+    pre: rangeStr <> null;
+    post: self.status = 'COLLECTING';
+    post: self.dateRangeStr = rangeStr;
+    post: self.initiatorId = initiatorId;
+    post: self.conflictReported = false;
+    post: self.feasibleDateCount = 0;
+    modifies: self.status, self.dateRangeStr, self.initiatorId, self.conflictReported, self.feasibleDateCount;
+  }
+
+  // FR-5: Report conflict to initiator.
+  // Refines ConflictReporting (GOAL-2).
+  event reportConflict(): Boolean
+    refines meeting_scheduler_discovery::ConflictReporting {
+    pre: self.status = 'PROPOSED';
+    pre: self.conflictReported = false;
+    post: self.conflictReported = true;
+    post: self.status = 'IDLE';
+    modifies: self.status, self.conflictReported;
+  }
+
+  // FR-4: Confirm the meeting.
+  // Refines ScheduleWithinConstraints (GOAL-1) and NotifyOnConfirmation (GOAL-3a).
+  event confirmMeeting(proposedDate: String): Boolean
+    refines meeting_scheduler_discovery::ScheduleWithinConstraints,
+            meeting_scheduler_discovery::NotifyOnConfirmation {
+    pre: self.status = 'PROPOSED';
+    pre: proposedDate <> null;
+    post: self.status = 'CONFIRMED';
+    post: self.conflictReported = false;
+    modifies: self.status, self.conflictReported;
+  }
+}
+
+// ─── Component: ConstraintCollector ───────────────────────────────────
+// Collects and stores participant constraints (exclusion sets and preference sets).
+// Uses scalar counts instead of collection operations to comply with dialect limitations.
+kind ConstraintCollector {
+  identity: collectorId;
+  property collectorId: String;
+  property participantCount: Integer;
+  property exclusionCount: Integer;
+  property preferenceCount: Integer;
+  property latestParticipantId: String;
+  property latestExclusionCount: Integer;
+  property latestPreferenceCount: Integer;
+
+  invariants {
+    self.collectorId <> null;
+    self.participantCount >= 0;
+    self.exclusionCount >= 0;
+    self.preferenceCount >= 0;
+    self.latestExclusionCount >= 0;
+    self.latestPreferenceCount >= 0;
+  }
+
+  // FR-2: Participant submits constraints.
+  // Refines AcceptConstraintUpdates (GOAL-3b).
+  event submitConstraints(participantId: String, excludeCount: Integer, preferCount: Integer): Boolean
+    refines meeting_scheduler_discovery::AcceptConstraintUpdates {
+    pre: participantId <> null;
+    pre: excludeCount >= 0;
+    pre: preferCount >= 0;
+    pre: participantId <> self.latestParticipantId;
+    post: self.participantCount = self.participantCount@pre + 1;
+    post: self.exclusionCount = self.exclusionCount@pre + excludeCount;
+    post: self.preferenceCount = self.preferenceCount@pre + preferCount;
+    post: self.latestParticipantId = participantId;
+    post: self.latestExclusionCount = excludeCount;
+    post: self.latestPreferenceCount = preferCount;
+    modifies: self.participantCount, self.exclusionCount, self.preferenceCount, self.latestParticipantId, self.latestExclusionCount, self.latestPreferenceCount;
+  }
+
+  // FR-6: Participant updates constraints while meeting is open.
+  // Refines AcceptConstraintUpdates (GOAL-3b).
+  event updateConstraints(participantId: String, newExcludeCount: Integer, newPreferCount: Integer): Boolean
+    refines meeting_scheduler_discovery::AcceptConstraintUpdates {
+    pre: participantId <> null;
+    pre: newExcludeCount >= 0;
+    pre: newPreferCount >= 0;
+    pre: participantId = self.latestParticipantId;
+    post: self.latestExclusionCount = newExcludeCount;
+    post: self.latestPreferenceCount = newPreferCount;
+    post: self.exclusionCount = self.exclusionCount@pre - self.latestExclusionCount@pre + newExcludeCount;
+    post: self.preferenceCount = self.preferenceCount@pre - self.latestPreferenceCount@pre + newPreferCount;
+    modifies: self.latestExclusionCount, self.latestPreferenceCount, self.exclusionCount, self.preferenceCount;
+  }
+}
+
+// ─── Component: DateProposer ──────────────────────────────────────────
+// Computes a candidate date respecting all constraints (range, exclusions, preferences).
+kind DateProposer {
+  identity: proposerId;
+  property proposerId: String;
+  property proposedDate: String;    // null if no feasible date
+  property hasProposal: Boolean;
+  property conflictDetected: Boolean;
+
+  invariants {
+    self.proposerId <> null;
+  }
+
+  // FR-3: Propose a date (or detect conflict).
+  // Refines ScheduleWithinConstraints (GOAL-1) and ConflictReporting (GOAL-2).
+  event proposeDate(dateCandidate: String, feasible: Boolean): Boolean
+    refines meeting_scheduler_discovery::ScheduleWithinConstraints {
+    pre: feasible = true or feasible = false;
+    post: if feasible then
+            self.proposedDate = dateCandidate
+          else
+            self.proposedDate = null
+          endif;
+    post: self.hasProposal = feasible;
+    post: self.conflictDetected = (feasible = false);
+    modifies: self.proposedDate, self.hasProposal, self.conflictDetected;
+  }
+
+  // Guard: validate proposed date against exclusion sets (formalization business rule).
+  event guardNoExcludedDates(proposedDate: String, exclusionCount: Integer, isExcluded: Boolean): Boolean
+    refines meeting_scheduler_formalization::MeetingSchedulerSystemFormalized.guardNoExcludedDates {
+    pre: proposedDate <> null;
+    pre: exclusionCount >= 0;
+    pre: isExcluded = true or isExcluded = false;
+    post: if isExcluded then
+            result = false
+          else
+            result = true
+          endif;
+  }
+
+  // Guard: favour preference sets when alternatives exist.
+  event guardFavourPreferences(proposedDate: String, preferenceCount: Integer, isPreferred: Boolean): Boolean
+    refines meeting_scheduler_formalization::MeetingSchedulerSystemFormalized.guardFavourPreferences {
+    pre: proposedDate <> null;
+    pre: preferenceCount >= 0;
+    pre: isPreferred = true or isPreferred = false;
+    post: if isPreferred then
+            result = true
+          else if preferenceCount = 0 then
+            result = true
+          else
+            result = false
+          endif endif;
+  }
+}
+
+// ─── Component: Notifier ──────────────────────────────────────────────
+// Sends notifications to participants and the initiator on confirmation/conflict.
+kind Notifier {
+  identity: notifierId;
+  property notifierId: String;
+  property notificationSent: Boolean;
+  property lastNotificationType: String;  // 'CONFIRMATION' | 'CONFLICT' | 'NONE'
+
+  invariants {
+    self.notifierId <> null;
+    self.lastNotificationType = 'CONFIRMATION'
+      or self.lastNotificationType = 'CONFLICT'
+      or self.lastNotificationType = 'NONE';
+  }
+
+  // Notify all participants on confirmation (GOAL-3a).
+  event notifyParticipants(meetingDate: String, location: String): Boolean
+    refines meeting_scheduler_discovery::NotifyOnConfirmation {
+    pre: meetingDate <> null;
+    pre: location <> null;
+    post: self.notificationSent = true;
+    post: self.lastNotificationType = 'CONFIRMATION';
+    modifies: self.notificationSent, self.lastNotificationType;
+  }
+
+  // Notify initiator of conflict (GOAL-2).
+  event notifyConflict(initiatorId: String): Boolean
+    refines meeting_scheduler_discovery::ConflictReporting {
+    pre: initiatorId <> null;
+    post: self.notificationSent = true;
+    post: self.lastNotificationType = 'CONFLICT';
+    modifies: self.notificationSent, self.lastNotificationType;
+  }
+}
+
+// ─── Roles for Interfaces ────────────────────────────────────────────
+
+// Role: the initiator using the request manager.
+role RequestInitiator mediated-by InitiatorRequestInterface of MeetingRequestManager {
+  property initiatorId: String;
+  property status: String;
+  property feasibleDateCount: Integer;
+}
+
+// Role: the collector receiving constraints from participants.
+role ConstraintSupplier mediated-by InitiatorRequestInterface of ConstraintCollector {
+  property participantCount: Integer;
+  property exclusionCount: Integer;
+  property preferenceCount: Integer;
+}
+
+// Role: the proposer receiving constraint data.
+role ConstraintConsumer mediated-by ProposalDataSourceInterface of DateProposer {
+  property exclusionCount: Integer;
+  property preferenceCount: Integer;
+}
+
+// ─── Interfaces (Relators) ───────────────────────────────────────────
+
+// Interface between RequestManager and ConstraintCollector.
+relator InitiatorRequestInterface mediates (RequestInitiator, ConstraintSupplier) {
+  identity: interfaceId;
+  property interfaceId: String;
+  property requestId: String;
+  property initiatorId: String;
+
+  invariants {
+    self.interfaceId <> null;
+    self.requestId <> null;
+  }
+}
+
+// Interface between ConstraintCollector and DateProposer.
+relator ProposalDataSourceInterface mediates (ConstraintConsumer, ConstraintSupplier) {
+  identity: dataSourceId;
+  property dataSourceId: String;
+  property feasibleDateCount: Integer;
+
+  invariants {
+    self.dataSourceId <> null;
+    self.feasibleDateCount >= 0;
+  }
+}
+
+// Interface between DateProposer and MeetingRequestManager for proposal result.
+relator ProposalResultInterface mediates (DateProposer, RequestInitiator) {
+  identity: resultId;
+  property resultId: String;
+  property hasProposal: Boolean;
+  property conflictDetected: Boolean;
+  property feasibleDateCount: Integer;
+
+  invariants {
+    self.resultId <> null;
+    self.feasibleDateCount >= 0;
+  }
+}
+
+// Interface between MeetingRequestManager and Notifier.
+relator NotificationInterface mediates (RequestInitiator, Notifier) {
+  identity: notifInterfaceId;
+  property notifInterfaceId: String;
+  property notificationType: String;
+
+  invariants {
+    self.notifInterfaceId <> null;
+    self.notificationType = 'CONFIRMATION' or self.notificationType = 'CONFLICT';
+  }
+}
+
+// ─── Explicit Relations ──────────────────────────────────────────────
+
+relation r1: <<mediation>> from InitiatorRequestInterface [1] to RequestInitiator [1];
+relation r2: <<mediation>> from InitiatorRequestInterface [1] to ConstraintSupplier [1];
+
+relation r3: <<mediation>> from ProposalDataSourceInterface [1] to ConstraintConsumer [1];
+relation r4: <<mediation>> from ProposalDataSourceInterface [1] to ConstraintSupplier [1];
+
+relation r5: <<mediation>> from ProposalResultInterface [1] to DateProposer [1];
+relation r6: <<mediation>> from ProposalResultInterface [1] to RequestInitiator [1];
+
+relation r7: <<mediation>> from NotificationInterface [1] to RequestInitiator [1];
+relation r8: <<mediation>> from NotificationInterface [1] to Notifier [1];
+
+// ─── Data Flows (Happenings) ─────────────────────────────────────────
+
+// Flow 1: Full scheduling flow (initiator creates request -> collect constraints -> propose -> confirm).
+// NOTE: Renamed to avoid duplicate with discovery.onto's MeetingSchedulingFlow
+happening DesignMeetingSchedulingFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;  // ref to createRequest event
+  property outcome: String;       // 'SCHEDULED' | 'CONFLICT'
+  property proposedDate: String;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+  }
+}
+
+// Flow 2: Constraint update flow (participant updates -> re-propose).
+happening DesignConstraintUpdateFlow {
+  identity: updateFlowId;
+  property updateFlowId: String;
+  property participantId: String;
+  property newExclusionsCount: Integer;
+  property newPreferencesCount: Integer;
+
+  invariants {
+    self.updateFlowId <> null;
+    self.participantId <> null;
+  }
+}
+
+// Flow 3: Notification flow (upon confirmation or conflict).
+happening DesignNotificationFlow {
+  identity: notificationFlowId;
+  property notificationFlowId: String;
+  property notificationType: String;  // 'CONFIRMATION' | 'CONFLICT'
+  property targetId: String;          // initiator or participant ID
+
+  invariants {
+    self.notificationFlowId <> null;
+    self.notificationType = 'CONFIRMATION' or self.notificationType = 'CONFLICT';
+  }
+}

@@ -1,0 +1,127 @@
+schema "onto/0.1";
+namespace ride_dispatch_requirements;
+import "./discovery.onto";
+
+kind RideDispatchSystem specializes StateMachineConstraint, MutualExclusionConstraint {
+  identity: systemId;
+  property systemId: String;
+  property assignmentsPerRide: Integer;
+  property driverStateTransitionValid: Boolean;
+  property maxAssignmentLatencySec: Real;
+  property driverMutualExclusionHolds: Boolean;
+  property activeRides: Integer;
+  property idleDrivers: Integer;
+  property assignedDrivers: Integer;
+  property enRouteDrivers: Integer;
+  property completedRides: Integer;
+  property offersMade: Integer;
+  property offersAccepted: Integer;
+  property offersExpired: Integer;
+  property maxLatencyBudget: Real;
+
+  invariants {
+    self.systemId <> null;
+    self.activeRides >= 0;
+    self.idleDrivers >= 0;
+    self.assignedDrivers >= 0;
+    self.enRouteDrivers >= 0;
+    self.completedRides >= 0;
+    self.offersMade >= 0;
+    self.offersAccepted >= 0;
+    self.offersExpired >= 0;
+    self.maxLatencyBudget <= 30.0;
+    self.maxAssignmentLatencySec >= 0.0;
+  }
+
+  event assignDriver(requestId: String, driverId: String): RideAssignmentResult
+    refines ride_dispatch_discovery::ExactlyOneDriverPerRide,
+            ride_dispatch_discovery::DriverMutualExclusion {
+    pre: driverId <> null;
+    pre: requestId <> null;
+    pre: self.assignmentsPerRide = 0;
+    pre: self.idleDrivers > 0;
+    post: self.assignmentsPerRide = 1;
+    post: self.assignedDrivers = self.assignedDrivers@pre + 1;
+    post: self.idleDrivers = self.idleDrivers@pre - 1;
+    post: self.activeRides = self.activeRides@pre + 1;
+    post: self.offersAccepted = self.offersAccepted@pre + 1;
+    post: self.driverMutualExclusionHolds = true;
+    modifies: self.assignmentsPerRide,
+              self.assignedDrivers,
+              self.idleDrivers,
+              self.activeRides,
+              self.offersAccepted,
+              self.driverMutualExclusionHolds;
+  }
+
+  event driverEnRoute(driverId: String)
+    refines ride_dispatch_discovery::ValidStateTransitions {
+    pre: driverId <> null;
+    pre: self.assignedDrivers > 0;
+    post: self.assignedDrivers = self.assignedDrivers@pre - 1;
+    post: self.enRouteDrivers = self.enRouteDrivers@pre + 1;
+    post: self.driverStateTransitionValid = true;
+    modifies: self.assignedDrivers,
+              self.enRouteDrivers,
+              self.driverStateTransitionValid;
+  }
+
+  event completeRide(driverId: String)
+    refines ride_dispatch_discovery::ValidStateTransitions {
+    pre: driverId <> null;
+    pre: self.enRouteDrivers > 0;
+    post: self.enRouteDrivers = self.enRouteDrivers@pre - 1;
+    post: self.completedRides = self.completedRides@pre + 1;
+    post: self.activeRides = self.activeRides@pre - 1;
+    post: self.driverStateTransitionValid = true;
+    modifies: self.enRouteDrivers,
+              self.completedRides,
+              self.activeRides,
+              self.driverStateTransitionValid;
+  }
+
+  event attemptFirstOffer(timeSinceRequest: Real, requestId: String)
+    refines ride_dispatch_discovery::BoundedAssignmentLatency {
+    pre: timeSinceRequest >= 0.0;
+    pre: timeSinceRequest <= 30.0;
+    pre: requestId <> null;
+    pre: self.offersMade = 0;
+    post: self.offersMade = self.offersMade@pre + 1;
+    post: self.maxAssignmentLatencySec = timeSinceRequest;
+    modifies: self.offersMade,
+              self.maxAssignmentLatencySec;
+  }
+
+  event expireOffer(driverId: String, requestId: String) {
+    pre: driverId <> null;
+    pre: requestId <> null;
+    post: self.offersExpired = self.offersExpired@pre + 1;
+  }
+
+  event escalateRadius(timeSinceRequest: Real) {
+    pre: timeSinceRequest > 30.0;
+    pre: timeSinceRequest <= 60.0;
+  }
+
+  event returnToIdle(driverId: String) {
+    pre: driverId <> null;
+    pre: self.completedRides > 0;
+    post: self.completedRides = self.completedRides@pre - 1;
+    post: self.idleDrivers = self.idleDrivers@pre + 1;
+    modifies: self.completedRides,
+              self.idleDrivers;
+  }
+}
+
+kind RideAssignmentResult {
+  identity: resultId;
+  property resultId: String;
+  property isSuccess: Boolean;
+  property assignedDriverId: String;
+  property rideRequestId: String;
+  property assignmentIdentifier: String;
+  invariants {
+    self.resultId <> null;
+    self.isSuccess = true or self.isSuccess = false;
+  }
+}

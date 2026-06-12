@@ -1,0 +1,208 @@
+schema "onto/0.1";
+namespace ardupilot_pid;
+
+// =====================================================================
+// UFO-A model of ArduPilot's libraries/AC_PID/AC_PID.{h,cpp}.
+//
+// Source:
+//   https://github.com/ArduPilot/ardupilot/blob/master/libraries/AC_PID/AC_PID.h
+//   https://github.com/ArduPilot/ardupilot/blob/master/libraries/AC_PID/AC_PID.cpp
+//
+// AC_PID is the canonical flight controller PID. It composes a target
+// low-pass filter, an error low-pass filter, a derivative low-pass
+// filter, and a slew-rate limiter. The DbC contract we enforce:
+//
+//   1. The integrator must always stay within [-kimax, kimax].
+//   2. kimax / kpdmax / kDff must be non-negative (C++ enforces via
+//      fabsf on setters; we make it a class invariant).
+//   3. dt must be non-negative. NaN inputs to update_all /
+//      update_error are rejected as preconditions (via `isFinite()`)
+//      — matches the C++ early-return behaviour.
+//   4. After every update_all / update_error, the filter-reset flag
+//      must be cleared and the I-set flag must be cleared.
+//
+// Generate with --rust-f32 to mirror ArduPilot's `float`/AP_Float
+// precision; the integrator-accumulation pattern under 400 Hz loops
+// matters and f64 would diverge from flight-test numbers.
+//
+// Skipped from the contract surface: NotchFilterFloat* pointers and
+// the AP_PIDInfo telemetry struct (both pure telemetry, no algebraic
+// contract). The slew-limiter parameters ARE modelled here even
+// though their internal state isn't, so callers can pass them.
+// =====================================================================
+
+kind AC_PID {
+  identity: controllerId;
+
+  property controllerId: String;
+
+  // Tunable gains (read-write parameters).
+  property kP: Real;
+  property kI: Real;
+  property kD: Real;
+  property kFF: Real;
+  property kDff: Real;          // DFF gain applied to targetDerivative.
+  property kimax: Real;
+  property kpdmax: Real;
+
+  // Filter cutoff frequencies (Hz).
+  property filtTHz: Real;
+  property filtEHz: Real;
+  property filtDHz: Real;
+
+  // Slew limiter parameters. The slew limiter modulates P+D output
+  // before clipping; we expose its tuning surface even though its
+  // internal state lives in C++ (SlewLimiter struct, not modelled).
+  property slewRateMax: Real;
+  property slewRateTau: Real;
+  property slewLimitScale: Integer;
+
+  // Internal mutable state.
+  property integrator: Real;
+  property target: Real;
+  property error: Real;
+  property derivative: Real;
+  property targetDerivative: Real;
+
+  // Flags.
+  property resetFilter: Boolean;
+  property iSet: Boolean;
+
+  invariants {
+    self.controllerId <> null;
+    self.kimax >= 0.0;
+    self.kpdmax >= 0.0;
+    self.kDff >= 0.0;
+    self.filtTHz >= 0.0;
+    self.filtEHz >= 0.0;
+    self.filtDHz >= 0.0;
+    self.slewRateMax >= 0.0;
+    self.slewRateTau > 0.0;
+    self.integrator <= self.kimax;
+    self.integrator >= 0.0 - self.kimax;
+  }
+
+  // Mirrors C++ reset_I():
+  //   _flags._I_set = true;
+  //   _integrator = 0.0;
+  event reset_I() {
+    post: self.integrator = 0.0;
+    post: self.iSet = true;
+    modifies: self.integrator, self.iSet;
+  }
+
+  // Mirrors C++ reset_filter():
+  //   _flags._reset_filter = true;
+  event reset_filter() {
+    post: self.resetFilter = true;
+    modifies: self.resetFilter;
+  }
+
+  // Mirrors C++ set_integrator(value):
+  //   _flags._I_set = true;
+  //   _integrator = constrain_float(value, -_kimax, _kimax);
+  //
+  // C++ uses constrain_float; OCL can only express the resulting
+  // bounds, not the exact clamp formula.
+  event set_integrator(value: Real) {
+    post: self.integrator <= self.kimax;
+    post: self.integrator >= 0.0 - self.kimax;
+    post: self.iSet = true;
+    modifies: self.integrator, self.iSet;
+  }
+
+  // Mirrors C++ relax_integrator(integrator, dt, time_constant):
+  //   integrator = constrain_float(integrator, -_kimax, _kimax);
+  //   if (is_positive(dt)) {
+  //     _flags._I_set = true;
+  //     _integrator = _integrator + (integrator - _integrator) *
+  //                   (dt / (dt + time_constant));
+  //   }
+  //
+  // Note: C++ does NOT validate time_constant; with dt > 0 and
+  // time_constant = 0 the formula gives dt/dt = 1 (valid). We mirror
+  // that — only `dt >= 0` is required, not `time_constant > 0`. This
+  // is the faithful contract.
+  event relax_integrator(targetIntegrator: Real, dt: Real, timeConstant: Real) {
+    pre: dt >= 0.0;
+    pre: timeConstant >= 0.0;
+    post: self.integrator <= self.kimax;
+    post: self.integrator >= 0.0 - self.kimax;
+    modifies: self.integrator, self.iSet;
+  }
+
+  // Mirrors C++ update_i(dt, limit, i_scale):
+  //   if (!is_zero(_ki) && is_positive(dt)) {
+  //     anti-windup-guarded:  _integrator += _error * _ki * i_scale * dt;
+  //     _integrator = constrain_float(_integrator, -_kimax, _kimax);
+  //   } else {
+  //     _integrator = 0.0;
+  //   }
+  event update_i(dt: Real, limit: Boolean, iScale: Real) {
+    pre: dt >= 0.0;
+    pre: iScale.isFinite();
+    post: self.integrator <= self.kimax;
+    post: self.integrator >= 0.0 - self.kimax;
+    modifies: self.integrator;
+  }
+
+  // Mirrors C++ update_all(target, measurement, dt, limit, pd_scale, i_scale).
+  //
+  // C++ behaviour:
+  //   if (!isfinite(target) || !isfinite(measurement)) return 0.0f;
+  //   ... reset-filter branch OR normal-filter branch ...
+  //   update_i(dt, limit, i_scale);
+  //   return P + D + I (with slew limiter and PD clamp applied)
+  //
+  // The C++ early-returns on NaN/Inf inputs without touching state.
+  // We hoist that to a precondition so the wrapper rejects bad inputs
+  // BEFORE the impl runs — the rollback path is therefore never taken
+  // for NaN, and the postcondition holds unconditionally.
+  event update_all(target: Real, measurement: Real, dt: Real, limit: Boolean, pdScale: Real, iScale: Real) {
+    pre: target.isFinite();
+    pre: measurement.isFinite();
+    pre: dt >= 0.0;
+    pre: pdScale.isFinite();
+    pre: iScale.isFinite();
+    post: self.resetFilter = false;
+    post: self.iSet = false;
+    post: self.integrator <= self.kimax;
+    post: self.integrator >= 0.0 - self.kimax;
+    modifies: self.integrator, self.target, self.error, self.derivative,
+              self.targetDerivative, self.resetFilter, self.iSet;
+  }
+
+  // Mirrors C++ update_error(error, dt, limit):
+  //   if (!isfinite(error)) return 0.0f;
+  //   _target = 0.0;
+  //   return update_all(0.0, -error, dt, limit);
+  event update_error(error: Real, dt: Real, limit: Boolean) {
+    pre: error.isFinite();
+    pre: dt >= 0.0;
+    post: self.target = 0.0;
+    post: self.resetFilter = false;
+    post: self.iSet = false;
+    post: self.integrator <= self.kimax;
+    post: self.integrator >= 0.0 - self.kimax;
+    modifies: self.integrator, self.target, self.error, self.derivative,
+              self.targetDerivative, self.resetFilter, self.iSet;
+  }
+
+  // Setters that mirror C++ behaviour: kimax / kpdmax / kDff are
+  // stored absolute (C++ setters apply fabsf). The pre accepts any
+  // input; the post asserts non-negative.
+  event set_imax(value: Real) {
+    post: self.kimax >= 0.0;
+    modifies: self.kimax;
+  }
+
+  event set_pdmax(value: Real) {
+    post: self.kpdmax >= 0.0;
+    modifies: self.kpdmax;
+  }
+
+  event set_kDff(value: Real) {
+    post: self.kDff >= 0.0;
+    modifies: self.kDff;
+  }
+}

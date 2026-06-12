@@ -1,0 +1,291 @@
+schema "onto/0.1";
+namespace engine_control_discovery;
+
+// =====================================================================
+// Discovery — Engine Control System
+//
+// Captures: stakeholders, vendor/debitor agent, hard goals as
+// commitments, constraint goals as categories, glossary terms as
+// kinds, and domain stories as happenings.
+//
+// The system kind itself does NOT appear here — it is declared in
+// requirements.onto.
+// =====================================================================
+
+// ─── Glossary Terms (Sortals) ─────────────────────────────────────────
+
+kind Engine {
+  identity: engineId;
+  property engineId: String;
+  property rotationalSpeed: Real;
+  property maxSafeSpeed: Real;
+  property fuelFlow: Real;
+  property variant: String;
+
+  invariants {
+    self.engineId <> null;
+    self.maxSafeSpeed > 0.0;
+    self.rotationalSpeed >= 0.0;
+    self.fuelFlow >= 0.0;
+  }
+}
+
+kind Sensor {
+  identity: sensorId;
+  property sensorId: String;
+  property sensorType: String;
+  property isFaulty: Boolean;
+  property lastReading: Real;
+
+  invariants {
+    self.sensorId <> null;
+    self.sensorType <> null;
+  }
+}
+
+kind ModelledValue {
+  identity: modelledValueId;
+  property modelledValueId: String;
+  property associatedSensorType: String;
+  property estimatedValue: Real;
+
+  invariants {
+    self.modelledValueId <> null;
+    self.associatedSensorType <> null;
+  }
+}
+
+kind OverspeedEvent {
+  identity: overspeedEventId;
+  property overspeedEventId: String;
+  property detectedSpeed: Real;
+  property engineRef: Engine;
+
+  invariants {
+    self.overspeedEventId <> null;
+    self.engineRef <> null;
+    self.detectedSpeed > 0.0;
+  }
+}
+
+kind ThrustReverser {
+  identity: reverserId;
+  property reverserId: String;
+  property deploymentEnabled: Boolean;
+  property aircraftOnGround: Boolean;
+
+  invariants {
+    self.reverserId <> null;
+  }
+}
+
+kind IgnitionMode {
+  identity: ignitionModeId;
+  property ignitionModeId: String;
+  property ignitionModeName: String;
+  property active: Boolean;
+
+  invariants {
+    self.ignitionModeId <> null;
+    self.ignitionModeName <> null;
+  }
+}
+
+// ─── Stakeholders ─────────────────────────────────────────────────────
+
+agent Pilot {
+  identity: pilotId;
+  property pilotId: String;
+  property name: String;
+  property licenseType: String;
+  invariants {
+    self.pilotId <> null;
+  }
+}
+
+agent AircraftOperator {
+  identity: operatorId;
+  property operatorId: String;
+  property name: String;
+  property operatingCertificate: String;
+  invariants {
+    self.operatorId <> null;
+  }
+}
+
+agent CertificationAuthority {
+  identity: authorityId;
+  property authorityId: String;
+  property name: String;
+  property jurisdiction: String;
+  invariants {
+    self.authorityId <> null;
+  }
+}
+
+agent MaintenanceEngineer {
+  identity: engineerId;
+  property engineerId: String;
+  property name: String;
+  property certification: String;
+  invariants {
+    self.engineerId <> null;
+  }
+}
+
+// The vendor / development team — debitor of every stakeholder commitment.
+// The system kind that will discharge these commitments does not exist
+// at Discovery; the vendor (the organisation promising to build it) does.
+agent EngineControlVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  property organizationCode: String;
+  invariants {
+    self.vendorId <> null;
+  }
+}
+
+// ─── Constraint Goals (Categories) ────────────────────────────────────
+// Any system kind declared in Requirements that must honour these
+// constraints will specialise these categories and inherit their
+// invariants.
+
+category OverspeedSafetyConstraints {
+  // GOAL-1: the engine must never be allowed to exceed its maximum
+  // safe rotational speed.
+  invariants {
+    true;
+  }
+}
+
+category SensorFaultToleranceConstraints {
+  // GOAL-3: single-sensor faults must not cause loss of control.
+  invariants {
+    true;
+  }
+}
+
+category FlightPhaseOperationalConstraints {
+  // GOAL-2: thrust reverser only on ground; continuous ignition
+  // honoured; thrust held in flight.
+  invariants {
+    true;
+  }
+}
+
+// ─── Hard Goals as Commitments ─────────────────────────────────────────
+
+// GOAL-1a: Keep engine within safe speed limits — overspeed protection.
+commitment OverspeedProtectionCommitment
+  debitor: EngineControlVendor
+  creditor: CertificationAuthority {
+    identity: commitmentId;
+    property commitmentId: String;
+    property certifiedMaxSpeedLimit: Real;
+    predicate: self.certifiedMaxSpeedLimit > 0.0;
+  }
+
+// GOAL-1b: Fuel limiting on overspeed detection where protection is fitted.
+commitment FuelLimitOnOverspeedCommitment
+  debitor: EngineControlVendor
+  creditor: CertificationAuthority {
+    identity: commitmentId;
+    property commitmentId: String;
+    property overspeedFuelLimitThreshold: Real;
+    predicate: self.overspeedFuelLimitThreshold > 0.0;
+  }
+
+// GOAL-2a: Continuous ignition honoured when commanded.
+commitment ContinuousIgnitionCommitment
+  debitor: EngineControlVendor
+  creditor: Pilot {
+    identity: commitmentId;
+    property commitmentId: String;
+    property ignitionResponseMaxLatencyMs: Real;
+    predicate: self.ignitionResponseMaxLatencyMs > 0.0;
+  }
+
+// GOAL-2b: Thrust held at commanded level during flight.
+commitment ThrustHoldInFlightCommitment
+  debitor: EngineControlVendor
+  creditor: Pilot {
+    identity: commitmentId;
+    property commitmentId: String;
+    property thrustDeviationTolerancePct: Real;
+    predicate: self.thrustDeviationTolerancePct >= 0.0;
+  }
+
+// GOAL-2c: Thrust reverser deployment only on ground.
+commitment ThrustReverserGroundOnlyCommitment
+  debitor: EngineControlVendor
+  creditor: CertificationAuthority {
+    identity: commitmentId;
+    property commitmentId: String;
+    property minGroundConfidence: Real;
+    predicate: self.minGroundConfidence > 0.0;
+  }
+
+// GOAL-3: Sensor fault tolerance — control law substitutes modelled value.
+commitment SensorFaultToleranceCommitment
+  debitor: EngineControlVendor
+  creditor: AircraftOperator {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxToleratedSensorFaults: Real;
+    predicate: self.maxToleratedSensorFaults >= 1.0;
+  }
+
+// Vision statement: vendor commits to delivering a safe, fault-tolerant
+// engine controller that meets airworthiness standards.
+commitment EngineControlVisionCommitment
+  debitor: EngineControlVendor
+  creditor: CertificationAuthority {
+    identity: commitmentId;
+    property commitmentId: String;
+    property targetStandard: String;
+    property safetyIntegrityLevel: String;
+    predicate: self.commitmentId <> null;
+  }
+
+// ─── Domain Stories (Happenings) ──────────────────────────────────────
+
+happening OverspeedDetectionFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+happening SensorFaultHandlingFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+happening ThrustReverserDeploymentFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+happening ContinuousIgnitionActivationFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}

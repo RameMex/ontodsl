@@ -1,0 +1,200 @@
+schema "onto/0.1";
+namespace smart_thermostat_discovery;
+
+// ─── Stakeholders ─────────────────────────────────────────────────────
+
+agent HomeOwner {
+  identity: ownerId;
+  property ownerId: String;
+  property name: String;
+  property preferredComfortRangeMin: Real;
+  property preferredComfortRangeMax: Real;
+  invariants {
+    self.ownerId <> null;
+    self.preferredComfortRangeMin >= 40.0;
+    self.preferredComfortRangeMax <= 90.0;
+    self.preferredComfortRangeMin <= self.preferredComfortRangeMax;
+  }
+}
+
+agent HVACTechnician {
+  identity: techId;
+  property techId: String;
+  property certification: String;
+  property name: String;
+  invariants {
+    self.techId <> null;
+  }
+}
+
+agent RegulatoryAuthority {
+  identity: authorityId;
+  property authorityId: String;
+  property jurisdiction: String;
+  invariants {
+    self.authorityId <> null;
+    self.jurisdiction <> null;
+  }
+}
+
+// The vendor/dev team — debitor of all stakeholder commitments.
+// The system kind does not exist yet at Discovery.
+agent ThermostatVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+    self.name <> null;
+  }
+}
+
+// ─── Hard Goal 1: Safe Temperature Range Commitment ─────────────────
+// The vendor commits that the thermostat will never command a temperature
+// outside [40°F, 90°F], regardless of user input.
+commitment SafeRangeCommitment
+  debitor: ThermostatVendor
+  creditor: HomeOwner {
+    identity: commitmentId;
+    property commitmentId: String;
+    property safeRangeMin: Real;
+    property safeRangeMax: Real;
+    predicate: self.safeRangeMin >= 40.0 and self.safeRangeMax <= 90.0;
+  }
+
+// ─── Hard Goal 2: Safe Halt on Implausible Sensor ───────────────────
+// The vendor commits that if the sensor reading is outside [-40°F, 150°F],
+// the system shall enter safe halt (actuator OFF, user alerted).
+commitment SafeHaltCommitment
+  debitor: ThermostatVendor
+  creditor: HomeOwner {
+    identity: commitmentId;
+    property commitmentId: String;
+    property plausibleMin: Real;
+    property plausibleMax: Real;
+    predicate: self.plausibleMin <= -40.0 and self.plausibleMax >= 150.0;
+  }
+
+// ─── Hard Goal 3: Compressor Cycling Limit ──────────────────────────
+// The vendor commits that the actuator shall not transition between
+// HEAT/COOL/OFF states more frequently than once every 5 minutes.
+commitment CycleLimitCommitment
+  debitor: ThermostatVendor
+  creditor: HVACTechnician {
+    identity: commitmentId;
+    property commitmentId: String;
+    property minCycleIntervalMinutes: Integer;
+    predicate: self.minCycleIntervalMinutes >= 5;
+  }
+
+// ─── Hard Goal 4: Display Visibility Commitment ────────────────────
+// The vendor commits that current temperature, setpoint, and actuator
+// state are visible to the user at all times.
+commitment DisplayVisibilityCommitment
+  debitor: ThermostatVendor
+  creditor: HomeOwner {
+    identity: commitmentId;
+    property commitmentId: String;
+    property isVisible: Boolean;
+    predicate: self.isVisible = true;
+  }
+
+// ─── Constraint Goals (become categories that the system kind inherits) ──
+
+// Constraint: safe temperature range [40°F, 90°F]
+// At Discovery, we define the category without referencing properties
+// of a non-existent system kind. The invariants are expressed purely
+// in terms of the category's own properties. The Requirements stage
+// will declare the system kind with matching properties and specialize
+// this category.
+category SafeTemperatureConstraints {
+  property safeMin: Real;
+  property safeMax: Real;
+  invariants {
+    self.safeMin >= 40.0;
+    self.safeMax <= 90.0;
+    self.safeMin <= self.safeMax;
+  }
+}
+
+// Constraint: plausible sensor reading window [-40°F, 150°F]
+category PlausibleSensorReading {
+  property plausibleMin: Real;
+  property plausibleMax: Real;
+  invariants {
+    self.plausibleMin <= -40.0;
+    self.plausibleMax >= 150.0;
+    self.plausibleMin < self.plausibleMax;
+  }
+}
+
+// Constraint: compressor minimum cycle interval (5 minutes = 300 seconds)
+category CycleLimitConstraint {
+  property minIntervalSeconds: Integer;
+  invariants {
+    self.minIntervalSeconds >= 300;
+  }
+}
+
+// ─── Glossary Terms (domain entities with identity) ───────────────────
+
+kind Setpoint {
+  identity: setpointId;
+  property setpointId: String;
+  property requestedValue: Real;
+  property clampedValue: Real;
+  invariants {
+    self.setpointId <> null;
+    self.clampedValue >= 40.0;
+    self.clampedValue <= 90.0;
+  }
+}
+
+kind ActuatorCommand {
+  identity: commandId;
+  property commandId: String;
+  property state: String;  // 'HEAT', 'COOL', or 'OFF'
+  invariants {
+    self.commandId <> null;
+    self.state = 'HEAT' or self.state = 'COOL' or self.state = 'OFF';
+  }
+}
+
+kind TemperatureReading {
+  identity: readingId;
+  property readingId: String;
+  property value: Real;
+  property timestamp: Integer;
+  property isPlausible: Boolean;
+  invariants {
+    self.readingId <> null;
+    self.timestamp >= 0;
+    self.isPlausible = (self.value >= -40.0 and self.value <= 150.0);
+  }
+}
+
+// ─── Domain Stories (require identity) ──────────────────────────────
+
+happening NormalRegulationFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;  // "user sets setpoint" or "temperature changes"
+  property outcome: String;       // "actuator commands HEAT/COOL/OFF based on comparison"
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}
+
+happening SafeHaltFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;  // "implausible sensor reading"
+  property outcome: String;       // "actuator = OFF, alert raised"
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy = 'implausible_reading';
+    self.outcome = 'safe_halt';
+  }
+}

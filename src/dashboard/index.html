@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OntoDSL AI-Agentic Migration Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="glass-bg-glow"></div>
+
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-logo">
+        <span class="logo-symbol">Ω</span>
+      </div>
+      <div class="brand-text">
+        <h1>OntoDSL</h1>
+        <p>AI-Agentic Formal Verification Suite</p>
+      </div>
+    </div>
+    <div class="api-key-container">
+      <span class="api-key-icon">🔑</span>
+      <input 
+        type="password" 
+        id="gemini-api-key" 
+        placeholder="Enter Gemini API Key (Optional)..."
+        title="Saved securely in browser localStorage. Sends X-Gemini-API-Key to server."
+      >
+    </div>
+    <div class="server-status">
+      <span class="status-indicator online"></span>
+      <span class="status-text">LOCAL SERVER ONLINE</span>
+    </div>
+  </header>
+
+  <!-- Split Dashboard Workspace Layout -->
+  <main class="dashboard-container">
+    
+    <!-- Left Sidebar: Project Workspace Selector & Step Checklist -->
+    <aside class="project-sidebar glass-card">
+      <div class="card-glow"></div>
+      
+      <div class="sidebar-header">
+        <span class="sidebar-project-icon">📁</span>
+        <div class="sidebar-project-text">
+          <h3>ArduPilot Filter Workspace</h3>
+          <p>Design-by-Contract Factory</p>
+        </div>
+      </div>
+
+      <div class="project-selector-wrapper">
+        <label for="project-selector">ACTIVE PROJECT</label>
+        <select id="project-selector">
+          <option value="ardupilot-filters" selected>ArduPilot C++ Filter Library</option>
+          <option value="drone-delivery">Drone Delivery System</option>
+        </select>
+      </div>
+
+      <div class="roadmap-checklist-container">
+        <div class="roadmap-title-row">
+          <h4>🗺️ STEP-BY-STEP ROADMAP</h4>
+          <span class="badge" id="roadmap-completion-badge">0/5 DONE</span>
+        </div>
+        
+        <div class="roadmap-steps" id="roadmap-steps-list">
+          <!-- Populated dynamically in app.js -->
+          <div class="sidebar-loader">Loading workspace...</div>
+        </div>
+      </div>
+
+      <!-- Dedicated Project Workspace Files -->
+      <div class="workspace-files-container">
+        <div class="roadmap-title-row">
+          <h4>📁 WORKSPACE FILES</h4>
+          <span class="badge" id="workspace-files-badge">0/5 ACTIVE</span>
+        </div>
+        <p class="workspace-path-label">📂 src/dashboard/workspace/ardupilot/</p>
+        <div class="workspace-files-list" id="workspace-files-list">
+          <div class="sidebar-loader">No files generated yet</div>
+        </div>
+      </div>
+
+      <div class="roadmap-controls">
+        <button id="next-step-btn" class="btn-gradient btn-next-step">
+          <span class="btn-text">Initialize & Analyze System</span>
+          <span class="btn-glow"></span>
+        </button>
+        <button id="reset-project-btn" class="btn-reset-link">
+          🔄 Reset Workspace State
+        </button>
+      </div>
+    </aside>
+
+    <!-- Right Content Area: Telemetry, Terminals, and Visualizers -->
+    <div class="main-workspace-panel">
+      
+      <!-- Model Settings Controls -->
+      <section class="migration-control-panel glass-card">
+        <div class="panel-header">
+          <h2>Active Step Configuration</h2>
+          <p>Configure the target parameters for the active step. The AI agent will automatically run structural audits, verify invariants in Z3, and generate safe contracts.</p>
+        </div>
+        <div class="control-form-grid">
+          <div class="select-group">
+            <label for="target-lang">Target Language:</label>
+            <select id="target-lang">
+              <option value="rust" selected>Rust (heapless + no_std)</option>
+              <option value="ts">TypeScript (transactional)</option>
+            </select>
+          </div>
+          <div class="select-group">
+            <label for="ai-model">AI Model:</label>
+            <select id="ai-model">
+              <option value="gemini-2.5-flash" selected>Gemini 2.5 Flash (Economy - RECOMMENDED)</option>
+              <option value="gemini-3.5-flash">Gemini 3.5 Flash (Premium Reasoning)</option>
+            </select>
+          </div>
+          <div class="input-group hidden-url-field">
+            <label for="repo-url">Legacy Repository Path:</label>
+            <input 
+              type="text" 
+              id="repo-url" 
+              value="https://github.com/ArduPilot/ardupilot/tree/master/libraries/Filter"
+              disabled
+              title="Driven automatically by the roadmap workspace."
+            >
+          </div>
+        </div>
+      </section>
+
+      <!-- Interactive Progress Stepper -->
+      <section class="progress-stepper-panel glass-card">
+        <div class="card-glow"></div>
+        <div class="stepper-wrapper">
+          <div class="step" id="step-extract">
+            <div class="step-icon">1</div>
+            <div class="step-label">Extract Structure</div>
+          </div>
+          <div class="step-line" id="line-extract-verify"></div>
+          <div class="step" id="step-verify">
+            <div class="step-icon">2</div>
+            <div class="step-label">Formal Verification</div>
+          </div>
+          <div class="step-line" id="line-verify-approval"></div>
+          <div class="step" id="step-approval">
+            <div class="step-icon">3</div>
+            <div class="step-label">Developer Approval</div>
+          </div>
+          <div class="step-line" id="line-approval-codegen"></div>
+          <div class="step" id="step-codegen">
+            <div class="step-icon">4</div>
+            <div class="step-label">CodeGen & Tests</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Real-time Stats Grid -->
+      <section class="stats-grid">
+        <div class="stat-card glass-card" id="card-status">
+          <div class="card-glow"></div>
+          <div class="stat-icon-wrapper blue-glow">🚦</div>
+          <div class="stat-info">
+            <h3>Migration Status</h3>
+            <div class="stat-value" id="status-val">IDLE</div>
+            <p id="active-file-val">Ready to initiate pipeline</p>
+          </div>
+        </div>
+
+        <div class="stat-card glass-card" id="card-cost">
+          <div class="card-glow"></div>
+          <div class="stat-icon-wrapper gold-glow">💰</div>
+          <div class="stat-info">
+            <h3>Financial Burn Rate</h3>
+            <div class="stat-value gradient-text" id="cost-val">$0.00000</div>
+            <p id="cost-model-label">Estimated Gemini 2.5 Flash cost</p>
+          </div>
+        </div>
+
+        <div class="stat-card glass-card" id="card-tokens">
+          <div class="card-glow"></div>
+          <div class="stat-icon-wrapper purple-glow">💾</div>
+          <div class="stat-info">
+            <h3>Token Usage Odometer</h3>
+            <div class="stat-value" id="tokens-val">0</div>
+            <p>
+              <span class="token-breakdown" id="token-in-val">In: 0</span> | 
+              <span class="token-breakdown" id="token-out-val">Out: 0</span> | 
+              <span class="token-breakdown" id="token-cache-val">Cached: 0</span>
+            </p>
+          </div>
+        </div>
+
+        <div class="stat-card glass-card" id="card-graph">
+          <div class="card-glow"></div>
+          <div class="stat-icon-wrapper green-glow">🕸️</div>
+          <div class="stat-info">
+            <h3>Ontology Graph Size</h3>
+            <div class="stat-value" id="graph-val">0 Nodes</div>
+            <p id="edges-val">0 relations generated</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Hazard Audit & Approval Control Panel -->
+      <section class="audit-approval-panel glass-card" id="audit-panel" style="display: none;">
+        <div class="card-glow"></div>
+        <div class="panel-header-action">
+          <div class="header-info">
+            <h2>⚠️ Formal Contract Hazard Directory (Z3 Solver Audits)</h2>
+            <p>Z3 SMT Solver has detected logical vulnerabilities/constraints inconsistencies in the source C++ contract specs. Verify and approve to execute Rust/TS code generation and verify safety invariants.</p>
+          </div>
+          <button id="approve-btn" class="btn-approve-pulse">
+            <span class="btn-text">Approve & Resume Step</span>
+            <span class="btn-glow"></span>
+          </button>
+        </div>
+        <div class="hazards-deck" id="hazards-deck">
+          <!-- Rendered dynamically -->
+        </div>
+      </section>
+
+      <!-- Visual Workspace Split Pane -->
+      <section class="workspace-layout">
+        <!-- Left Panel: Live Graph Viewport / 3D Simulator -->
+        <div class="viewport-card glass-card">
+          <div class="card-glow"></div>
+          <div class="card-header">
+            <div class="panel-tabs">
+              <button class="tab-btn active" id="tab-graph">Ontology Graph</button>
+              <button class="tab-btn" id="tab-simulator">3D Avionics Simulator</button>
+            </div>
+            <div class="header-actions" style="display: flex; align-items: center; gap: 8px;">
+              <span class="badge" id="graph-badge">ACTIVE AST</span>
+              <button id="btn-fullscreen-graph" class="btn-fullscreen" style="width: auto; padding: 0 12px; gap: 6px; font-size: 0.8rem; font-family: var(--font-sans); font-weight: 500;" title="Toggle Fullscreen View">
+                <span>Expand Graph</span> ⛶
+              </button>
+            </div>
+          </div>
+          
+          <!-- Tab 1: Ontology Graph -->
+          <div class="graph-viewport" id="graph-container">
+            <canvas id="graph-canvas"></canvas>
+            <div class="empty-graph-overlay" id="graph-overlay">
+              <span class="overlay-icon">🕸️</span>
+              <p>Model graph will render dynamically as the AI extracts Kinds, Roles, and Relators...</p>
+            </div>
+          </div>
+
+          <!-- Tab 2: 3D Avionics Simulator Viewport -->
+          <div class="simulator-viewport" id="simulator-container" style="display: none; position: relative; flex: 1; min-height: 650px;">
+            <!-- Three.js Canvas Container -->
+            <div id="threejs-canvas-container" style="width: 100%; height: 100%; position: absolute; top:0; left:0; z-index: 1;"></div>
+            
+            <!-- Dynamic Controls Overlay (Interactive Panel) -->
+            <div class="simulator-hud" style="position: absolute; top:0; left:0; width:100%; height:100%; z-index: 2; pointer-events: none; padding: 12px; display: flex; flex-direction: column; justify-content: space-between; font-family: var(--font-sans);">
+              
+              <!-- Top Row: Controller Mode Select & Status Indicator -->
+              <div style="display: flex; justify-content: space-between; align-items: center; pointer-events: auto; background: rgba(13, 17, 28, 0.75); padding: 8px 12px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.08); backdrop-filter: blur(10px);">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <span style="font-size: 0.75rem; text-transform: uppercase; font-weight: 700; color: var(--text-secondary);">Attitude Loop:</span>
+                  <select id="sim-controller-mode" style="background: hsla(230, 38%, 4%, 0.6); border: 1px solid var(--card-border); color: #fff; font-size: 0.75rem; font-weight: 600; padding: 4px 8px; border-radius: 4px; outline: none; cursor: pointer;">
+                    <option value="safe" selected>Safe TS Wrapper (Transactional Rollback)</option>
+                    <option value="legacy">Legacy C++ Controller (Direct Mutate)</option>
+                  </select>
+                </div>
+                
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <span class="status-indicator online" id="sim-status-indicator"></span>
+                  <span id="sim-status-badge" style="font-size: 0.7rem; font-weight: 700; text-transform: uppercase; color: var(--accent-emerald);">STABLE HOVER</span>
+                </div>
+              </div>
+              
+              <!-- Middle Row: Telemetry Cards Left & Fault deck Right -->
+              <div style="display: flex; justify-content: space-between; align-items: flex-start; flex: 1; margin-top: 10px; margin-bottom: 10px;">
+                
+                <!-- Telemetry Cards Left -->
+                <div style="display: flex; flex-direction: column; gap: 6px; width: 185px; pointer-events: auto; background: rgba(13, 17, 28, 0.75); padding: 10px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.08); backdrop-filter: blur(10px);">
+                  <h4 style="font-size: 0.68rem; text-transform: uppercase; font-weight: 700; color: var(--accent-indigo); margin-bottom: 2px;">⚡ Telemetry Grid</h4>
+                  <div style="display: flex; justify-content: space-between; font-size: 0.7rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 3px;">
+                    <span style="color: var(--text-secondary);">Target Pitch:</span>
+                    <span id="telemetry-target-pitch" style="font-family: var(--font-mono); font-weight: 600;">0.00°</span>
+                  </div>
+                  <div style="display: flex; justify-content: space-between; font-size: 0.7rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 3px;">
+                    <span style="color: var(--text-secondary);">Actual Pitch:</span>
+                    <span id="telemetry-actual-pitch" style="font-family: var(--font-mono); font-weight: 600; color: var(--accent-blue);">0.00°</span>
+                  </div>
+                  <div style="display: flex; justify-content: space-between; font-size: 0.7rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 3px;">
+                    <span style="color: var(--text-secondary);">PID Integrator:</span>
+                    <span id="telemetry-integrator" style="font-family: var(--font-mono); font-weight: 600;">0.000</span>
+                  </div>
+                  <div style="display: flex; justify-content: space-between; font-size: 0.7rem;">
+                    <span style="color: var(--text-secondary);">Safety State:</span>
+                    <span id="telemetry-safety" style="font-weight: 700; color: var(--accent-emerald);">PRISTINE</span>
+                  </div>
+                </div>
+
+                <!-- Fault deck Right -->
+                <div style="display: flex; flex-direction: column; gap: 8px; width: 185px; pointer-events: auto; background: rgba(13, 17, 28, 0.75); padding: 10px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.08); backdrop-filter: blur(10px);">
+                  <h4 style="font-size: 0.68rem; text-transform: uppercase; font-weight: 700; color: var(--accent-crimson); margin-bottom: 2px;">⚠️ Hazard Injector</h4>
+                  <button id="btn-inject-nan" style="background: linear-gradient(135deg, var(--accent-crimson), hsl(340, 80%, 45%)); color:#fff; border:none; padding: 6px 10px; border-radius: 4px; font-size: 0.68rem; font-weight: 700; cursor: pointer; text-shadow: 0 1px 2px rgba(0,0,0,0.3); box-shadow: 0 0 10px rgba(244, 63, 94, 0.2); transition: all 0.2s;">
+                    💥 Inject NaN Flight Sensor
+                  </button>
+                  <button id="btn-inject-zerodt" style="background: linear-gradient(135deg, var(--accent-gold), hsl(40, 80%, 45%)); color:#fff; border:none; padding: 6px 10px; border-radius: 4px; font-size: 0.68rem; font-weight: 700; cursor: pointer; text-shadow: 0 1px 2px rgba(0,0,0,0.3); box-shadow: 0 0 10px rgba(234, 179, 8, 0.2); transition: all 0.2s;">
+                    ☣️ Inject dt = 0 Hazard
+                  </button>
+                  <button id="btn-reset-sim" style="background: hsla(230, 38%, 40%, 0.15); border: 1px solid rgba(255,255,255,0.15); color: var(--text-primary); padding: 5px 8px; border-radius: 4px; font-size: 0.68rem; font-weight: 600; cursor: pointer; transition: all 0.2s;">
+                    🔄 Recover Drone Hover
+                  </button>
+                </div>
+
+              </div>
+
+              <!-- Bottom Row: Canvas Real-time Oscilloscope -->
+              <div style="height: 75px; pointer-events: auto;">
+                <canvas id="oscillo-canvas" style="width: 100%; height: 100%; display: block; background: rgba(4, 6, 12, 0.85); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px;"></canvas>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        <!-- Right Panel: Agent Terminal Terminal (Tabbed layout) -->
+        <div class="terminal-card glass-card">
+          <div class="card-glow"></div>
+          <div class="card-header">
+            <div class="panel-tabs">
+              <button class="tab-btn active" id="tab-console">Terminal Console</button>
+              <button class="tab-btn" id="tab-tests">Generated Tests</button>
+            </div>
+            <button id="clear-console-btn" class="btn-console-clear">Clear</button>
+          </div>
+          
+          <div class="terminal-viewport" id="terminal-container">
+            <div class="terminal-log" id="terminal-log">
+              <!-- Logs will render here -->
+            </div>
+          </div>
+          
+          <div class="tests-viewport" id="tests-container" style="display: none;">
+            <div class="empty-tests-overlay" id="tests-overlay">
+              <span class="overlay-icon">🧪</span>
+              <p>Unit tests will be automatically generated upon formal contract approval...</p>
+            </div>
+            <div class="tests-content" id="tests-content" style="display: none;">
+              <!-- Rendered dynamically -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <footer class="app-footer">
+    <p>OntoDSL Compiler Engine v0.10.9 — Protected by Z3 SMT Formal Contract Verifier</p>
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="app.js" type="module"></script>
+</body>
+</html>

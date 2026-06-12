@@ -1,0 +1,96 @@
+schema "onto/0.1";
+namespace meeting_scheduler_formalization;
+import "./requirements.onto";
+
+// =========================================================================
+// FORMALIZATION — Meeting Scheduler Domain
+//
+// CONSTRAINT ANALYSIS:
+//   - S21: Kind can ONLY specialize Category or Mixin (NOT another Kind)
+//   - A Subkind CAN specialize a Kind
+//   - Therefore: the subkind MeetingSchedulerSystemFormalized specializes
+//     MeetingSchedulerSystem directly (which is a Kind). The categories
+//     (GdprArticle5Compliant, DateRangePlausible) are attached via
+//     <<memberOf>> relations — BUT S24 says <<memberOf>> target must be
+//     a sortal (Kind), not a Category.
+//
+//   - SOLUTION: Wrap each category's invariants into a documentary KIND
+//     that the subkind can target via <<memberOf>>. The category itself
+//     remains as a passive label; the kind holds the property values.
+//     But this is convoluted.
+//
+//   - SIMPLER SOLUTION: Inline the formalization invariants directly
+//     into the subkind's own invariants block. The regulatory anchor
+//     becomes a documentary PROPERTY on the subkind. The member-quantified
+//     category invariants become invariants on the subkind directly.
+//     This avoids S21/S24 entirely while preserving the formalization intent.
+// =========================================================================
+
+// ─── Passive Assumptions (documentary record) ──────────────────────────
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property assumptionText: String;
+  property assumptionCategory: String;
+  invariants {
+    self.assumptionId <> null;
+    self.assumptionText <> null;
+  }
+}
+// @assumption ASSUME-1: Participants provide accurate exclusion and preference data.
+// @assumption ASSUME-2: The system will always have network access to send notifications.
+// @assumption ASSUME-3: Date values are represented in a uniform numeric format (epoch time).
+// @assumption ASSUME-4: The initiator is always a valid, registered user.
+
+// ─── Formalized Subkind ────────────────────────────────────────────────
+//
+// Specializes MeetingSchedulerSystem (a Kind — S21 allows this).
+// Inherits identity from MeetingSchedulerSystem.
+// Inlines formalization constraints as properties + invariants.
+subkind MeetingSchedulerSystemFormalized specializes MeetingSchedulerSystem {
+
+  // ─── Regulatory / Legal Properties (GDPR Art. 5) ────────────────────
+  property gdprDpoContact: String;
+  property dataRetentionDays: Integer;
+
+  // ─── Invariants from Formalization ───────────────────────────────────
+
+  invariants {
+    // GDPR Art. 5(1)(c) — data minimisation
+    self.dataRetentionDays > 0;
+    self.dataRetentionDays <= 90;
+
+    // Date range plausibility (physical/domain logical)
+    self.rangeStart >= 0.0;
+    self.rangeEnd >= self.rangeStart;
+    self.rangeEnd - self.rangeStart <= 365.0 * 86400.0;
+  }
+
+  // ─── Active Business Rules (guard/rejection events) ──────────────────
+
+  // BR-1: Reject scheduling request if date range exceeds plausible window.
+  event rejectExcessiveDateRange(start: Real, end: Real) {
+    pre: end - start > 365.0 * 86400.0;
+  }
+
+  // BR-2: Reject if data retention would be violated.
+  event rejectUnretainableRequest() {
+    pre: true;  // design will strengthen with self.dataRetentionDays <= 0
+  }
+
+  // BR-3: Reject constraint update if the meeting is already confirmed.
+  event rejectUpdateAfterConfirmation() {
+    pre: true;  // design will strengthen with self.isOpen = false
+  }
+
+  // BR-4: Log notification to audit trail.
+  event logNotification(participantId: String, dateSent: Real) {
+    pre: participantId <> null;
+    pre: dateSent >= 0.0;
+  }
+
+  // BR-5: Enforce data retention before processing.
+  event enforceDataRetention() {
+    pre: true;  // design will check self.dataRetentionDays > 0
+  }
+}

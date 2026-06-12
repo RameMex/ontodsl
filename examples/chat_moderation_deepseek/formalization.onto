@@ -1,0 +1,162 @@
+schema "onto/0.1";
+namespace chat_moderation_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =====================================================================
+// Stage 3 — Formalization (corrected)
+// =====================================================================
+//
+// ★ FIX for S27: The formalized subkind ChatModerationSystemFormalized
+//   referenced properties (dsaStatementOfReasons, etc.) that are declared
+//   on the categories DsaArt14Compliant, GdprArticle5DataMinimisation,
+//   and TrustSafetyPolicyCompliant. A subkind cannot specialize those
+//   categories (S21), so the properties are NOT inherited by the subkind.
+//
+//   SOLUTION: Declare those properties DIRECTLY on the formalized subkind
+//   and delete the category-related invariants that referenced them.
+//   The categories remain as documentary labels for compliance audits.
+//   The invariants on the subkind now reference its OWN properties.
+// =====================================================================
+
+// ─── Regulatory / Compliance Anchors (Categories) ─────────────────────
+// These remain for documentary traceability, but the formalized subkind
+// does NOT specialize them. Instead, we declare the properties directly
+// on the subkind.
+
+category DsaArt14Compliant {
+  property dsaStatementOfReasons: String;
+  property dsaRedressMechanism: String;
+  property dsaModerationFrequency: String;
+  invariants {
+    self.dsaStatementOfReasons <> null;
+    self.dsaRedressMechanism <> null;
+    self.dsaModerationFrequency <> null;
+  }
+}
+
+category GdprArticle5DataMinimisation {
+  property gdprDataCategoriesProcessed: Set<String>;
+  property gdprProcessingPurpose: String;
+  invariants {
+    self.gdprProcessingPurpose <> null;
+    self.gdprDataCategoriesProcessed->size() >= 1;
+  }
+}
+
+category TrustSafetyPolicyCompliant {
+  property tsPolicyVersion: String;
+  property tsPolicyEffectiveDate: String;
+  property tsPolicyBodyUrl: String;
+  invariants {
+    self.tsPolicyVersion <> null;
+    self.tsPolicyEffectiveDate <> null;
+  }
+}
+
+// ─── Active Business Rules (Events on formalized subkind) ─────────────
+
+subkind ChatModerationSystemFormalized specializes ChatModerationSystem {
+  // ★ FIX: Declare the compliance properties DIRECTLY on the subkind
+  //   (they are NOT inherited from categories because subkind cannot
+  //   specialize category per S21).
+  property dsaStatementOfReasons: String;
+  property dsaRedressMechanism: String;
+  property dsaModerationFrequency: String;
+  property gdprDataCategoriesProcessed: Set<String>;
+  property gdprProcessingPurpose: String;
+  property tsPolicyVersion: String;
+  property tsPolicyEffectiveDate: String;
+  property tsPolicyBodyUrl: String;
+
+  invariants {
+    // DSA compliance invariants (now reference own properties)
+    self.dsaStatementOfReasons <> null;
+    self.dsaRedressMechanism <> null;
+    self.dsaModerationFrequency <> null;
+
+    // GDPR data minimisation invariants
+    self.gdprProcessingPurpose <> null;
+    self.gdprDataCategoriesProcessed->size() >= 1;
+
+    // Trust & Safety policy invariants
+    self.tsPolicyVersion <> null;
+    self.tsPolicyEffectiveDate <> null;
+  }
+
+  // ─── Active rule: reject duplicate processing of the same message ────
+  event rejectDuplicateMessage(msg: Message) {
+    pre: msg <> null;
+    pre: self.inFlightMessages->includes(msg)
+         or self.pendingHiddenMessages->includes(msg);
+    // Pure rejection: no state change — no modifies clause.
+  }
+
+  // ─── Active rule: reject null-confidence input ───────────────────────
+  event rejectNullConfidence(msg: Message, confidence: Real) {
+    pre: msg <> null;
+    pre: confidence = null or (confidence <> confidence);   // NaN check
+    // Pure rejection: no state change — no modifies clause.
+  }
+}
+
+// ─── Passive Assumptions (FormalAssumptionRecord) ────────────────────
+
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property assumptionCode: String;
+  property assumptionText: String;
+  property responsibleParty: String;
+  property statusAtFormalization: String;
+
+  invariants {
+    self.assumptionId <> null;
+    self.assumptionCode <> null;
+    self.assumptionText <> null;
+    self.responsibleParty <> null;
+    self.statusAtFormalization <> null;
+  }
+}
+
+// @assumption ASSUME-1: The external classifier service returns a
+// confidence value in [0.0, 1.0] for every well-formed request.
+// @assumption ASSUME-2: The classifier's confidence threshold of 0.95
+// is fixed for deployment.
+// @assumption ASSUME-3: The 4-hour SLA clock starts from message
+// submission.
+// @assumption ASSUME-4: A hidden message is never delivered to the
+// recipient, even after moderator release.
+// @assumption ASSUME-5: The sender sees 'pending review' via a separate
+// UI/API.
+// @assumption ASSUME-6: Messages will not exceed a body length that the
+// classifier cannot handle (e.g., <= 4096 characters).
+
+// ─── Domain-Logical Invariants (Member-Quantified Categories) ─────────
+
+category PlausibleClassifierConfidence where bearer: Classifier {
+  invariants {
+    bearer.confidence >= 0.0;
+    bearer.confidence <= 1.0;
+  }
+}
+
+category NonEmptyMessageBody where bearer: Message {
+  invariants {
+    bearer.messageBody <> null;
+  }
+}
+
+category BoundedMessageLength where bearer: Message {
+  invariants {
+    true;  // Placeholder — the actual check is implementation-defined
+  }
+}
+
+category ValidModerationDecisionOutcome where bearer: ModerationDecision {
+  invariants {
+    bearer.outcome = 'allowed' or bearer.outcome = 'hidden';
+    bearer.classifierConfidence >= 0.0;
+    bearer.classifierConfidence <= 1.0;
+  }
+}

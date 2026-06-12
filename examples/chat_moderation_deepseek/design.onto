@@ -1,0 +1,347 @@
+schema "onto/0.1";
+namespace chat_moderation_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Stage 4 — Design: Chat Content Moderation Pipeline
+//
+// Decomposition into components (kinds), interfaces (relators), and
+// data flows (happenings).
+// =====================================================================
+
+// ─── Message Ingestor ────────────────────────────────────────────────
+kind MessageIngestor {
+  identity: ingestorId;
+  property ingestorId: String;
+  property receivedMessages: Set<Message>;
+
+  invariants {
+    self.ingestorId <> null;
+  }
+
+  event acceptMessage(msg: Message)
+    refines chat_moderation_requirements::ChatModerationSystem.submitMessage {
+    pre: msg <> null;
+    pre: msg.messageId <> null;
+    post: self.receivedMessages->includes(msg);
+    modifies: self.receivedMessages;
+  }
+}
+
+// ─── Classifier Service ──────────────────────────────────────────────
+kind ClassifierService {
+  identity: classifierServiceId;
+  property classifierServiceId: String;
+  property lastConfidence: Real;
+  property available: Boolean;
+
+  invariants {
+    self.classifierServiceId <> null;
+    self.lastConfidence >= 0.0;
+    self.lastConfidence <= 1.0;
+    self.available = true or self.available = false;
+  }
+
+  event classifyMessage(msg: Message): Real
+    refines chat_moderation_requirements::ChatModerationSystem.submitMessage {
+    pre: self.available = true;
+    pre: msg <> null;
+    post: result >= 0.0;
+    post: result <= 1.0;
+    post: self.lastConfidence = result;
+    modifies: self.lastConfidence;
+  }
+}
+
+// ─── Decision Engine ─────────────────────────────────────────────────
+kind DecisionEngine {
+  identity: engineId;
+  property engineId: String;
+  property threshold: Real;
+  property processedMessages: Set<Message>;
+
+  invariants {
+    self.engineId <> null;
+    self.threshold >= 0.0;
+    self.threshold <= 1.0;
+  }
+
+  event evaluateMessage(msg: Message, confidence: Real): Boolean
+    refines chat_moderation_requirements::ChatModerationSystem.submitMessage {
+    pre: msg <> null;
+    pre: msg.messageId <> null;
+    pre: confidence >= 0.0;
+    pre: confidence <= 1.0;
+    post: result = (confidence >= self.threshold);
+    post: self.processedMessages->includes(msg);
+    modifies: self.processedMessages;
+  }
+}
+
+// ─── Delivery Service ────────────────────────────────────────────────
+kind DeliveryService {
+  identity: deliveryServiceId;
+  property deliveryServiceId: String;
+  property deliveredMessages: Set<Message>;
+
+  invariants {
+    self.deliveryServiceId <> null;
+  }
+
+  event deliverMessage(msg: Message)
+    refines chat_moderation_requirements::ChatModerationSystem.submitMessage {
+    pre: msg <> null;
+    pre: msg.messageId <> null;
+    post: self.deliveredMessages->includes(msg);
+    modifies: self.deliveredMessages;
+  }
+}
+
+// ─── Pending Review Queue ────────────────────────────────────────────
+kind PendingReviewQueue {
+  identity: queueId;
+  property queueId: String;
+  property hiddenMessages: Set<Message>;
+  property submissionTimestamps: Set<String>;
+
+  invariants {
+    self.queueId <> null;
+    self.hiddenMessages->size() = self.submissionTimestamps->size();
+  }
+
+  event enqueueHidden(msg: Message, submissionTimestamp: String)
+    refines chat_moderation_requirements::ChatModerationSystem.submitMessage {
+    pre: msg <> null;
+    pre: msg.messageId <> null;
+    pre: msg.riskLevel = 'pending';
+    pre: submissionTimestamp <> null;
+    post: self.hiddenMessages->includes(msg);
+    post: self.submissionTimestamps->includes(submissionTimestamp);
+    modifies: self.hiddenMessages, self.submissionTimestamps;
+  }
+
+  event dequeueReleased(msg: Message)
+    refines chat_moderation_requirements::ChatModerationSystem.releaseMessage {
+    pre: msg <> null;
+    pre: self.hiddenMessages->includes(msg);
+    post: not self.hiddenMessages->includes(msg);
+    modifies: self.hiddenMessages, self.submissionTimestamps;
+  }
+
+  event dequeueConfirmed(msg: Message)
+    refines chat_moderation_requirements::ChatModerationSystem.confirmMessage {
+    pre: msg <> null;
+    pre: self.hiddenMessages->includes(msg);
+    post: not self.hiddenMessages->includes(msg);
+    modifies: self.hiddenMessages, self.submissionTimestamps;
+  }
+
+  query hasAgedMessage(currentTimestamp: String): Boolean {
+    body: self.submissionTimestamps->exists(ts |
+      ts <> null and currentTimestamp <> null
+    );
+  }
+}
+
+// ─── Moderator Interface ─────────────────────────────────────────────
+kind ModeratorInterface {
+  identity: moderatorInterfaceId;
+  property moderatorInterfaceId: String;
+  property visiblePendingMessages: Set<Message>;
+  property assignedModerator: String;
+
+  invariants {
+    self.moderatorInterfaceId <> null;
+  }
+
+  event displayForReview(msg: Message, classifierConfidence: Real, threshold: Real) {
+    pre: msg <> null;
+    pre: msg.riskLevel = 'pending';
+    pre: classifierConfidence >= 0.0;
+    pre: threshold >= 0.0;
+    post: self.visiblePendingMessages->includes(msg);
+    modifies: self.visiblePendingMessages;
+  }
+
+  event moderatorRelease(msg: Message)
+    refines chat_moderation_requirements::ChatModerationSystem.releaseMessage {
+    pre: msg <> null;
+    pre: self.visiblePendingMessages->includes(msg);
+    post: not self.visiblePendingMessages->includes(msg);
+    modifies: self.visiblePendingMessages;
+  }
+
+  event moderatorConfirmHide(msg: Message)
+    refines chat_moderation_requirements::ChatModerationSystem.confirmMessage {
+    pre: msg <> null;
+    pre: self.visiblePendingMessages->includes(msg);
+    post: not self.visiblePendingMessages->includes(msg);
+    modifies: self.visiblePendingMessages;
+  }
+}
+
+// ─── Escalation Service ──────────────────────────────────────────────
+kind EscalationService {
+  identity: escalationServiceId;
+  property escalationServiceId: String;
+  property slaDurationHours: Real;
+  property escalatedMessages: Set<Message>;
+
+  invariants {
+    self.escalationServiceId <> null;
+    self.slaDurationHours = 4.0;
+  }
+
+  event escalateUnreviewed(msg: Message)
+    refines chat_moderation_requirements::ChatModerationSystem.escalateUnreviewed {
+    pre: msg <> null;
+    pre: msg.riskLevel = 'pending';
+    post: self.escalatedMessages->includes(msg);
+    modifies: self.escalatedMessages;
+  }
+}
+
+// ─── Audit Trail ─────────────────────────────────────────────────────
+kind AuditTrail {
+  identity: auditTrailId;
+  property auditTrailId: String;
+  property decisions: Set<ModerationDecision>;
+
+  invariants {
+    self.auditTrailId <> null;
+  }
+
+  event recordDecision(d: ModerationDecision)
+    refines chat_moderation_requirements::ChatModerationSystem.submitMessage,
+            chat_moderation_requirements::ChatModerationSystem.releaseMessage,
+            chat_moderation_requirements::ChatModerationSystem.confirmMessage {
+    pre: d <> null;
+    pre: d.outcome = 'allowed' or d.outcome = 'hidden';
+    pre: d.classifierConfidence >= 0.0;
+    pre: d.classifierConfidence <= 1.0;
+    pre: d.thresholdUsed >= 0.0;
+    pre: d.thresholdUsed <= 1.0;
+    pre: d.timestamp <> null;
+    post: self.decisions->includes(d);
+    modifies: self.decisions;
+  }
+
+  query getDecisionHistory(msgId: String): Set<ModerationDecision> {
+    body: self.decisions->select(d | true);
+  }
+}
+
+// =====================================================================
+// Interfaces (Relators)
+// =====================================================================
+
+relator PipelineController mediates (MessageIngestor, DecisionEngine) {
+  identity: controllerId;
+  property controllerId: String;
+  property currentMessage: Message;
+
+  invariants {
+    self.controllerId <> null;
+  }
+}
+
+relator ClassificationChannel mediates (ClassifierService, DecisionEngine) {
+  identity: channelId;
+  property channelId: String;
+
+  invariants {
+    self.channelId <> null;
+  }
+}
+
+relator ReviewBridge mediates (PendingReviewQueue, ModeratorInterface) {
+  identity: bridgeId;
+  property bridgeId: String;
+
+  invariants {
+    self.bridgeId <> null;
+  }
+}
+
+relator DeliveryChannel mediates (DeliveryService, AuditTrail) {
+  identity: channelId;
+  property channelId: String;
+
+  invariants {
+    self.channelId <> null;
+  }
+}
+
+relator EscalationChannel mediates (EscalationService, PendingReviewQueue) {
+  identity: channelId;
+  property channelId: String;
+
+  invariants {
+    self.channelId <> null;
+  }
+}
+
+// =====================================================================
+// Data Flows (Happenings)
+// =====================================================================
+
+happening ModerationFlow {
+  identity: flowId;
+  property flowId: String;
+  property stepOrder: Set<String>;
+
+  invariants {
+    self.flowId <> null;
+    self.stepOrder->size() >= 1;
+  }
+}
+
+happening ReviewFlow {
+  identity: flowId;
+  property flowId: String;
+  property stepOrder: Set<String>;
+
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+happening EscalationFlow {
+  identity: flowId;
+  property flowId: String;
+  property stepOrder: Set<String>;
+
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+// =====================================================================
+// Explicit Relations (OntoUML Stereotypes)
+// =====================================================================
+
+relation pipelineIngestorMed: <<mediation>> from PipelineController [1] to MessageIngestor [1];
+relation pipelineDecisionMed: <<mediation>> from PipelineController [1] to DecisionEngine [1];
+
+relation classificationClassifierMed: <<mediation>> from ClassificationChannel [1] to ClassifierService [1];
+relation classificationDecisionMed: <<mediation>> from ClassificationChannel [1] to DecisionEngine [1];
+
+relation reviewQueueMed: <<mediation>> from ReviewBridge [1] to PendingReviewQueue [1];
+relation reviewModeratorMed: <<mediation>> from ReviewBridge [1] to ModeratorInterface [1];
+
+relation deliveryServiceMed: <<mediation>> from DeliveryChannel [1] to DeliveryService [1];
+relation deliveryAuditMed: <<mediation>> from DeliveryChannel [1] to AuditTrail [1];
+
+relation escalationServiceMed: <<mediation>> from EscalationChannel [1] to EscalationService [1];
+relation escalationQueueMed: <<mediation>> from EscalationChannel [1] to PendingReviewQueue [1];
+
+relation systemIngestor: <<composition>> from ChatModerationSystem [1] to MessageIngestor [1];
+relation systemClassifier: <<composition>> from ChatModerationSystem [1] to ClassifierService [1];
+relation systemDecisionEngine: <<composition>> from ChatModerationSystem [1] to DecisionEngine [1];
+relation systemDelivery: <<composition>> from ChatModerationSystem [1] to DeliveryService [1];
+relation systemQueue: <<composition>> from ChatModerationSystem [1] to PendingReviewQueue [1];
+relation systemModeratorInterface: <<composition>> from ChatModerationSystem [1] to ModeratorInterface [1];
+relation systemEscalation: <<composition>> from ChatModerationSystem [1] to EscalationService [1];
+relation systemAudit: <<composition>> from ChatModerationSystem [1] to AuditTrail [1];

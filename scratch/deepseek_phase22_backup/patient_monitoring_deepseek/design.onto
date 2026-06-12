@@ -1,0 +1,596 @@
+schema "onto/0.1";
+namespace patient_monitoring_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stage 4 — Design
+// Decomposition of the bedside vital-signs monitor into components.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── 1. ECG SENSOR COMPONENT ────────────────────────────────────────────
+kind EcgSensor {
+  identity: sensorId;
+  property sensorId: String;
+  property lastRawReading: Real;
+  property lastReadingTimestamp: Real;
+  property isConnected: Boolean;
+  property signalStrength: Real;
+
+  invariants {
+    self.sensorId <> null;
+    self.lastReadingTimestamp >= 0.0;
+    self.signalStrength >= 0.0;
+    self.signalStrength <= 1.0;
+  }
+
+  event deliverRawReading(heartRate: Real, timestamp: Real)
+    refines patient_monitoring_requirements::VitalSignMonitorSystem.deliverReading {
+    pre: timestamp >= 0.0;
+    pre: heartRate >= 0.0;
+
+    post: self.lastRawReading = heartRate;
+    post: self.lastReadingTimestamp = timestamp;
+    post: self.isConnected = true;
+    post: self.signalStrength = 1.0;
+
+    modifies: self.lastRawReading,
+              self.lastReadingTimestamp,
+              self.isConnected,
+              self.signalStrength;
+  }
+
+  event signalLost(timestamp: Real) {
+    pre: self.isConnected;
+    pre: timestamp >= 0.0;
+
+    post: self.isConnected = false;
+    post: self.signalStrength = 0.0;
+    post: self.lastReadingTimestamp = timestamp;
+
+    modifies: self.isConnected, self.signalStrength, self.lastReadingTimestamp;
+  }
+
+  event signalRestored(timestamp: Real) {
+    pre: not self.isConnected;
+    pre: timestamp >= 0.0;
+
+    post: self.isConnected = true;
+    post: self.signalStrength = 1.0;
+    post: self.lastReadingTimestamp = timestamp;
+
+    modifies: self.isConnected, self.signalStrength, self.lastReadingTimestamp;
+  }
+}
+
+// ─── 2. PLAUSIBILITY CHECKER COMPONENT ──────────────────────────────────
+kind PlausibilityChecker {
+  identity: checkerId;
+  property checkerId: String;
+  property plausibleMin: Real;
+  property plausibleMax: Real;
+  property rejectionCounter: Integer;
+
+  invariants {
+    self.checkerId <> null;
+    self.plausibleMin = 20.0;
+    self.plausibleMax = 250.0;
+    self.rejectionCounter >= 0;
+  }
+
+  event checkPlausibility(value: Real): Boolean
+    refines patient_monitoring_requirements::VitalSignMonitorSystem.deliverReading,
+            patient_monitoring_discovery::RejectImplausibleCommitment {
+    pre: value >= 0.0;
+
+    post: result = (value >= self.plausibleMin and value <= self.plausibleMax);
+    post: if not result then
+            self.rejectionCounter = self.rejectionCounter@pre + 1
+          else
+            self.rejectionCounter = self.rejectionCounter@pre
+          endif;
+
+    modifies: self.rejectionCounter;
+  }
+}
+
+// ─── 3. DISPLAY COMPONENT ──────────────────────────────────────────────
+kind Display {
+  identity: displayId;
+  property displayId: String;
+  property displayValue: Real;
+  property isDisplaying: Boolean;
+  property screenActive: Boolean;
+
+  invariants {
+    self.displayId <> null;
+  }
+
+  event showValue(value: Real) {
+    pre: value >= 0.0;
+
+    post: self.displayValue = value;
+    post: self.isDisplaying = true;
+    post: self.screenActive = true;
+
+    modifies: self.displayValue, self.isDisplaying, self.screenActive;
+  }
+
+  event clearDisplay() {
+    pre: self.isDisplaying;
+
+    post: self.isDisplaying = false;
+    post: self.displayValue = 0.0;
+    post: self.screenActive = false;
+
+    modifies: self.isDisplaying, self.displayValue, self.screenActive;
+  }
+}
+
+// ─── 4. THRESHOLD COMPARATOR COMPONENT ─────────────────────────────────
+kind ThresholdComparator {
+  identity: comparatorId;
+  property comparatorId: String;
+  property lowThreshold: Real;
+  property highThreshold: Real;
+  property isCrossed: Boolean;
+
+  invariants {
+    self.comparatorId <> null;
+    self.highThreshold > self.lowThreshold;
+    self.lowThreshold >= 20.0;
+    self.highThreshold <= 250.0;
+  }
+
+  event compareValue(value: Real): Boolean
+    refines patient_monitoring_requirements::VitalSignMonitorSystem.deliverReading,
+            patient_monitoring_discovery::AlarmLatencyCommitment {
+    pre: value >= self.lowThreshold;
+
+    post: self.isCrossed = (value > self.highThreshold or value < self.lowThreshold);
+    post: result = self.isCrossed;
+
+    modifies: self.isCrossed;
+  }
+
+  event configureThresholds(newLow: Real, newHigh: Real)
+    refines patient_monitoring_requirements::VitalSignMonitorSystem.configureThresholds {
+    pre: newLow >= 20.0;
+    pre: newHigh <= 250.0;
+    pre: newLow < newHigh;
+
+    post: self.lowThreshold = newLow;
+    post: self.highThreshold = newHigh;
+
+    modifies: self.lowThreshold, self.highThreshold;
+  }
+}
+
+// ─── 5. ALARM MANAGER COMPONENT ────────────────────────────────────────
+kind AlarmManager {
+  identity: alarmManagerId;
+  property alarmManagerId: String;
+  property alarmRaised: Boolean;
+  property alarmRaisedAt: Real;
+  property alarmSilenced: Boolean;
+  property silenceStartedAt: Real;
+  property autoRearmSeconds: Real;
+  property alarmLatencyBudgetSeconds: Real;
+
+  invariants {
+    self.alarmManagerId <> null;
+    self.autoRearmSeconds = 120.0;
+    self.alarmLatencyBudgetSeconds <= 2.0;
+    self.alarmRaisedAt >= 0.0;
+    self.silenceStartedAt >= 0.0;
+  }
+
+  event raiseAlarm(timestamp: Real)
+    refines patient_monitoring_requirements::VitalSignMonitorSystem.deliverReading,
+            patient_monitoring_discovery::AlarmLatencyCommitment {
+    pre: not self.alarmRaised;
+    pre: timestamp >= 0.0;
+
+    post: self.alarmRaised = true;
+    post: self.alarmRaisedAt = timestamp;
+    post: (self.alarmRaisedAt - timestamp) = 0.0;
+    post: (self.alarmRaisedAt - timestamp) <= self.alarmLatencyBudgetSeconds;
+
+    modifies: self.alarmRaised, self.alarmRaisedAt;
+  }
+
+  event silenceAlarm(timestamp: Real)
+    refines patient_monitoring_requirements::VitalSignMonitorSystem.acknowledgeAlarm {
+    pre: self.alarmRaised;
+    pre: not self.alarmSilenced;
+    pre: timestamp >= 0.0;
+
+    post: self.alarmSilenced = true;
+    post: self.silenceStartedAt = timestamp;
+
+    modifies: self.alarmSilenced, self.silenceStartedAt;
+  }
+
+  event autoRearm(timestamp: Real): Boolean
+    refines patient_monitoring_discovery::SilenceAutoRearmCommitment {
+    pre: self.alarmSilenced;
+    pre: self.silenceStartedAt > 0.0;
+    pre: timestamp >= 0.0;
+
+    post: if (timestamp - self.silenceStartedAt) >= self.autoRearmSeconds then
+            self.alarmSilenced = false
+            and self.silenceStartedAt = 0.0
+            and result = true
+          else
+            self.alarmSilenced = self.alarmSilenced@pre
+            and self.silenceStartedAt = self.silenceStartedAt@pre
+            and result = false
+          endif;
+
+    modifies: self.alarmSilenced, self.silenceStartedAt;
+  }
+
+  event clearAlarm() {
+    pre: self.alarmRaised;
+
+    post: self.alarmRaised = false;
+    post: self.alarmRaisedAt = 0.0;
+    post: self.alarmSilenced = false;
+    post: self.silenceStartedAt = 0.0;
+
+    modifies: self.alarmRaised,
+              self.alarmRaisedAt,
+              self.alarmSilenced,
+              self.silenceStartedAt;
+  }
+}
+
+// ─── 6. SENSOR DISCONNECT MONITOR COMPONENT ────────────────────────────
+kind SensorDisconnectMonitor {
+  identity: monitorId;
+  property monitorId: String;
+  property disconnectThresholdSeconds: Real;
+  property disconnectAlarmRaised: Boolean;
+  property lastSignalTimestamp: Real;
+
+  invariants {
+    self.monitorId <> null;
+    self.disconnectThresholdSeconds = 5.0;
+    self.lastSignalTimestamp >= 0.0;
+  }
+
+  event updateLastSignal(timestamp: Real) {
+    pre: timestamp >= 0.0;
+    pre: timestamp >= self.lastSignalTimestamp;
+
+    post: self.lastSignalTimestamp = timestamp;
+
+    modifies: self.lastSignalTimestamp;
+  }
+
+  event checkForDisconnect(currentTime: Real): Boolean
+    refines patient_monitoring_requirements::VitalSignMonitorSystem.sensorDisconnectDetected,
+            patient_monitoring_discovery::SensorDisconnectCommitment {
+    pre: currentTime >= 0.0;
+    pre: not self.disconnectAlarmRaised;
+
+    post: if (currentTime - self.lastSignalTimestamp) > self.disconnectThresholdSeconds then
+            self.disconnectAlarmRaised = true
+            and result = true
+          else
+            self.disconnectAlarmRaised = false
+            and result = false
+          endif;
+
+    modifies: self.disconnectAlarmRaised;
+  }
+
+  event clearDisconnectAlarm() {
+    pre: self.disconnectAlarmRaised;
+
+    post: self.disconnectAlarmRaised = false;
+
+    modifies: self.disconnectAlarmRaised;
+  }
+}
+
+// ─── 7. CLOCK/TIMER COMPONENT ──────────────────────────────────────────
+kind Clock {
+  identity: clockId;
+  property clockId: String;
+  property currentTime: Real;
+  property tickIntervalMs: Real;
+
+  invariants {
+    self.clockId <> null;
+    self.currentTime >= 0.0;
+    self.tickIntervalMs >= 1.0;
+    self.tickIntervalMs <= 1000.0;
+  }
+
+  event tick(): Real {
+    pre: self.currentTime >= 0.0;
+
+    post: self.currentTime = self.currentTime@pre + (self.tickIntervalMs / 1000.0);
+    post: result = self.currentTime;
+
+    modifies: self.currentTime;
+  }
+
+  event getCurrentTime(): Real {
+    post: result = self.currentTime;
+  }
+}
+
+// ─── 8. AUDIBLE ALERT COMPONENT ────────────────────────────────────────
+kind AudibleAlert {
+  identity: alertId;
+  property alertId: String;
+  property isAudible: Boolean;
+  property alertType: String;
+
+  invariants {
+    self.alertId <> null;
+    self.alertType = 'threshold' or self.alertType = 'disconnect';
+  }
+
+  event soundAlarm(alertType: String)
+    refines patient_monitoring_requirements::VitalSignMonitorSystem.deliverReading {
+    pre: not self.isAudible;
+    pre: alertType = 'threshold' or alertType = 'disconnect';
+
+    post: self.isAudible = true;
+    post: self.alertType = alertType;
+
+    modifies: self.isAudible, self.alertType;
+  }
+
+  event silenceAlert() {
+    pre: self.isAudible;
+
+    post: self.isAudible = false;
+
+    modifies: self.isAudible;
+  }
+}
+
+// ─── 9. RELATORS (INTERFACES BETWEEN COMPONENTS) ───────────────────────
+relator SensorToPlausibilityChannel mediates (EcgSensor, PlausibilityChecker) {
+  identity: channelId;
+  property channelId: String;
+  property lastTransferredValue: Real;
+  property lastTransferTimestamp: Real;
+  property transferSucceeded: Boolean;
+
+  invariants {
+    self.channelId <> null;
+    self.lastTransferTimestamp >= 0.0;
+  }
+
+  event transferReading(value: Real, timestamp: Real): Boolean
+    refines patient_monitoring_requirements::VitalSignMonitorSystem.deliverReading {
+    pre: value >= 0.0;
+    pre: timestamp >= 0.0;
+
+    post: self.lastTransferredValue = value;
+    post: self.lastTransferTimestamp = timestamp;
+    post: self.transferSucceeded = true;
+    post: result = true;
+
+    modifies: self.lastTransferredValue,
+              self.lastTransferTimestamp,
+              self.transferSucceeded;
+  }
+}
+
+relator PlausibilityToDisplayChannel mediates (PlausibilityChecker, Display) {
+  identity: channelId;
+  property channelId: String;
+  property lastDisplayedValue: Real;
+  property displayRequested: Boolean;
+
+  invariants {
+    self.channelId <> null;
+  }
+
+  event requestDisplay(value: Real): Boolean {
+    pre: value >= 20.0;
+    pre: value <= 250.0;
+
+    post: self.lastDisplayedValue = value;
+    post: self.displayRequested = true;
+    post: result = true;
+
+    modifies: self.lastDisplayedValue, self.displayRequested;
+  }
+}
+
+relator PlausibilityToThresholdChannel mediates (PlausibilityChecker, ThresholdComparator) {
+  identity: channelId;
+  property channelId: String;
+  property lastComparedValue: Real;
+  property comparisonRequested: Boolean;
+
+  invariants {
+    self.channelId <> null;
+  }
+
+  event requestComparison(value: Real): Boolean {
+    pre: value >= 20.0;
+    pre: value <= 250.0;
+
+    post: self.lastComparedValue = value;
+    post: self.comparisonRequested = true;
+    post: result = true;
+
+    modifies: self.lastComparedValue, self.comparisonRequested;
+  }
+}
+
+relator ThresholdToAlarmChannel mediates (ThresholdComparator, AlarmManager) {
+  identity: channelId;
+  property channelId: String;
+  property lastCrossingValue: Real;
+  property alarmTriggered: Boolean;
+
+  invariants {
+    self.channelId <> null;
+  }
+
+  event triggerAlarm(value: Real, timestamp: Real): Boolean
+    refines patient_monitoring_requirements::VitalSignMonitorSystem.deliverReading {
+    pre: timestamp >= 0.0;
+
+    post: self.lastCrossingValue = value;
+    post: self.alarmTriggered = true;
+    post: result = true;
+
+    modifies: self.lastCrossingValue, self.alarmTriggered;
+  }
+}
+
+relator DisconnectToAlarmChannel mediates (SensorDisconnectMonitor, AlarmManager) {
+  identity: channelId;
+  property channelId: String;
+  property disconnectAlarmTriggered: Boolean;
+
+  invariants {
+    self.channelId <> null;
+  }
+
+  event triggerDisconnectAlarm(timestamp: Real): Boolean {
+    pre: timestamp >= 0.0;
+
+    post: self.disconnectAlarmTriggered = true;
+    post: result = true;
+
+    modifies: self.disconnectAlarmTriggered;
+  }
+}
+
+relator AlarmToAudibleChannel mediates (AlarmManager, AudibleAlert) {
+  identity: channelId;
+  property channelId: String;
+  property lastAlertType: String;
+  property soundRequested: Boolean;
+
+  invariants {
+    self.channelId <> null;
+  }
+
+  event requestAlertSound(alertType: String): Boolean {
+    pre: alertType = 'threshold' or alertType = 'disconnect';
+
+    post: self.lastAlertType = alertType;
+    post: self.soundRequested = true;
+    post: result = true;
+
+    modifies: self.lastAlertType, self.soundRequested;
+  }
+}
+
+// ─── 10. ROLES (ENDPOINTS FOR RELATORS) ────────────────────────────────
+role SensorEndpoint mediated-by SensorToPlausibilityChannel of EcgSensor {
+  property lastRawReading: Real;
+  property lastReadingTimestamp: Real;
+  property isConnected: Boolean;
+}
+role PlausibilityInputEndpoint mediated-by SensorToPlausibilityChannel of PlausibilityChecker {
+  property plausibleMin: Real;
+  property plausibleMax: Real;
+}
+role PlausibilityOutputEndpoint mediated-by PlausibilityToDisplayChannel of PlausibilityChecker {
+  property plausibleMin: Real;
+  property plausibleMax: Real;
+}
+role DisplayInputEndpoint mediated-by PlausibilityToDisplayChannel of Display {
+  property displayValue: Real;
+}
+role PlausibilityOutputForThreshold mediated-by PlausibilityToThresholdChannel of PlausibilityChecker {
+  property plausibleMin: Real;
+  property plausibleMax: Real;
+}
+role ThresholdInputEndpoint mediated-by PlausibilityToThresholdChannel of ThresholdComparator {
+  property lowThreshold: Real;
+  property highThreshold: Real;
+}
+role ThresholdOutputEndpoint mediated-by ThresholdToAlarmChannel of ThresholdComparator {
+  property isCrossed: Boolean;
+}
+role AlarmInputEndpoint mediated-by ThresholdToAlarmChannel of AlarmManager {
+  property alarmRaised: Boolean;
+}
+role DisconnectMonitorOutputEndpoint mediated-by DisconnectToAlarmChannel of SensorDisconnectMonitor {
+  property disconnectAlarmRaised: Boolean;
+}
+role DisconnectAlarmInputEndpoint mediated-by DisconnectToAlarmChannel of AlarmManager {
+  property alarmRaised: Boolean;
+}
+role AlarmOutputEndpoint mediated-by AlarmToAudibleChannel of AlarmManager {
+  property alarmRaised: Boolean;
+  property alarmSilenced: Boolean;
+}
+role AudibleInputEndpoint mediated-by AlarmToAudibleChannel of AudibleAlert {
+  property isAudible: Boolean;
+  property alertType: String;
+}
+
+// ─── 11. HAPPENINGS (END-TO-END DATA FLOW) ─────────────────────────────
+happening VitalSignDataFlow {
+  identity: flowId;
+  property flowId: String;
+  property stepSequence: String;
+
+  invariants {
+    self.flowId <> null;
+    self.stepSequence = 'SENSOR_READS -> PLAUSIBILITY_CHECK -> DISPLAY_PLAUSIBLE -> THRESHOLD_COMPARISON -> ALARM_CHECK -> ALARM_SOUND -> CLOCK_TICK -> AUTO_REARM_CHECK -> SENSOR_DISCONNECT_CHECK';
+  }
+}
+happening SensorReadStep {
+  identity: stepId;
+  property stepId: String;
+  property timestamp: Real;
+  property rawValue: Real;
+}
+happening PlausibilityCheckStep {
+  identity: stepId;
+  property stepId: String;
+  property rawValue: Real;
+  property isPlausible: Boolean;
+}
+happening DisplayUpdateStep {
+  identity: stepId;
+  property stepId: String;
+  property displayValue: Real;
+}
+happening ThresholdCheckStep {
+  identity: stepId;
+  property stepId: String;
+  property comparedValue: Real;
+  property thresholdCrossed: Boolean;
+}
+happening AlarmRaiseStep {
+  identity: stepId;
+  property stepId: String;
+  property alarmTimestamp: Real;
+  property latencySeconds: Real;
+}
+happening AutoRearmStep {
+  identity: stepId;
+  property stepId: String;
+  property rearmTime: Real;
+}
+happening SensorDisconnectStep {
+  identity: stepId;
+  property stepId: String;
+  property signalLostDuration: Real;
+}
+
+// ─── 12. EXPLICIT MEDIATION RELATIONS ──────────────────────────────────
+relation sensorChannelMediation: <<mediation>> from SensorToPlausibilityChannel [1] to EcgSensor [1];
+relation plausibilityDisplayMediation: <<mediation>> from PlausibilityToDisplayChannel [1] to PlausibilityChecker [1];
+relation plausibilityThresholdMediation: <<mediation>> from PlausibilityToThresholdChannel [1] to PlausibilityChecker [1];
+relation thresholdAlarmMediation: <<mediation>> from ThresholdToAlarmChannel [1] to ThresholdComparator [1];
+relation disconnectAlarmMediation: <<mediation>> from DisconnectToAlarmChannel [1] to SensorDisconnectMonitor [1];
+relation alarmAudibleMediation: <<mediation>> from AlarmToAudibleChannel [1] to AlarmManager [1];

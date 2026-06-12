@@ -1,0 +1,162 @@
+schema "onto/0.1";
+namespace chat_moderation_discovery;
+
+// ─── Glossary Terms (Sortals) ───────────────────────────────────────
+kind Message {
+  identity: messageId;
+  property messageId: String;
+  property senderId: String;
+  property recipientId: String;
+  property messageBody: String;
+  property riskLevel: String; // 'low' | 'high' | 'pending'
+  invariants {
+    self.messageId <> null;
+    self.messageBody <> null;
+  }
+}
+
+kind ModerationDecision {
+  identity: decisionId;
+  property decisionId: String;
+  property outcome: String; // 'allowed' | 'hidden'
+  property classifierConfidence: Real;
+  property thresholdUsed: Real;
+  property timestamp: String;
+  invariants {
+    self.decisionId <> null;
+    self.outcome = 'allowed' or self.outcome = 'hidden';
+    self.classifierConfidence >= 0.0;
+    self.classifierConfidence <= 1.0;
+    self.thresholdUsed >= 0.0;
+    self.thresholdUsed <= 1.0;
+    self.timestamp <> null;
+  }
+}
+
+kind Classifier {
+  identity: classifierId;
+  property classifierId: String;
+  property confidence: Real;
+  invariants {
+    self.classifierId <> null;
+    self.confidence >= 0.0;
+    self.confidence <= 1.0;
+  }
+}
+
+// ─── Stakeholders (Agents) ──────────────────────────────────────────
+agent Sender {
+  identity: userId;
+  property userId: String;
+  property userName: String;
+  invariants {
+    self.userId <> null;
+  }
+}
+
+agent Recipient {
+  identity: userId;
+  property userId: String;
+  property userName: String;
+  invariants {
+    self.userId <> null;
+  }
+}
+
+agent Moderator {
+  identity: staffId;
+  property staffId: String;
+  property capacity: Integer; // concurrent review slots
+  invariants {
+    self.staffId <> null;
+  }
+}
+
+// Vendor/dev-team — debitor of all commitments
+agent ModerationVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+  }
+}
+
+// ─── Constraint Goals (Categories) ──────────────────────────────────
+// GOAL-1: High-confidence hide
+category HighConfidenceHideConstraints where bearer: Message {
+  invariants {
+    // Placeholder: the REQUIREMENTS-stage system kind will specialize
+    // this category and inherit the constraint.
+    true;
+  }
+}
+
+// GOAL-2: Decision recording
+category DecisionRecordingConstraints where bearer: ModerationDecision {
+  invariants {
+    bearer.outcome = 'allowed' or bearer.outcome = 'hidden';
+    bearer.classifierConfidence >= 0.0;
+    bearer.classifierConfidence <= 1.0;
+  }
+}
+
+// GOAL-4: Sender-recipient asymmetry (message state semantics)
+category PendingReviewConstraints where bearer: Message {
+  invariants {
+    true;
+  }
+}
+
+// ─── Hard Goals (Commitments) ───────────────────────────────────────
+// NOTE: Predicate properties defined here MUST match properties on the
+// Requirements-stage system kind for the discharge proof to be meaningful.
+// See S36 hint below.
+
+commitment HighConfidenceHide
+  debitor: ModerationVendor
+  creditor: Recipient {
+  identity: commitmentId;
+  property commitmentId: String;
+  predicate: true; // Discharge proven by Requirements event post-condition
+                   // that ensures messages with confidence >= 0.95 are hidden
+}
+
+commitment DecisionRecording
+  debitor: ModerationVendor
+  creditor: Sender {
+  identity: commitmentId;
+  property commitmentId: String;
+  predicate: true; // Discharge proven by Requirements event that records
+                   // every decision with outcome, confidence, threshold, timestamp
+}
+
+commitment PendingReviewSLA
+  debitor: ModerationVendor
+  creditor: Moderator {
+  identity: commitmentId;
+  property commitmentId: String;
+  property p95ReviewHours: Real;
+  predicate: self.p95ReviewHours > 0.0 and self.p95ReviewHours <= 4.0;
+}
+
+// ─── Domain Stories (Happenings) — with identity ────────────────────
+happening MessageSubmissionFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String; // event that initiates
+  property outcome: String;     // end-state predicate
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+happening ModerateQueueFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}

@@ -1,0 +1,183 @@
+schema "onto/0.1";
+namespace library_system_discovery;
+
+// ─── Stakeholders ───────────────────────────────────────────────────
+agent BorrowerAgent {
+  identity: borrowerId;
+  property borrowerId: String;
+  property name: String;
+  property email: String;
+  property outstandingFees: Real;
+  invariants {
+    self.borrowerId <> null;
+    self.name <> null;
+    self.email <> null;
+    self.outstandingFees >= 0.0;
+  }
+}
+
+agent LibrarianAgent {
+  identity: librarianId;
+  property librarianId: String;
+  property name: String;
+  property librarianRole: String;
+  invariants {
+    self.librarianId <> null;
+    self.name <> null;
+  }
+}
+
+// The vendor/dev team — debitor of all stakeholder commitments
+agent LibraryVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+    self.name <> null;
+  }
+}
+
+// ─── Glossary Terms (Sortals) ──────────────────────────────────────
+kind BookCopy {
+  identity: copyId;
+  property copyId: String;
+  property title: String;
+  property isbn: String;
+  property copyStatus: String;  // AVAILABLE, LOANED, RESERVED
+  invariants {
+    self.copyId <> null;
+    self.title <> null;
+    self.copyStatus <> null;
+    self.copyStatus = 'AVAILABLE' or self.copyStatus = 'LOANED' or self.copyStatus = 'RESERVED';
+  }
+}
+
+kind LoanRecord {
+  identity: loanId;
+  property loanId: String;
+  property copyId: String;
+  property borrowerId: String;
+  property startDate: String;   // ISO date
+  property dueDate: String;     // ISO date
+  property returnDate: String;  // ISO date, null while active
+  property lateFee: Real;
+  invariants {
+    self.loanId <> null;
+    self.copyId <> null;
+    self.borrowerId <> null;
+    self.startDate <> null;
+    self.dueDate <> null;
+    self.lateFee >= 0.0;
+  }
+}
+
+kind ReservationEntry {
+  identity: reservationId;
+  property reservationId: String;
+  property copyId: String;
+  property borrowerId: String;
+  property placedDate: String;         // when reservation was placed
+  property availableSinceDate: String; // when copy became available for pickup
+  property reservationStatus: String;             // ACTIVE, EXPIRED, FULFILLED
+  invariants {
+    self.reservationId <> null;
+    self.copyId <> null;
+    self.borrowerId <> null;
+    self.placedDate <> null;
+    self.reservationStatus = 'ACTIVE' or self.reservationStatus = 'EXPIRED' or self.reservationStatus = 'FULFILLED';
+  }
+}
+
+// ─── Hard Goals as Commitments ──────────────────────────────────────
+// GOAL-1: Mutually-exclusive copy state
+commitment MutualExclusiveCopyStateCommitment
+  debitor: LibraryVendor
+  creditor: BorrowerAgent {
+  identity: commitmentId;
+  property commitmentId: String;
+  property maxActiveStates: Integer;
+  predicate: self.maxActiveStates = 1;
+}
+
+// GOAL-2: Block loans for indebted borrowers
+commitment BlockIndebtedLoansCommitment
+  debitor: LibraryVendor
+  creditor: BorrowerAgent {
+  identity: commitmentId;
+  property commitmentId: String;
+  property maxOutstandingFees: Real;
+  predicate: self.maxOutstandingFees = 0.0;
+}
+
+// GOAL-3: Expire stale reservations at 7 days
+commitment ExpireStaleReservationsCommitment
+  debitor: LibraryVendor
+  creditor: BorrowerAgent {
+  identity: commitmentId;
+  property commitmentId: String;
+  property maxWaitDays: Integer;
+  predicate: self.maxWaitDays = 7;
+}
+
+// GOAL-4: Track late fees accurately
+commitment TrackLateFeesCommitment
+  debitor: LibraryVendor
+  creditor: BorrowerAgent {
+  identity: commitmentId;
+  property commitmentId: String;
+  property dailyRate: Real;
+  predicate: self.dailyRate > 0.0;
+}
+
+// ─── Constraint Goals as Categories (member-quantified) ────────────
+// No copy is in two states simultaneously; every state transition is recorded
+category StateMutualExclusion where bearer: BookCopy {
+  invariants {
+    bearer.copyStatus = 'AVAILABLE' or bearer.copyStatus = 'LOANED' or bearer.copyStatus = 'RESERVED';
+  }
+}
+
+// Loan request rejected when borrower's outstanding fees > 0
+category BorrowerDebtConstraint where bearer: BorrowerAgent {
+  invariants {
+    bearer.outstandingFees >= 0.0;
+  }
+}
+
+// ─── Domain Stories (Flows) ─────────────────────────────────────────
+happening LoanFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;    // request event
+  property outcome: String;        // loan created or rejected
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}
+
+happening ReservationFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;    // place reservation event
+  property outcome: String;        // reservation placed or expired
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}
+
+happening ReturnFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;    // return event
+  property outcome: String;        // copy available, reserved, or accrued late fee
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}

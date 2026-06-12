@@ -1,0 +1,83 @@
+schema "onto/0.1";
+namespace online_banking_requirements;
+import "./discovery.onto";
+
+kind BankingTransactionSystem
+  specializes AtomicTransferConstraints,
+              NoOverdraftConstraints,
+              AuditTrailConstraints {
+
+  identity: systemId;
+  property systemId: String;
+  property maxAtomicLatencyMs: Real;
+  property minSourceBalanceCents: Real;
+  property journalRetentionDays: Integer;
+  property maxPendingSec: Real;
+  property isOperational: Boolean;
+
+  invariants {
+    self.systemId <> null;
+    self.maxAtomicLatencyMs >= 0.0;
+    self.minSourceBalanceCents >= 0.0;
+    self.journalRetentionDays > 0;
+    self.maxPendingSec > 0.0;
+    self.maxPendingSec <= 30.0;
+  }
+
+  event initiateTransfer(srcId: String, dstId: String, amt: Real): String
+    refines online_banking_discovery::NoOverdraftCommitment,
+            online_banking_discovery::AtomicTransferCommitment {
+    pre: self.isOperational = true;
+    pre: srcId <> null;
+    pre: dstId <> null;
+    pre: srcId <> dstId;
+    pre: amt > 0.0;
+    pre: amt <= self.minSourceBalanceCents;
+    post: result <> null;
+    post: self.minSourceBalanceCents = self.minSourceBalanceCents@pre - amt;
+    post: self.maxAtomicLatencyMs = self.maxAtomicLatencyMs@pre;
+    post: self.maxPendingSec = self.maxPendingSec@pre;
+    modifies: self.minSourceBalanceCents;
+  }
+
+  event createJournalEntry(tfrId: String, srcId: String, dstId: String, amt: Real): String
+    refines online_banking_discovery::AuditJournalCommitment {
+    pre: tfrId <> null;
+    pre: srcId <> null;
+    pre: dstId <> null;
+    pre: amt > 0.0;
+    post: result <> null;
+    post: self.journalRetentionDays = self.journalRetentionDays@pre;
+    modifies: self.journalRetentionDays;
+  }
+
+  event recoverPendingTransfer(entryId: String): String
+    refines online_banking_discovery::AtomicTransferCommitment {
+    pre: entryId <> null;
+    post: result <> null;
+    post: self.maxAtomicLatencyMs = self.maxAtomicLatencyMs@pre;
+    modifies: self.maxAtomicLatencyMs;
+  }
+
+  event resolvePendingTransfer(timeoutSec: Real): String
+    refines online_banking_discovery::BoundedLatencyCommitment {
+    pre: timeoutSec > 0.0;
+    pre: timeoutSec <= self.maxPendingSec;
+    post: result <> null;
+    post: self.maxPendingSec = self.maxPendingSec@pre;
+    modifies: self.maxPendingSec;
+  }
+
+  event notifyCustomer(tfrId: String, ok: Boolean): Boolean
+    refines online_banking_discovery::AuditJournalCommitment {
+    pre: tfrId <> null;
+    post: result = true;
+    modifies: self.isOperational;
+  }
+
+  event healthCheck() {
+    pre: true;
+    post: self.isOperational = true;
+    modifies: self.isOperational;
+  }
+}

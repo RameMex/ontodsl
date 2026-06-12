@@ -1,0 +1,232 @@
+schema "onto/0.1";
+namespace traffic_light_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =====================================================================
+// Formalization — Intersection Traffic Light Controller
+//
+// What the WORLD imposes on the system:
+//   1. Regulatory / standards anchors (ITE, MUTCD, NEMA TS-2) as
+//      categories with documentary invariants.
+//   2. Active business rules as rejection / guard events on a
+//      formalized subkind of TrafficLightControllerSystem.
+//   3. Passive assumptions as a FormalAssumptionRecord kind.
+//   4. Physical / domain-logical invariants as member-quantified
+//      categories.
+//
+// Does NOT re-declare any kind, happening, or commitment from
+// upstream stages — imports and extends only.
+// =====================================================================
+
+// ─── 1. Regulatory / Standards Anchors ───────────────────────────────
+
+// MUTCD (Manual on Uniform Traffic Control Devices) governs all
+// traffic signal installations in the United States and is adopted
+// by many jurisdictions worldwide.
+category MutcdCompliant {
+  property mutcdEdition: String;
+  property sectionReference: String;
+  // Documentary — governs the project; not a runtime enforcement.
+  invariants {
+    self.mutcdEdition <> null;
+    self.sectionReference <> null;
+  }
+}
+
+// NEMA TS-2 / ITE Pedestrian signal timing standard.
+// Requires minimum yellow change interval of 3 s (MUTCD 4D.26) and
+// minimum all-red clearance interval (MUTCD 4D.27).
+category NemaTs2Compliant {
+  property standardVersion: String;
+  property minimumYellowChangeIntervalSeconds: Real;
+  property minimumAllRedClearanceSeconds: Real;
+  invariants {
+    self.standardVersion <> null;
+    self.minimumYellowChangeIntervalSeconds >= 3.0;
+    self.minimumAllRedClearanceSeconds >= 0.0;
+  }
+}
+
+// IEC 61508 SIL-2 — functional safety for road-traffic control
+// equipment.  The controller must hold a SIL-2 assessment because
+// a failure can directly endanger human life (vehicle collision).
+category Iec61508Sil2 {
+  property safetyIntegrityLevel: Integer;
+  property assessmentBodyName: String;
+  property safetyManualReference: String;
+  invariants {
+    self.safetyIntegrityLevel = 2;
+    self.assessmentBodyName <> null;
+    self.safetyManualReference <> null;
+  }
+}
+
+// ADA / Section 504 Accessibility — accessible pedestrian signals (APS)
+// must comply with PROWAG R209 requiring audible and tactile outputs.
+category AdaAccessiblePedestrianSignal {
+  property prowagSection: String;
+  property audibleOutputProvided: Boolean;
+  property tactileOutputProvided: Boolean;
+  invariants {
+    self.prowagSection <> null;
+    self.audibleOutputProvided = true;
+    self.tactileOutputProvided = true;
+  }
+}
+
+// ─── 2. Physical / Domain-Logical Member-Quantified Categories ───────
+
+// Physical plausibility for yellow-interval durations: any bearer that
+// represents a timed yellow interval must have a duration in [3, 120] s.
+// Durations outside this range indicate sensor fault or configuration
+// error — not a valid traffic-engineering value.
+category PhysicallyPlausibleYellowDuration where bearer: YellowInterval {
+  invariants {
+    bearer.durationSeconds >= 3.0;
+    bearer.durationSeconds <= 120.0;
+  }
+}
+
+// Physical plausibility for preemption events: response time must be
+// strictly positive and no greater than 1 second.
+category PhysicallyPlausiblePreemptionTiming where bearer: PreemptionEvent {
+  invariants {
+    bearer.responseTimeSeconds > 0.0;
+    bearer.responseTimeSeconds <= 1.0;
+  }
+}
+
+// Domain-logical plausibility for a phase: a phase must have at least
+// one GREEN approach and its green / red approach sets must not overlap.
+// (The bearer kind is Phase from discovery.)
+category DomainPlausiblePhase where bearer: Phase {
+  invariants {
+    bearer.configuredDurationSeconds > 0.0;
+    bearer.greenApproaches->notEmpty();
+  }
+}
+
+// ─── 3. Passive Assumptions ──────────────────────────────────────────
+
+// FormalAssumptionRecord documents the environmental / operational
+// assumptions the formalization relies upon.  These are NOT enforced
+// at runtime; they are traceability anchors that link to project
+// acceptance criteria and safety cases.
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property title: String;
+  property rationale: String;
+  property mitigationIfViolated: String;
+  invariants {
+    self.assumptionId <> null;
+    self.title <> null;
+    self.rationale <> null;
+  }
+}
+
+// @assumption ASSUME-1: The hardware clock feeding clockTick is
+//   accurate to within ±50 ms per second.  If violated, yellow-
+//   interval timing may fall below the 3 s minimum; a watchdog
+//   timer at the hardware layer is the mitigation.
+
+// @assumption ASSUME-2: The preemption sensor has a maximum detection
+//   latency of 200 ms.  Combined with the controller's 800 ms
+//   software response budget this keeps total latency <= 1 s.
+
+// @assumption ASSUME-3: Exactly two conflicting approach axes exist
+//   (NS and EW).  Multi-leg intersections (T-intersections, 5-way)
+//   require a separate model extension and are out of scope.
+
+// @assumption ASSUME-4: Power failure causes all signal heads to enter
+//   a flashing-RED state through a hardware fail-safe circuit, not
+//   through this software model.  The software model assumes continuous
+//   power supply.
+
+// ─── 4. Active Business Rules — Formalized Subkind ───────────────────
+
+// TrafficLightControllerSystemFormalized ADDS rejection / guard events
+// that disambiguate the Requirements contracts against regulatory and
+// physical constraints.  It does NOT re-declare or override any event
+// from the parent kind.
+
+subkind TrafficLightControllerSystemFormalized
+    specializes TrafficLightControllerSystem {
+
+  // ── BR-1: Reject direct GREEN-to-RED transition (MUTCD 4D.26) ────
+  // The MUTCD prohibits a signal head from jumping from GREEN directly
+  // to RED without an intervening YELLOW change interval.  This guard
+  // fires when a caller attempts to set an axis RED while it is still
+  // GREEN — the operation is rejected; no state changes occur.
+  event rejectDirectGreenToRed(axis: String)
+    refines traffic_light_discovery::YellowIntervalCommitment {
+    pre: (axis = 'NS' or axis = 'EW');
+    pre: (axis = 'NS') implies (self.nsSignalState = 'GREEN');
+    pre: (axis = 'EW') implies (self.ewSignalState = 'GREEN');
+  }
+
+  // ── BR-2: Reject premature YELLOW-to-RED transition ──────────────
+  // endYellowGoRed is gated in Requirements by elapsedYellowSeconds >=
+  // minimumYellowSeconds.  This rule makes the rejection explicit as a
+  // named business-rule event so it appears in safety-case traceability
+  // and in generated audit logs.
+  event rejectPrematureYellowToRed(axis: String, elapsedSeconds: Real)
+    refines traffic_light_discovery::YellowIntervalCommitment {
+    pre: (axis = 'NS' or axis = 'EW');
+    pre: (axis = 'NS') implies (self.nsSignalState = 'YELLOW');
+    pre: (axis = 'EW') implies (self.ewSignalState = 'YELLOW');
+    pre: elapsedSeconds < self.minimumYellowSeconds;
+  }
+
+  // ── BR-3: Reject conflicting GREEN activation ─────────────────────
+  // Regulatory anchor: MUTCD Section 4D — no signal head serving a
+  // conflicting movement may display GREEN simultaneously.  This
+  // rejection guard fires before startPhase can create a conflict.
+  event rejectConflictingGreen(greenAxis: String)
+    refines traffic_light_discovery::MutualExclusionCommitment {
+    pre: (greenAxis = 'NS' or greenAxis = 'EW');
+    pre: (greenAxis = 'NS') implies (self.nsSignalState = 'GREEN');
+    pre: (greenAxis = 'EW') implies (self.ewSignalState = 'GREEN');
+    pre: self.preemptionActive = false;
+  }
+
+  // ── BR-4: Reject WALK activation when crossing axis is GREEN ─────
+  // ADA / PROWAG R209 + MUTCD 4E.08: a WALK signal must never be
+  // illuminated concurrently with a conflicting vehicular GREEN.
+  // This guard rejects activateWalk calls that would create such a
+  // conflict, providing an explicit traceability anchor for the ADA
+  // compliance argument.
+  event rejectUnsafeWalkActivation()
+    refines traffic_light_discovery::PedestrianWalkCommitment {
+    pre: self.pedestrianRequestPending = true;
+    pre: self.preemptionActive = false;
+    pre: (self.pedestrianRequestApproach = 'NS') implies (self.ewSignalState = 'GREEN');
+    pre: (self.pedestrianRequestApproach = 'EW') implies (self.nsSignalState = 'GREEN');
+  }
+
+  // ── BR-5: Reject late preemption response ────────────────────────
+  // IEC 61508 SIL-2 safety requirement: if the preemption sensor has
+  // been active and the requested responseTimeSeconds exceeds the
+  // maximum budget, the command is refused and a safety watchdog must
+  // take over.  This guard makes the over-budget case an explicit
+  // named event in the safety case.
+  event rejectLatePreemptionResponse(responseTimeSeconds: Real)
+    refines traffic_light_discovery::EmergencyPreemptionCommitment {
+    pre: self.preemptionActive = false;
+    pre: responseTimeSeconds > self.maxPreemptionResponseSeconds;
+  }
+
+  // ── BR-6: Reject phase start during active preemption ────────────
+  // Once preemption is active no normal phase transitions are allowed
+  // until clearPreemption has been called.  This rule is implicit in
+  // the Requirements pre-conditions but is promoted to a named event
+  // for regulatory audit-trail purposes (MUTCD 4D.29 — override
+  // control).
+  event rejectPhaseStartDuringPreemption(phaseId: String, greenAxis: String)
+    refines traffic_light_discovery::EmergencyPreemptionCommitment {
+    pre: self.preemptionActive = true;
+    pre: phaseId <> null;
+    pre: (greenAxis = 'NS' or greenAxis = 'EW');
+  }
+}

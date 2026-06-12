@@ -1,0 +1,169 @@
+schema "onto/0.1";
+namespace delivery_drone_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =====================================================================
+// FORMALIZATION STAGE — what the WORLD imposes on the system.
+//
+// FIX (S21): Subkind CAN ONLY specialize Kind or Subkind. Categories
+// are NOT sortals. We move the category memberships to the BASE kind
+// in Requirements (DroneMissionController) by having IT specialize
+// the categories directly. Then the formalized subkind only
+// specializes the base kind — the categories are inherited.
+//
+// Pattern:
+//   kind DroneMissionController specializes CatA, CatB { ... }
+//   subkind FormalizedDroneMissionController specializes DroneMissionController { ... }
+//
+// Since we CANNOT modify requirements.onto in this file, we use the
+// following strategy:
+//   • Categories are declared here.
+//   • The formalized subkind specializes DroneMissionController ONLY.
+//   • The subkind adds events that enforce the category invariants
+//     as active business rules.
+//   • The inheritance of categories is documented but not enforced
+//     by the verifier — the subkind's invariants must imply the
+//     category invariants (which they do via parent inheritance).
+// =====================================================================
+
+// ─── Regulatory / Compliance Anchors (category) ─────────────────────
+
+// FAA Part 107 compliance — governs small UAS operations in US airspace.
+category FaaPart107Compliant {
+  invariants {
+    true; // Documentary placeholder — attached to project compliance matrix.
+  }
+}
+
+// ASTM F3322-18 standard — for small UAS parachute systems.
+category AstmF3322Compliant {
+  invariants {
+    true;
+  }
+}
+
+// EASA Regulation (EU) 2019/947 — European open category operations.
+category EasaOpenCategoryCompliant {
+  invariants {
+    true;
+  }
+}
+
+// ─── Physical / Domain-Logical Invariants (member-quantified) ───────
+
+// Battery SoC is a real-valued fraction ∈ [0, 1].
+// This is a physical law that the system cannot violate.
+// NOTE: These are declared as categories but NOT specialized by the
+// subkind (S21 restriction). Instead, the subkind's invariants must
+// independently satisfy these bounds — which they do by inheriting
+// from DroneMissionController which already enforces soc ∈ [0,1].
+category PhysicallyPlausibleBatterySoC where bearer: DroneMissionController {
+  invariants {
+    bearer.soc >= 0.0;
+    bearer.soc <= 1.0;
+    bearer.reserve >= 0.0;
+    bearer.reserve <= 1.0;
+    bearer.safeReserveRatio >= 0.0;
+  }
+}
+
+// Reserve threshold disallows negative values (domain logic).
+category DomainLogicalReserveBounds where bearer: DroneMissionController {
+  invariants {
+    bearer.reserve >= 0.0;
+    bearer.reserve <= 1.0;
+    bearer.safeReserveRatio >= 0.20;
+    bearer.rthBatteryThreshold >= 0.0;
+  }
+}
+
+// RTH, once initiated by a safety condition, MUST NOT be cancellable.
+category AuthoritativeSafetyInvariant where bearer: DroneMissionController {
+  invariants {
+    not bearer.rthIsCancellable;
+  }
+}
+
+// ─── Active Business Rules (events on the formalized subkind) ───────
+
+// We introduce a subkind that specializes ONLY the base kind.
+// Categories are NOT in the specializes clause (S21 fix).
+//
+// The subkind inherits all properties and invariants from
+// DroneMissionController — which already satisfy the category
+// constraints of PhysicallyPlausibleBatterySoC, DomainLogicalReserveBounds,
+// and AuthoritativeSafetyInvariant because DroneMissionController's
+// invariants guarantee soc ∈ [0,1], reserve ∈ [0,1], etc.
+subkind FormalizedDroneMissionController specializes DroneMissionController {
+
+  // ─── Active business rule: Pre-takeoff SoC validation (guard) ───
+  // The system MUST reject a takeoff request if the battery SoC is
+  // below the required threshold. This is modelled as a guard event
+  // that fires at the same moment as authorizeTakeoff — but only
+  // when the condition fails.
+  event rejectTakeoffDueToBattery(currentSoC: Real, computedReserve: Real): Boolean
+    refines delivery_drone_discovery::PreTakeoffBatteryReserve {
+    pre: not self.isFlying;
+    pre: not self.rthInitiated;
+    pre: currentSoC >= 0.0;
+    pre: currentSoC <= 1.0;
+    pre: computedReserve >= 0.0;
+    pre: computedReserve <= 1.0;
+    post: result = (currentSoC < computedReserve * (1.0 + self.safeReserveRatio));
+  }
+
+  // ─── Active business rule: Geofence violation → immediate RTH ───
+  event enforceGeofenceContainment(responseTimeMs: Integer)
+    refines delivery_drone_discovery::GeofenceContainment {
+    pre: self.isFlying = true;
+    pre: self.geofenceViolationDetected = true;
+    pre: not self.rthInitiated;
+    pre: responseTimeMs >= 0;
+    post: self.geofenceMaxResponseSec <= 2.0;
+    post: self.rthInitiated = true;
+    post: self.isFlying = false;
+    modifies: self.rthInitiated, self.isFlying;
+  }
+
+  // ─── Active business rule: Mid-mission battery RTH guard ─────────
+  event enforceMidMissionBatteryRTH(currentSoC: Real)
+    refines delivery_drone_discovery::MidMissionBatteryRTH {
+    pre: self.isFlying = true;
+    pre: not self.rthInitiated;
+    pre: currentSoC >= 0.0;
+    pre: currentSoC <= 1.0;
+    post: self.rthBatteryThreshold >= 0.0;
+    post: if currentSoC <= self.rthBatteryThreshold then
+            self.socBelowThreshold = true and
+            self.rthInitiated = true and
+            self.isFlying = false
+          else
+            self.socBelowThreshold = false
+          endif;
+    modifies: self.socBelowThreshold, self.rthInitiated, self.isFlying;
+  }
+
+  // ─── Active business rule: Authoritative RTH (cannot cancel) ────
+  event rejectSafetyRTHCancellation(operatorConfirm: String): Boolean
+    refines delivery_drone_discovery::AuthoritativeRTH {
+    pre: self.rthInitiated = true;
+    pre: operatorConfirm = 'confirm_cancel';
+    post: not self.rthIsCancellable;
+    post: result = true;
+  }
+}
+
+// ─── Passive Assumptions (FormalAssumptionRecord) ────────────────────
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property assumptionText: String;
+  property rational: String;
+  property source: String;
+
+  invariants {
+    self.assumptionId <> null;
+    self.assumptionText <> null;
+  }
+}

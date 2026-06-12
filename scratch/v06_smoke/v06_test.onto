@@ -1,0 +1,35 @@
+schema "onto/0.1";
+namespace v06_test;
+
+category PhysicallyPlausibleReadings where bearer: SensorKind {
+  invariants {
+    bearer.minPlausible >= 0.0;
+    bearer.maxPlausible > bearer.minPlausible;
+    bearer.maxPlausible <= 1000.0;
+  }
+}
+
+// SensorKind is a member of PhysicallyPlausibleReadings.
+// Its invariants must entail the category's.
+kind SensorKind specializes PhysicallyPlausibleReadings {
+  identity: sid;
+  property sid: String;
+  property minPlausible: Real;
+  property maxPlausible: Real;
+  invariants {
+    self.minPlausible = 0.0;
+    self.maxPlausible = 1000.0;
+  }
+}
+
+// A second, VIOLATING member: maxPlausible can exceed 1000.0.
+kind BrokenSensor specializes PhysicallyPlausibleReadings {
+  identity: bid;
+  property bid: String;
+  property minPlausible: Real;
+  property maxPlausible: Real;
+  invariants {
+    self.minPlausible = 0.0;
+    self.maxPlausible = 10000.0;
+  }
+}

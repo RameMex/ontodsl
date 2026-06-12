@@ -1,0 +1,31 @@
+schema "onto/0.1";
+namespace rxocl_smoke;
+
+kind Counter {
+  identity: counterId;
+  property counterId: String;
+  property value: Integer;
+  property isLocked: Boolean;
+
+  invariants {
+    self.value >= 0;
+  }
+
+  trace {
+    always self.value >= 0;
+    eventually within 5 steps: self.isLocked = true;
+    next self.value = self.value + 1;
+  }
+
+  event increment() {
+    pre: self.isLocked = false;
+    post: self.value = self.value@pre + 1;
+    modifies: self.value;
+  }
+
+  event lock() {
+    pre: self.isLocked = false;
+    post: self.isLocked = true;
+    modifies: self.isLocked;
+  }
+}

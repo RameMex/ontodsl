@@ -1,0 +1,221 @@
+schema "onto/0.1";
+namespace engine_control_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =====================================================================
+// Stage 3 — Formalization (CORRECTED)
+// =====================================================================
+// The S21/S22 violations have been fixed:
+// - Categories are NOT parents of the subkind (only kind/subkind allowed).
+// - Instead, the subkind specializes ONLY the system kind.
+// - Category membership is expressed via invariants that REFERENCE
+//   the category's properties (the verifier checks category entailment).
+// - No property shadowing: the regulatory/documentation properties are
+//   declared ONCE on the subkind.
+// - Member-quantified categories: the sensor-kind category is attached
+//   via membership, not specialization — see below.
+// =====================================================================
+
+// ─── Regulatory Anchors (categories with documentary invariants) ─────
+
+// DO-178C DAL A — safety-critical avionics software.
+category Do178cDalACompliant {
+  property dalLevel: String;
+  property objectivesMet: Boolean;
+  invariants {
+    self.dalLevel = 'A';
+    self.objectivesMet = true;
+  }
+}
+
+// EASA CS-E (Certification Specifications for Engines).
+category CSEChapter5Compliant {
+  property csEChapter5Ref: String;
+  property overspeedPreventionMethod: String;
+  property overspeedTestCompleted: Boolean;
+  property reverserGroundOnlyVerified: Boolean;
+  invariants {
+    self.csEChapter5Ref <> null;
+    self.overspeedTestCompleted implies (self.overspeedPreventionMethod <> null);
+    self.reverserGroundOnlyVerified = true;
+  }
+}
+
+// ISO 26262 ASIL D — functional safety.
+category Iso26262AsilDCompliant {
+  property asilLevel: String;
+  property faultToleranceTimeIntervalMs: Integer;
+  invariants {
+    self.asilLevel = 'D';
+    self.faultToleranceTimeIntervalMs > 0;
+  }
+}
+
+
+// ─── Member-quantified physical/domain-logical invariants ────────
+// This category MUST be satisfied by any system kind that is a member.
+// Membership is established by the 'memberOf' relation below, NOT
+// by the subkind declaration.
+
+category PhysicallyPlausibleSensorReadings where bearer: SensorKindOrSimilar {
+  invariants {
+    bearer.minSpeed >= 0.0;
+    bearer.maxSpeed > bearer.minSpeed;
+    bearer.maxSpeed <= bearer.certifiedMaxSafeSpeed;
+  }
+}
+
+kind SensorKindOrSimilar {
+  identity: sensorKindId;
+  property sensorKindId: String;
+  property minSpeed: Real;
+  property maxSpeed: Real;
+  property certifiedMaxSafeSpeed: Real;
+  // Documentary membership in the category (must entail its invariants)
+  invariants {
+    self.sensorKindId <> null;
+    self.minSpeed >= 0.0;
+    self.maxSpeed > self.minSpeed;
+    self.maxSpeed <= self.certifiedMaxSafeSpeed;
+  }
+}
+
+// ─── Set membership: the formalized subkind is a member of the sensor category.
+// DO NOT redeclare as relation — this is just a note.
+// The category entailment is proven via the subkind's own invariants below.
+
+
+// ─── Active business rules — events on formalized subkind ────────────
+// The subkind specializes ONLY the system kind (not categories).
+// Category compliance is documented via properties and invariants
+// that the verifier checks against the category's own invariants.
+subkind EngineControlSystemFormalized specializes EngineControlSystem {
+  // ─ ─ regulatory documentation properties (declared once) ─ ─
+  property regulatoryDalLevel: String;      // Do178cDalACompliant
+  property regulatoryObjectivesMet: Boolean;
+  property regulatoryCSEChapter5Ref: String; // CSEChapter5Compliant
+  property regulatoryOverspeedMethod: String;
+  property regulatoryOverspeedTestDone: Boolean;
+  property regulatoryReverserVerified: Boolean;
+  property regulatoryAsilLevel: String;      // Iso26262AsilDCompliant
+  property regulatoryFaultToleranceMs: Integer;
+
+  // ─ ─ sensor-kind properties for PhysicallyPlausibleSensorReadings ─ ─
+  property regulatoryMinSpeed: Real;
+  property regulatoryMaxSpeed: Real;
+  property regulatoryCertifiedMaxSafeSpeed: Real;
+
+  invariants {
+    // Regulatory documentation (documentary — checks category entailment)
+    self.regulatoryDalLevel = 'A';
+    self.regulatoryObjectivesMet = true;
+    self.regulatoryCSEChapter5Ref <> null;
+    self.regulatoryOverspeedTestDone implies (self.regulatoryOverspeedMethod <> null);
+    self.regulatoryReverserVerified = true;
+    self.regulatoryAsilLevel = 'D';
+    self.regulatoryFaultToleranceMs > 0;
+
+    // Physical plausibility (must entail PhysicallyPlausibleSensorReadings)
+    self.regulatoryMinSpeed >= 0.0;
+    self.regulatoryMaxSpeed > self.regulatoryMinSpeed;
+    self.regulatoryMaxSpeed <= self.regulatoryCertifiedMaxSafeSpeed;
+  }
+
+
+  // ─ ─ Active business rules (new events, no override) ─ ─
+
+  // Active guard: reject overspeed when protection NOT fitted.
+  event rejectOverspeedWhenNoProtection() {
+    pre: self.overspeedDetected;
+    pre: not self.overspeedProtectionFitted;
+    post: self.fuelFlow <= self.fuelFlow@pre;
+    post: not self.reverserEnabled;
+    modifies: self.fuelFlow;
+  }
+
+  // Active guard: reject reverser deployment in air.
+  event rejectReverserInFlight() {
+    pre: self.onGround = false;
+    pre: self.reverserCommanded = true;
+    post: not self.reverserEnabled;
+    modifies: self.reverserEnabled;
+  }
+
+  // Active rule: on sensor fault, enforce modelled value substitution.
+  event enforceModelledValueSubstitution() {
+    pre: self.sensorFaultActive = true;
+    pre: not self.modelledValueInUse;
+    post: self.modelledValueInUse = true;
+    post: self.modelledValueAvailable = true;
+    modifies: self.modelledValueInUse, self.modelledValueAvailable;
+  }
+
+  // Active rule: disable continuous ignition if not commanded.
+  event guardContinuousIgnition() {
+    pre: not self.continuousIgnitionCommanded;
+    pre: self.continuousIgnitionEnabled;
+    post: not self.continuousIgnitionEnabled;
+    modifies: self.continuousIgnitionEnabled;
+  }
+
+  // Active rule: limit thrust to max safe on overspeed.
+  event limitThrustOnOverspeed() {
+    pre: self.overspeedDetected = true;
+    pre: self.thrustCommanded > 0.0;
+    post: self.thrustCommanded <= 0.0;
+    post: self.overspeedDetected = false;
+    modifies: self.thrustCommanded, self.overspeedDetected;
+  }
+}
+
+
+// ─── Passive Assumptions (documentary record) ────────────────────────
+// These are recorded during formalization but are NOT enforced at
+// runtime. They document what the world imposes.
+
+// @assumption ASSUME-N1: The engine's maximum safe speed is certified
+//   prior to system deployment and does not change.
+// @assumption ASSUME-N2: Single-sensor faults are isolated (no common
+//   cause failure model beyond Avionics of busses).
+// @assumption ASSUME-N3: The pilot's command for continuous ignition
+//   is always intentional (never inadvertent).
+// @assumption ASSUME-N4: The modelled value substituted on sensor
+//   fault has been validated against the physical plant model.
+
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property assumptionCode: String;
+  property description: String;
+  property owner: String;
+  property validated: Boolean;
+
+  invariants {
+    self.assumptionId <> null;
+    self.assumptionCode <> null;
+    self.description <> null;
+    self.owner <> null;
+  }
+}
+
+
+// ─── Glossary Disambiguation (subkinds) ─────────────────────────────
+// In the original discovery, the "ModelledValue" kind is ambiguous:
+// the formalization refines it into a digital twin estimator vs.
+// a physics-simulated value.
+subkind DigitalTwinEstimator specializes ModelledValue {
+  property estimatorType: String;
+  property updateRateHz: Integer;
+}
+subkind PhysicsSimulatedValue specializes ModelledValue {
+  property simulationLagMs: Integer;
+  property physicsModelVersion: String;
+}
+
+
+// ─── Set membership: the formalized subkind IS a member of the sensor category.
+// The verifier checks that EngineControlSystemFormalized.invariants
+// entail PhysicallyPlausibleSensorReadings.invariants.
+// This relation is documentary for the category membership.
+relation formalizedSensorMembership: <<memberOf>> from EngineControlSystemFormalized [1] to SensorKindOrSimilar [1];

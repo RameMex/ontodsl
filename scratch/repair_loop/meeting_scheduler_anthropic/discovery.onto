@@ -1,0 +1,246 @@
+schema "onto/0.1";
+namespace meeting_scheduler_discovery;
+
+// =====================================================================
+// Discovery — Meeting Scheduler
+//
+// Captures the problem space: who has stakes, what the world imposes,
+// what the system must achieve, and the domain vocabulary.
+//
+// Nothing here models the system kind itself — that belongs to
+// Requirements.  Stakeholders are agents; the vendor (debitor of every
+// commitment) is a separate agent.  Hard goals become commitments with
+// Z3-checkable predicates.  Constraint goals become categories.
+// Glossary terms become kinds.  The main flow becomes a happening.
+// =====================================================================
+
+// ─── Stakeholders ────────────────────────────────────────────────────
+
+agent Initiator {
+  identity: initiatorId;
+  property initiatorId: String;
+  property name: String;
+  property email: String;
+  invariants {
+    self.initiatorId <> null;
+    self.name <> null;
+  }
+}
+
+agent Participant {
+  identity: participantId;
+  property participantId: String;
+  property name: String;
+  property email: String;
+  invariants {
+    self.participantId <> null;
+    self.name <> null;
+  }
+}
+
+// The dev / product team that owes every commitment to stakeholders.
+// The system kind does not exist yet at Discovery; the vendor (the org
+// promising to build it) is the debitor.
+agent MeetingSchedulerVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+  }
+}
+
+// ─── Glossary Kinds ───────────────────────────────────────────────────
+// Each glossary term becomes a sortal kind that establishes the domain
+// vocabulary and identity lineage for Requirements.
+
+kind DateRange {
+  identity: rangeId;
+  property rangeId: String;
+  property earliest: String;   // ISO-8601 date string
+  property latest: String;     // ISO-8601 date string
+  invariants {
+    self.rangeId <> null;
+    self.earliest <> null;
+    self.latest <> null;
+  }
+}
+
+kind ExclusionSet {
+  identity: exclusionSetId;
+  property exclusionSetId: String;
+  property ownerId: String;
+  property excludedDates: Set<String>;
+  invariants {
+    self.exclusionSetId <> null;
+    self.ownerId <> null;
+  }
+}
+
+kind PreferenceSet {
+  identity: preferenceSetId;
+  property preferenceSetId: String;
+  property ownerId: String;
+  property preferredDates: Set<String>;
+  invariants {
+    self.preferenceSetId <> null;
+    self.ownerId <> null;
+  }
+}
+
+kind SchedulingRequest {
+  identity: requestId;
+  property requestId: String;
+  property initiatorId: String;
+  property dateRange: DateRange;
+  property status: String;   // 'OPEN' | 'CONFIRMED' | 'CONFLICT'
+  invariants {
+    self.requestId <> null;
+    self.initiatorId <> null;
+    self.dateRange <> null;
+    self.status <> null;
+  }
+}
+
+kind SchedulingOutcome {
+  identity: outcomeId;
+  property outcomeId: String;
+  property requestId: String;
+  property resolvedDate: String;   // ISO-8601 date, or empty on conflict
+  property isConflict: Boolean;
+  invariants {
+    self.outcomeId <> null;
+    self.requestId <> null;
+  }
+}
+
+// ─── Constraint Goals (categories) ────────────────────────────────────
+// Any system kind that handles scheduling must be a member of these
+// categories and thereby inherit the invariants.
+
+category ExclusionRespected {
+  // CONSTRAINT-1: a proposed date must never fall inside any
+  // participant's exclusion set.  The concrete check attaches to
+  // the system kind in Requirements once the bearer is defined.
+  invariants {
+    true;
+  }
+}
+
+category InitiatorAlwaysInformed {
+  // CONSTRAINT-2: the initiator must always receive the outcome,
+  // including the conflict case.  Documentary here; enforced as
+  // post-conditions on system events in Requirements.
+  invariants {
+    true;
+  }
+}
+
+// ─── Hard-Goal Commitments ────────────────────────────────────────────
+// Every commitment is FROM the vendor (debitor) TO a stakeholder
+// (creditor).  The predicate is a Z3-checkable Boolean OCL expression
+// that the Requirements stage must show is implied by some event's
+// post-condition.
+
+// GOAL-1: schedule a date inside the range and outside all exclusion sets,
+// favouring preference sets where present.
+commitment ScheduleFeasibleDateCommitment
+  debitor: MeetingSchedulerVendor
+  creditor: Initiator {
+    identity: commitmentId;
+    property commitmentId: String;
+    property minCandidateDates: Integer;
+    predicate: self.minCandidateDates > 0;
+  }
+
+// GOAL-2: when no common date exists, report the conflict to the initiator.
+commitment ConflictReportedCommitment
+  debitor: MeetingSchedulerVendor
+  creditor: Initiator {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxResponseHours: Real;
+    predicate: self.maxResponseHours > 0.0;
+  }
+
+// GOAL-3a: participants are notified on confirmation.
+commitment ParticipantNotificationCommitment
+  debitor: MeetingSchedulerVendor
+  creditor: Participant {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxNotificationDelayHours: Real;
+    predicate: self.maxNotificationDelayHours > 0.0;
+  }
+
+// GOAL-3b: updated constraints are accepted while the request is open.
+commitment ConstraintUpdateAcceptedCommitment
+  debitor: MeetingSchedulerVendor
+  creditor: Participant {
+    identity: commitmentId;
+    property commitmentId: String;
+    property minUpdatesAccepted: Integer;
+    predicate: self.minUpdatesAccepted > 0;
+  }
+
+// ─── Domain Stories (happenings) ──────────────────────────────────────
+// Each happening requires an identity declaration.  Sub-happenings are
+// described via string-labelled properties; full temporal ordering will
+// be expressed in Requirements once the system kind exists.
+
+happening SchedulingFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;   // 'Initiator submits a scheduling request'
+  property outcome: String;       // 'All participants notified of confirmed date, or conflict reported to initiator'
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}
+
+happening ConstraintCollectionStep {
+  identity: stepId;
+  property stepId: String;
+  property description: String;  // 'System collects exclusion and preference sets from each participant'
+  invariants {
+    self.stepId <> null;
+  }
+}
+
+happening DateProposalStep {
+  identity: stepId;
+  property stepId: String;
+  property description: String;  // 'System proposes a date inside the range, outside exclusions, favouring preferences'
+  invariants {
+    self.stepId <> null;
+  }
+}
+
+happening ConflictResolutionStep {
+  identity: stepId;
+  property stepId: String;
+  property description: String;  // 'System reports conflict to initiator when no common date exists'
+  invariants {
+    self.stepId <> null;
+  }
+}
+
+happening ConstraintUpdateStep {
+  identity: stepId;
+  property stepId: String;
+  property description: String;  // 'Participant submits updated constraints while request is OPEN'
+  invariants {
+    self.stepId <> null;
+  }
+}
+
+happening ConfirmationNotificationStep {
+  identity: stepId;
+  property stepId: String;
+  property description: String;  // 'All participants notified of confirmed date and location'
+  invariants {
+    self.stepId <> null;
+  }
+}

@@ -1,0 +1,113 @@
+schema "onto/0.1";
+namespace ardupilot_sensors;
+
+// BarometerInstance is a rigid sortal representing an individual barometer sensor.
+// It holds the state and properties specific to a single physical sensor unit.
+kind BarometerInstance {
+  identity: instanceId;
+
+  property instanceId: String;      // Unique identifier for this barometer instance
+  property pressure: Real;          // Current atmospheric pressure in Pascals (Pa)
+  property temperature: Real;       // Current temperature in Celsius (C)
+  property altitude: Real;          // Derived altitude in meters (m)
+  property climbRate: Real;         // Vertical velocity in meters per second (m/s)
+  property groundPressureRef: Real; // Ground pressure reference for altitude calculation (Pa)
+  property groundTempRef: Real;     // Ground temperature reference for altitude calculation (C)
+  property healthy: Boolean;        // Health status of this specific barometer
+
+  invariants {
+    self.instanceId <> null;
+    self.healthy implies self.pressure > 0.0; // Pressure must be positive when the sensor is healthy
+    self.pressure.isFinite();
+    self.temperature.isFinite();
+    self.altitude.isFinite();
+    self.climbRate.isFinite();
+    self.groundPressureRef.isFinite();
+    self.groundTempRef.isFinite();
+  }
+
+  // Event to set the health status of this barometer instance.
+  event set_healthy(isHealthy: Boolean) {
+    post: self.healthy = isHealthy;
+    modifies: self.healthy;
+  }
+
+  // Event to update the individual barometer's ground reference values.
+  // The actual values are computed internally by AP_Baro's logic.
+  event set_ground_reference(newPressure: Real, newTemperature: Real) {
+    pre: newPressure.isFinite();
+    pre: newPressure > 0.0;
+    pre: newTemperature.isFinite();
+    post: self.groundPressureRef = newPressure;
+    post: self.groundTempRef = newTemperature;
+    modifies: self.groundPressureRef, self.groundTempRef;
+  }
+
+  // Event to update all measured and derived values for this instance.
+  event update_measurements(newPressure: Real, newTemperature: Real, newAltitude: Real, newClimbRate: Real) {
+    pre: newPressure.isFinite();
+    pre: newPressure > 0.0;
+    pre: newTemperature.isFinite();
+    pre: newAltitude.isFinite();
+    pre: newClimbRate.isFinite();
+    post: self.pressure = newPressure;
+    post: self.temperature = newTemperature;
+    post: self.altitude = newAltitude;
+    post: self.climbRate = newClimbRate;
+    modifies: self.pressure, self.temperature, self.altitude, self.climbRate;
+  }
+}
+
+// AP_Baro is a rigid sortal representing the Barometer subsystem,
+// which manages an array of up to 3 BarometerInstance sensors.
+kind AP_Baro {
+  identity: controllerId;
+
+  property controllerId: String;                 // Unique identifier for this barometer controller
+  property barometers: Array<BarometerInstance, 3>; // Array holding up to 3 barometer instances
+  property activeCount: Integer;                 // The number of active/initialized barometers (1 to 3)
+  property primaryInstanceIndex: Integer;        // Index (0-2) of the primary barometer used for main altitude output
+
+  invariants {
+    self.controllerId <> null;
+    self.activeCount >= 1;                       // At least one barometer must be active
+    self.activeCount <= 3;                       // Maximum of three barometers
+    self.primaryInstanceIndex >= 0;
+    self.primaryInstanceIndex < self.activeCount; // Primary index must be within active range
+
+    // Each slot in the `barometers` array must contain a valid BarometerInstance.
+    // The `Array<T, N>` type ensures all N elements are always present and non-null.
+    self.barometers->forAll(b | b.instanceId <> null);
+
+    // Re-assert key health and finite-value invariants for all barometers managed by AP_Baro.
+    // These are already in BarometerInstance, but a top-level component may add more.
+    self.barometers->forAll(b | b.healthy implies b.pressure > 0.0);
+    self.barometers->forAll(b | b.temperature.isFinite());
+    self.barometers->forAll(b | b.altitude.isFinite());
+    self.barometers->forAll(b | b.climbRate.isFinite());
+  }
+
+  // Updates all active barometer instances by reading hardware and deriving values.
+  // The specific new values are determined by the internal logic of this event.
+  event update() {
+    // Post-conditions assert that after update, all active barometers'
+    // relevant properties are finite. The exact values are internal to C++.
+    post: self.barometers->forAll(b | b.pressure.isFinite() and
+                                     b.temperature.isFinite() and
+                                     b.altitude.isFinite() and
+                                     b.climbRate.isFinite());
+    // Modifies the state of the individual barometer instances within the array.
+    modifies: self.barometers;
+    effects: { HardwareRead, Telemetry };
+  }
+
+  // Calibrates all active barometer instances, setting their current
+  // pressure and temperature as ground reference values.
+  event calibrate() {
+    // Post-conditions ensure that the ground reference properties
+    // for all active barometers are now finite and consistent.
+    post: self.barometers->forAll(b | b.groundPressureRef.isFinite() and b.groundTempRef.isFinite());
+    modifies: self.barometers;
+    effects: { Telemetry };
+  }
+}

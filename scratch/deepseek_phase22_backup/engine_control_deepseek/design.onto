@@ -1,0 +1,452 @@
+schema "onto/0.1";
+namespace engine_control_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Design Stage — Engine Control System
+//
+// Decomposition into components:
+//   1. OverspeedMonitor       — monitors speed, detects overspeed
+//   2. FuelController         — controls fuel flow, cuts fuel on overspeed
+//   3. IgnitionController     — manages ignition (continuous mode)
+//   4. ThrustController       — manages thrust hold and reverser
+//   5. SensorFaultHandler     — detects faults, manages modelled values
+//   6. FlightPhaseManager     — tracks flight phase & ground state
+//   7. SensorFaultRelator     — mediates two distinct fault-relay endpoints
+//
+// Each component is a 'kind' (sibling, not subkind of system).
+// Interfaces are 'relator' kinds mediating two 'role' endpoints.
+// Data flows use 'happening'.
+//
+// Fixes from previous diagnostic:
+//   - Renamed identity property names to avoid 'phase' keyword clash
+//   - Replaced 'if not P then Q endif' (unary if) with 'if P then true else Q endif'
+//   - FaultSignalInterface now mediates two DISTINCT role kinds
+// =====================================================================
+
+// ─── Component: OverspeedMonitor ───────────────────────────────────────
+kind OverspeedMonitor {
+  identity: monitorId;
+  property monitorId: String;
+  property currentSpeed: Real;
+  property maxSafeSpeed: Real;
+  property overspeedActive: Boolean;
+  property overspeedProtectionFitted: Boolean;
+
+  invariants {
+    self.monitorId <> null;
+    self.maxSafeSpeed > 0.0;
+    self.currentSpeed >= 0.0;
+    self.overspeedActive implies (self.currentSpeed > self.maxSafeSpeed);
+  }
+
+  event checkOverspeed(speed: Real)
+    refines engine_control_requirements::EngineControlSystem.handleOverspeedProtection {
+    pre: speed >= 0.0;
+    post: self.currentSpeed = speed;
+    post: self.overspeedActive = (speed > self.maxSafeSpeed);
+    modifies: self.currentSpeed, self.overspeedActive;
+  }
+
+  event setProtectionFitted(fitted: Boolean) {
+    post: self.overspeedProtectionFitted = fitted;
+    modifies: self.overspeedProtectionFitted;
+  }
+
+  event clearOverspeed() {
+    pre: self.overspeedActive = true;
+    post: self.overspeedActive = false;
+    modifies: self.overspeedActive;
+  }
+}
+
+// ─── Component: FuelController ─────────────────────────────────────────
+kind FuelController {
+  identity: ctrlId;
+  property ctrlId: String;
+  property fuelFlowRate: Real;
+  property fuelCutThreshold: Real;
+  property fuelCutActive: Boolean;
+
+  invariants {
+    self.ctrlId <> null;
+    self.fuelFlowRate >= 0.0;
+    self.fuelCutThreshold > 0.0;
+    self.fuelCutActive implies self.fuelFlowRate <= self.fuelCutThreshold;
+  }
+
+  event setFuelFlow(rate: Real) {
+    pre: rate >= 0.0;
+    post: self.fuelFlowRate = rate;
+    post: self.fuelCutActive = false;
+    modifies: self.fuelFlowRate, self.fuelCutActive;
+  }
+
+  event cutFuelOnOverspeed()
+    refines engine_control_requirements::EngineControlSystem.handleOverspeedProtection {
+    pre: self.fuelFlowRate > self.fuelCutThreshold;
+    post: self.fuelFlowRate <= self.fuelCutThreshold;
+    post: self.fuelCutActive = true;
+    modifies: self.fuelFlowRate, self.fuelCutActive;
+  }
+
+  event clearFuelCut() {
+    pre: self.fuelCutActive = true;
+    post: self.fuelCutActive = false;
+    modifies: self.fuelCutActive;
+  }
+}
+
+// ─── Component: IgnitionController ─────────────────────────────────────
+kind IgnitionController {
+  identity: ignId;
+  property ignId: String;
+  property continuousIgnitionEnabled: Boolean;
+  property continuousIgnitionActive: Boolean;
+  property currentFlightPhase: String;
+
+  invariants {
+    self.ignId <> null;
+    self.continuousIgnitionActive implies (self.currentFlightPhase = 'TAKEOFF' or self.currentFlightPhase = 'LANDING');
+  }
+
+  event setContinuousIgnition(enabled: Boolean, flightPhase: String)
+    refines engine_control_requirements::EngineControlSystem.enableContinuousIgnition {
+    pre: enabled implies (flightPhase = 'TAKEOFF' or flightPhase = 'LANDING');
+    post: self.continuousIgnitionEnabled = enabled;
+    post: self.continuousIgnitionActive = enabled;
+    post: self.currentFlightPhase = flightPhase;
+    modifies: self.continuousIgnitionEnabled, self.continuousIgnitionActive,
+              self.currentFlightPhase;
+  }
+
+  event activateIgnition() {
+    pre: self.continuousIgnitionEnabled = true;
+    pre: not self.continuousIgnitionActive;
+    post: self.continuousIgnitionActive = true;
+    modifies: self.continuousIgnitionActive;
+  }
+
+  event deactivateIgnition() {
+    pre: self.continuousIgnitionActive = true;
+    post: self.continuousIgnitionActive = false;
+    modifies: self.continuousIgnitionActive;
+  }
+}
+
+// ─── Component: ThrustController ───────────────────────────────────────
+kind ThrustController {
+  identity: thrId;
+  property thrId: String;
+  property thrustCommanded: Real;
+  property thrustAchieved: Real;
+  property reverserEnabled: Boolean;
+  property isOnGround: Boolean;
+
+  invariants {
+    self.thrId <> null;
+    self.thrustCommanded >= 0.0;
+    self.thrustAchieved >= 0.0;
+    self.reverserEnabled implies self.isOnGround;
+  }
+
+  event applyThrust(command: Real)
+    refines engine_control_requirements::EngineControlSystem.applyThrust {
+    pre: command >= 0.0;
+    pre: not self.isOnGround;
+    post: self.thrustCommanded = command;
+    post: self.thrustAchieved = command;
+    modifies: self.thrustCommanded, self.thrustAchieved;
+  }
+
+  event applyGroundThrust(command: Real) {
+    pre: command >= 0.0;
+    pre: self.isOnGround;
+    post: self.thrustCommanded = command;
+    post: self.thrustAchieved = command;
+    modifies: self.thrustCommanded, self.thrustAchieved;
+  }
+
+  event setReverser(deploy: Boolean)
+    refines engine_control_requirements::EngineControlSystem.deployThrustReverser {
+    pre: deploy implies self.isOnGround = true;
+    post: self.reverserEnabled = deploy;
+    modifies: self.reverserEnabled;
+  }
+
+  event setGroundState(onGround: Boolean) {
+    post: self.isOnGround = onGround;
+    post: if onGround then true else self.reverserEnabled = false endif;
+    modifies: self.isOnGround, self.reverserEnabled;
+  }
+}
+
+// ─── Component: SensorFaultHandler ─────────────────────────────────────
+kind SensorFaultHandler {
+  identity: handlerId;
+  property handlerId: String;
+  property faultySensorCount: Integer;
+  property maxToleratedFaults: Integer;
+  property modelledValueAvailable: Boolean;
+  property sensorCount: Integer;
+  property lastFaultyId: String;
+  property lastModelledValue: Real;
+
+  invariants {
+    self.handlerId <> null;
+    self.faultySensorCount >= 0;
+    self.faultySensorCount <= self.sensorCount;
+    self.maxToleratedFaults >= 1;
+    self.modelledValueAvailable implies (self.lastModelledValue >= 0.0);
+  }
+
+  event handleFault(faultyId: String, modelledValue: Real)
+    refines engine_control_requirements::EngineControlSystem.handleSensorFault {
+    pre: self.faultySensorCount < self.maxToleratedFaults;
+    pre: modelledValue >= 0.0;
+    pre: self.modelledValueAvailable = true;
+    post: self.faultySensorCount = self.faultySensorCount@pre + 1;
+    post: self.lastFaultyId = faultyId;
+    post: self.lastModelledValue = modelledValue;
+    post: self.maxToleratedFaults >= self.faultySensorCount;
+    modifies: self.faultySensorCount, self.lastFaultyId, self.lastModelledValue;
+  }
+
+  event clearFaults()
+    refines engine_control_requirements::EngineControlSystem.clearSensorFaults {
+    pre: self.faultySensorCount > 0;
+    post: self.faultySensorCount = 0;
+    post: self.modelledValueAvailable = true;
+    post: self.lastFaultyId = null;
+    post: self.lastModelledValue = 0.0;
+    modifies: self.faultySensorCount, self.lastFaultyId, self.lastModelledValue;
+  }
+
+  event setModelledValueAvailable(available: Boolean) {
+    post: self.modelledValueAvailable = available;
+    modifies: self.modelledValueAvailable;
+  }
+}
+
+// ─── Component: FlightPhaseManager ─────────────────────────────────────
+kind FlightPhaseManager {
+  identity: mgrId;
+  property mgrId: String;
+  property flightPhase: String;
+  property isOnGround: Boolean;
+  property reverserEnabled: Boolean;
+
+  invariants {
+    self.mgrId <> null;
+    self.flightPhase <> null;
+    self.isOnGround implies (self.flightPhase = 'GROUND' or self.flightPhase = 'TAXI');
+    not self.isOnGround implies (self.flightPhase <> 'GROUND' and self.flightPhase <> 'TAXI');
+    self.reverserEnabled implies self.isOnGround;
+  }
+
+  event setPhase(newPhase: String, groundState: Boolean)
+    refines engine_control_requirements::EngineControlSystem.setFlightPhase {
+    pre: newPhase <> null;
+    pre: groundState implies newPhase = 'GROUND';
+    post: self.flightPhase = newPhase;
+    post: self.isOnGround = groundState;
+    post: if groundState then true else self.reverserEnabled = false endif;
+    modifies: self.flightPhase, self.isOnGround, self.reverserEnabled;
+  }
+
+  event setReverserDeployed(deployed: Boolean) {
+    pre: deployed implies self.isOnGround = true;
+    post: self.reverserEnabled = deployed;
+    modifies: self.reverserEnabled;
+  }
+}
+
+// ─── Interface Relators ────────────────────────────────────────────────
+
+// Role for the source side of the speed signal interface
+role OverspeedMonitorRole mediated-by SpeedSignalInterface of OverspeedMonitor {
+  property monitorId: String;
+  property currentSpeed: Real;
+  property overspeedActive: Boolean;
+}
+
+// Role for the target side of the speed signal interface
+role FuelControllerRole mediated-by SpeedSignalInterface of FuelController {
+  property ctrlId: String;
+  property fuelFlowRate: Real;
+  property fuelCutActive: Boolean;
+}
+
+relator SpeedSignalInterface mediates (OverspeedMonitorRole, FuelControllerRole) {
+  identity: ifaceId;
+  property ifaceId: String;
+  property speedSignal: Real;
+  property overspeedFlag: Boolean;
+
+  invariants {
+    self.ifaceId <> null;
+    self.speedSignal >= 0.0;
+    self.overspeedFlag implies self.speedSignal > 0.0;
+  }
+
+  event transmitOverspeedSignal(speed: Real, overspeed: Boolean) {
+    pre: speed >= 0.0;
+    post: self.speedSignal = speed;
+    post: self.overspeedFlag = overspeed;
+    modifies: self.speedSignal, self.overspeedFlag;
+  }
+}
+
+// Role for the ignition controller endpoint
+role IgnitionPhaseRole mediated-by PhaseSignalInterface of IgnitionController {
+  property ignId: String;
+  property currentFlightPhase: String;
+}
+
+// Role for the thrust controller endpoint
+role ThrustPhaseRole mediated-by PhaseSignalInterface of ThrustController {
+  property thrId: String;
+  property isOnGround: Boolean;
+}
+
+relator PhaseSignalInterface mediates (IgnitionPhaseRole, ThrustPhaseRole) {
+  identity: ifaceId;
+  property ifaceId: String;
+  property currentPhase: String;
+  property groundState: Boolean;
+
+  invariants {
+    self.ifaceId <> null;
+    self.currentPhase <> null;
+    self.groundState implies (self.currentPhase = 'GROUND' or self.currentPhase = 'TAXI');
+    not self.groundState implies (self.currentPhase <> 'GROUND' and self.currentPhase <> 'TAXI');
+  }
+
+  event transmitPhaseSignal(targetPhase: String, onGround: Boolean) {
+    pre: targetPhase <> null;
+    post: self.currentPhase = targetPhase;
+    post: self.groundState = onGround;
+    modifies: self.currentPhase, self.groundState;
+  }
+}
+
+// Role for the sensor fault emitter endpoint (e.g., a sensor monitor)
+role FaultEmitterRole mediated-by FaultSignalInterface of SensorFaultHandler {
+  property handlerId: String;
+  property faultReported: Boolean;
+  property reportedModelledValue: Real;
+}
+
+// Role for the sensor fault consumer endpoint (e.g., the control law)
+role FaultConsumerRole mediated-by FaultSignalInterface of SensorFaultHandler {
+  property handlerId: String;
+  property activeFaults: Integer;
+  property latestModelledValue: Real;
+}
+
+relator FaultSignalInterface mediates (FaultEmitterRole, FaultConsumerRole) {
+  identity: ifaceId;
+  property ifaceId: String;
+  property activeFaultCount: Integer;
+  property lastModelledValue: Real;
+
+  invariants {
+    self.ifaceId <> null;
+    self.activeFaultCount >= 0;
+    self.lastModelledValue >= 0.0;
+  }
+
+  event transmitFaultSignal(faultCount: Integer, value: Real) {
+    pre: faultCount >= 0;
+    pre: value >= 0.0;
+    post: self.activeFaultCount = faultCount;
+    post: self.lastModelledValue = value;
+    modifies: self.activeFaultCount, self.lastModelledValue;
+  }
+}
+
+// ─── Data Flows (Happenings) ──────────────────────────────────────────
+
+happening OverspeedFuelCutFlow {
+  identity: flowId;
+  property flowId: String;
+  property detectedSpeed: Real;
+  property overspeedFlagRaised: Boolean;
+  property fuelCutTriggered: Boolean;
+  property fuelRateBeforeCut: Real;
+  property fuelRateAfterCut: Real;
+
+  invariants {
+    self.flowId <> null;
+    self.detectedSpeed >= 0.0;
+    self.overspeedFlagRaised = (self.detectedSpeed > 0.0);
+    self.fuelCutTriggered implies self.overspeedFlagRaised;
+    self.fuelCutTriggered implies self.fuelRateAfterCut <= self.fuelRateBeforeCut;
+  }
+}
+
+happening PhaseTransitionFlow {
+  identity: flowId;
+  property flowId: String;
+  property oldPhase: String;
+  property newPhase: String;
+  property ignitionUpdated: Boolean;
+  property reverserUpdated: Boolean;
+
+  invariants {
+    self.flowId <> null;
+    self.oldPhase <> null;
+    self.newPhase <> null;
+    self.ignitionUpdated = (self.newPhase = 'TAKEOFF' or self.newPhase = 'LANDING');
+    self.reverserUpdated implies (self.newPhase = 'GROUND');
+  }
+}
+
+happening SensorFaultSubstitutionFlow {
+  identity: flowId;
+  property flowId: String;
+  property faultySensorId: String;
+  property modelledValue: Real;
+  property faultHandled: Boolean;
+  property newFaultCount: Integer;
+
+  invariants {
+    self.flowId <> null;
+    self.faultySensorId <> null;
+    self.modelledValue >= 0.0;
+    self.faultHandled implies self.newFaultCount > 0;
+  }
+}
+
+happening ThrustApplicationFlow {
+  identity: flowId;
+  property flowId: String;
+  property commandedThrust: Real;
+  property achievedThrust: Real;
+  property isInFlight: Boolean;
+
+  invariants {
+    self.flowId <> null;
+    self.commandedThrust >= 0.0;
+    self.achievedThrust >= 0.0;
+    self.isInFlight implies (self.achievedThrust = self.commandedThrust);
+  }
+}
+
+// ─── Relations ────────────────────────────────────────────────────────
+
+relation monitorMembership: <<memberOf>> from OverspeedMonitor [1] to EngineControlSystem [1];
+relation fuelMembership: <<memberOf>> from FuelController [1] to EngineControlSystem [1];
+relation ignitionMembership: <<memberOf>> from IgnitionController [1] to EngineControlSystem [1];
+relation thrustMembership: <<memberOf>> from ThrustController [1] to EngineControlSystem [1];
+relation faultMembership: <<memberOf>> from SensorFaultHandler [1] to EngineControlSystem [1];
+relation phaseMembership: <<memberOf>> from FlightPhaseManager [1] to EngineControlSystem [1];
+
+relation speedSignalMed: <<mediation>> from SpeedSignalInterface [1] to OverspeedMonitorRole [1];
+relation speedSignalMed2: <<mediation>> from SpeedSignalInterface [1] to FuelControllerRole [1];
+relation phaseSignalMed: <<mediation>> from PhaseSignalInterface [1] to IgnitionPhaseRole [1];
+relation phaseSignalMed2: <<mediation>> from PhaseSignalInterface [1] to ThrustPhaseRole [1];
+relation faultSignalMed: <<mediation>> from FaultSignalInterface [1] to FaultEmitterRole [1];
+relation faultSignalMed2: <<mediation>> from FaultSignalInterface [1] to FaultConsumerRole [1];

@@ -1,0 +1,223 @@
+schema "onto/0.1";
+namespace smart_thermostat_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =====================================================================
+// Formalization stage — what the WORLD imposes on the smart thermostat
+// HVAC controller.
+//
+// This file adds:
+//   1. Regulatory / standards anchors as documentary categories.
+//   2. Member-quantified physical / domain-logical categories.
+//   3. Active business-rule events on a formalized subkind.
+//   4. Passive assumption records (documentary kind, not events).
+// =====================================================================
+
+// ─── 1. Regulatory / Standards Anchors ──────────────────────────────────
+//
+// UL 916 governs energy-management equipment including smart thermostats.
+// Compliance is a project-level obligation, NOT a runtime enforcement.
+// The invariant is documentary: it asserts the certification number
+// must be present on any system instance that claims this category.
+
+category Ul916Compliant {
+  property ul916CertNumber: String;
+  property indicationsForUse: String;
+  invariants {
+    // Passive — governs the product, not the runtime loop.
+    self.ul916CertNumber <> null;
+  }
+}
+
+// ASHRAE Standard 90.1 / energy codes: thermostat setback limits
+// are mandated to stay within ranges that do not waste energy.
+// Models the regulatory floor (40 °F) and ceiling (90 °F) as a
+// standard anchor so the system kind's membership is auditable.
+
+category Ashrae901Compliant {
+  property standardEdition: String;
+  property regulatorySetpointMinF: Real;
+  property regulatorySetpointMaxF: Real;
+  invariants {
+    // Documentary: edition label must be present.
+    self.standardEdition <> null;
+    // Physical anchor on the bounds — verifiable at instantiation.
+    self.regulatorySetpointMinF >= 40.0;
+    self.regulatorySetpointMaxF <= 90.0;
+    self.regulatorySetpointMaxF > self.regulatorySetpointMinF;
+  }
+}
+
+// IEC 61508 SIL-1 / functional-safety anchor for embedded controllers
+// that affect physical actuators (HVAC compressor).
+// Safe-halt and fault-detection obligations trace to this anchor.
+
+category Iec61508Sil1 {
+  property silLevel: Integer;
+  property safetyCaseReference: String;
+  invariants {
+    self.silLevel = 1;
+    self.safetyCaseReference <> null;
+  }
+}
+
+// ─── 2. Member-Quantified Physical / Domain-Logical Categories ──────────
+//
+// These categories constrain the bearer's properties directly so the
+// Z3 verifier can prove S35 membership-invariant entailment when the
+// formalized system subkind specializes them.
+
+// Physical plausibility of sensor readings: the plausibility window
+// must be exactly [-40 °F, 150 °F] as stated in the domain glossary.
+category PhysicallyPlausibleSensorBounds where bearer: SmartThermostatSystem {
+  invariants {
+    bearer.plausibleMinF = -40.0;
+    bearer.plausibleMaxF = 150.0;
+    bearer.plausibleMaxF > bearer.plausibleMinF;
+  }
+}
+
+// Safe setpoint bounds: clamped value must always stay in [40, 90] °F.
+category SafeSetpointBounds where bearer: SmartThermostatSystem {
+  invariants {
+    bearer.safeMinTempF = 40.0;
+    bearer.safeMaxTempF = 90.0;
+    bearer.clampedSetpointF >= bearer.safeMinTempF;
+    bearer.clampedSetpointF <= bearer.safeMaxTempF;
+  }
+}
+
+// Compressor cycling: minimum interval must be >= 5 minutes.
+category CompressorCyclingBounds where bearer: SmartThermostatSystem {
+  invariants {
+    bearer.minCycleIntervalMinutes >= 5.0;
+    bearer.lastTransitionMinute >= 0.0;
+  }
+}
+
+// Safe-halt consistency: if the sensor is implausible the actuator
+// must already be commanding OFF.
+category SafeHaltConsistency where bearer: SmartThermostatSystem {
+  invariants {
+    bearer.sensorPlausible = true or bearer.actuatorSignal = 'OFF';
+  }
+}
+
+// ─── 3. Passive Assumption Records ──────────────────────────────────────
+//
+// These are world-level assumptions the system cannot enforce at runtime.
+// They are documentary; each instance carries a rationale string.
+// Traceability annotations use // @assumption ASSUME-N: convention.
+
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property code: String;
+  property rationale: String;
+  property sourceStage: String;
+
+  invariants {
+    self.assumptionId <> null;
+    self.code <> null;
+    self.rationale <> null;
+  }
+}
+
+// @assumption ASSUME-1: The physical sensor hardware provides readings
+// at a frequency at least as fast as the control loop period; the
+// system cannot detect a completely silent (dead) sensor — only
+// out-of-range readings are detectable.
+
+// @assumption ASSUME-2: The wall-clock (currentMinute) is monotonically
+// non-decreasing and is not reset during normal operation. The system
+// trusts the clock input passed to processSensorReading / commandActuator.
+
+// @assumption ASSUME-3: The HVAC actuator faithfully executes the
+// commanded signal (HEAT / COOL / OFF). The controller has no feedback
+// path to confirm the actuator's physical state.
+
+// @assumption ASSUME-4: A qualified HVAC technician performs the
+// sensor repair before clearSafeHalt is invoked; the system cannot
+// independently verify the technician's identity or certification.
+
+// ─── 4. Active Business-Rule Events (Formalized Subkind) ────────────────
+//
+// SmartThermostatSystemFormalized ADDS guard / rejection events that
+// make implicit rules explicit and runtime-enforceable.
+// It does NOT override any parent events — all parent contracts are
+// inherited unchanged (Liskov).
+
+subkind SmartThermostatSystemFormalized specializes SmartThermostatSystem {
+
+  // ── BR-1: Reject out-of-safe-range actuator command ─────────────────
+  // A requested actuator transition to HEAT or COOL is rejected when
+  // the clamped setpoint is outside the regulatory [40, 90] °F window.
+  // This should never fire in normal operation (Requirements already
+  // clamps); it is the last-resort runtime guard.
+  event rejectUnsafeActuatorCommand(requestedSignal: String)
+    refines smart_thermostat_discovery::SetpointRangeCommitment,
+            smart_thermostat_requirements::SmartThermostatSystem.commandActuator {
+    pre: self.clampedSetpointF < self.safeMinTempF
+         or self.clampedSetpointF > self.safeMaxTempF;
+    post: self.actuatorSignal = 'OFF';
+    post: self.alertActive = true;
+    post: self.displayActuatorSignal = 'OFF';
+    modifies: self.actuatorSignal, self.alertActive, self.displayActuatorSignal;
+  }
+
+  // ── BR-2: Reject implausible sensor reading (active guard) ───────────
+  // Mirrors the passive invariant of SafeHaltConsistency as an
+  // event that fires when the incoming reading is outside [-40, 150].
+  // The Requirements processSensorReading already handles this; this
+  // event models the explicit rejection as a named business rule.
+  event rejectImplausibleReading(readingF: Real, atMinute: Real)
+    refines smart_thermostat_discovery::SafeHaltCommitment,
+            smart_thermostat_requirements::SmartThermostatSystem.processSensorReading {
+    pre: readingF < self.plausibleMinF or readingF > self.plausibleMaxF;
+    pre: atMinute >= self.currentMinute;
+    post: self.actuatorSignal = 'OFF';
+    post: self.alertActive = true;
+    post: self.sensorPlausible = false;
+    post: self.currentMinute = atMinute;
+    post: self.displayActuatorSignal = 'OFF';
+    modifies: self.actuatorSignal, self.alertActive, self.sensorPlausible,
+              self.currentMinute, self.displayActuatorSignal;
+  }
+
+  // ── BR-3: Reject compressor transition within minimum cycle interval ─
+  // Explicit rejection event for cycle-guard violation.
+  // Complements the pre-condition in commandActuator by naming the
+  // rule as an auditable business-rule event.
+  event rejectEarlyCompressorCycle(atMinute: Real)
+    refines smart_thermostat_discovery::CompressorProtectionCommitment,
+            smart_thermostat_requirements::SmartThermostatSystem.commandActuator {
+    pre: (atMinute - self.lastTransitionMinute) < self.minCycleIntervalMinutes;
+    post: self.actuatorSignal = self.actuatorSignal@pre;
+    post: self.lastTransitionMinute = self.lastTransitionMinute@pre;
+    modifies: self.actuatorSignal, self.lastTransitionMinute;
+  }
+
+  // ── BR-4: Reject setpoint adjustment during safe halt ───────────────
+  // While the system is in safe halt the user must not be able to
+  // change the setpoint (the system state is frozen pending repair).
+  event rejectSetpointDuringSafeHalt(requestedF: Real)
+    refines smart_thermostat_discovery::SetpointRangeCommitment,
+            smart_thermostat_requirements::SmartThermostatSystem.adjustSetpoint {
+    pre: self.alertActive = true or self.sensorPlausible = false;
+    post: self.clampedSetpointF = self.clampedSetpointF@pre;
+    post: self.requestedSetpointF = self.requestedSetpointF@pre;
+    modifies: self.clampedSetpointF, self.requestedSetpointF;
+  }
+}
+
+// ─── 5. Explicit Relations ───────────────────────────────────────────────
+
+relation formalizedToUl916: <<composition>>
+  from SmartThermostatSystemFormalized [1] to Ul916Compliant [1];
+
+relation formalizedToAshrae: <<composition>>
+  from SmartThermostatSystemFormalized [1] to Ashrae901Compliant [1];
+
+relation formalizedToIec61508: <<composition>>
+  from SmartThermostatSystemFormalized [1] to Iec61508Sil1 [1];

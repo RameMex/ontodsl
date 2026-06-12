@@ -1,0 +1,5 @@
+node_modules/
+*.log
+*.tsbuildinfo
+vitest-report.json
+.DS_Store

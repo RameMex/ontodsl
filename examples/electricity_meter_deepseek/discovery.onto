@@ -1,0 +1,189 @@
+schema "onto/0.1";
+namespace electricity_meter_discovery;
+
+// ─── Stakeholders ───────────────────────────────────────────────────────
+
+agent Customer {
+  identity: customerId;
+  property customerId: String;
+  property name: String;
+  property accountNumber: String;
+  invariants {
+    self.customerId <> null;
+  }
+}
+
+agent UtilityProvider {
+  identity: utilityId;
+  property utilityId: String;
+  property name: String;
+  property regulatorCode: String;
+  invariants {
+    self.utilityId <> null;
+  }
+}
+
+agent FieldTechnician {
+  identity: technicianId;
+  property technicianId: String;
+  property certification: String;
+  invariants {
+    self.technicianId <> null;
+  }
+}
+
+agent RegulatoryAuthority {
+  identity: regulatorId;
+  property regulatorId: String;
+  property jurisdiction: String;
+  invariants {
+    self.regulatorId <> null;
+  }
+}
+
+// The vendor / dev team — debitor of all stakeholder commitments.
+agent MeterVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+  }
+}
+
+// ─── Hard Goals as Commitments ──────────────────────────────────────────
+
+// GOAL-1: Monotonic kWh (no accepted delta is negative).
+commitment MonotonicConsumptionCommitment
+  debitor: MeterVendor
+  creditor: Customer {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxNegativeDeltaThreshold: Real;
+    predicate: self.maxNegativeDeltaThreshold >= 0.0;
+  }
+
+// GOAL-2: Tamper freeze (billing pauses for any meter with active tamper event).
+commitment TamperFreezeCommitment
+  debitor: MeterVendor
+  creditor: Customer {
+    identity: commitmentId;
+    property commitmentId: String;
+    property tamperFreezeActive: Boolean;
+    predicate: not self.tamperFreezeActive;
+  }
+
+// GOAL-3: Tamper clearance gating (billing only resumes after authorized manual clearance).
+commitment TamperClearanceCommitment
+  debitor: MeterVendor
+  creditor: Customer {
+    identity: commitmentId;
+    property commitmentId: String;
+    property tamperCleared: Boolean;
+    predicate: self.tamperCleared;
+  }
+
+// GOAL-4: Reading immutability (accepted readings cannot be deleted or mutated, only compensated).
+commitment ReadingImmutabilityCommitment
+  debitor: MeterVendor
+  creditor: RegulatoryAuthority {
+    identity: commitmentId;
+    property commitmentId: String;
+    property acceptedReadingCount: Integer;
+    predicate: self.acceptedReadingCount >= 0;
+  }
+
+// ─── Constraint Goals as Categories ──────────────────────────────────────
+
+category MonotonicConsumption {
+  invariants {
+    true;
+  }
+}
+
+category TamperHandling {
+  invariants {
+    true;
+  }
+}
+
+category ReadingImmutability {
+  invariants {
+    true;
+  }
+}
+
+// ─── Glossary Terms ─────────────────────────────────────────────────────
+
+kind MeterReading {
+  identity: readingId;
+  property readingId: String;
+  property timestamp: Real;
+  property kwh: Real;
+  property tamperFlags: String;
+  invariants {
+    self.readingId <> null;
+    self.timestamp >= 0.0;
+    self.kwh >= 0.0;
+  }
+}
+
+kind ConsumptionDelta {
+  identity: deltaId;
+  property deltaId: String;
+  property previousKwh: Real;
+  property currentKwh: Real;
+  property value: Real;
+  invariants {
+    self.deltaId <> null;
+    self.value >= 0.0;
+    self.currentKwh >= self.previousKwh;
+  }
+}
+
+kind TamperEvent {
+  identity: eventId;
+  property eventId: String;
+  property timestamp: Real;
+  property eventType: String;
+  property description: String;
+  invariants {
+    self.eventId <> null;
+    self.timestamp >= 0.0;
+  }
+}
+
+kind BillingIncrement {
+  identity: incrementId;
+  property incrementId: String;
+  property delta: ConsumptionDelta;
+  property amount: Real;
+  property appliedTimestamp: Real;
+  invariants {
+    self.incrementId <> null;
+    self.amount >= 0.0;
+  }
+}
+
+kind TamperClearance {
+  identity: clearanceId;
+  property clearanceId: String;
+  property clearedBy: FieldTechnician;
+  property timestamp: Real;
+  invariants {
+    self.clearanceId <> null;
+    self.clearedBy <> null;
+  }
+}
+
+// ─── Domain Story ────────────────────────────────────────────────────────
+
+happening MeterReadingFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;  // "MeterReadingEvent"
+  property outcome: String;       // "BillingIncrementApplied" or "TamperFreeze" or "RejectedAnomaly"
+  invariants {
+    self.flowId <> null;
+  }
+}

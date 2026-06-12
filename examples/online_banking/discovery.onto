@@ -1,0 +1,289 @@
+schema "onto/0.1";
+namespace online_banking_discovery;
+
+// =====================================================================
+// Discovery: Online Banking Transaction Processor
+//
+// Captures the problem space: stakeholders, vendor, glossary kinds,
+// constraint-goal categories, hard-goal commitments, and domain
+// story happenings.
+// No system kind declared here — that belongs to Requirements.
+// =====================================================================
+
+// ─── Glossary Kinds ───────────────────────────────────────────────────────
+
+kind Account {
+  identity: accountId;
+  property accountId: String;
+  property ownerId: String;
+  property balance: Real;
+  property status: String;
+
+  invariants {
+    self.accountId <> null;
+    self.ownerId <> null;
+    self.balance >= 0.0;
+    self.status <> null;
+  }
+}
+
+kind Transfer {
+  identity: transferId;
+  property transferId: String;
+  property sourceAccountId: String;
+  property destinationAccountId: String;
+  property amount: Real;
+  property state: String;
+  property initiatedAt: Integer;
+
+  invariants {
+    self.transferId <> null;
+    self.sourceAccountId <> null;
+    self.destinationAccountId <> null;
+    self.sourceAccountId <> self.destinationAccountId;
+    self.amount > 0.0;
+    self.state <> null;
+  }
+}
+
+kind JournalEntry {
+  identity: entryId;
+  property entryId: String;
+  property transferId: String;
+  property sourceAccountIdRef: String;
+  property destinationAccountIdRef: String;
+  property amount: Real;
+  property preSourceBalance: Real;
+  property postSourceBalance: Real;
+  property preDestinationBalance: Real;
+  property postDestinationBalance: Real;
+  property createdAt: Integer;
+  property immutable: Boolean;
+
+  invariants {
+    self.entryId <> null;
+    self.transferId <> null;
+    self.amount > 0.0;
+    self.immutable = true;
+    self.preSourceBalance >= 0.0;
+    self.postSourceBalance >= 0.0;
+    self.preDestinationBalance >= 0.0;
+    self.postDestinationBalance >= 0.0;
+  }
+}
+
+kind PendingState {
+  identity: pendingId;
+  property pendingId: String;
+  property transferId: String;
+  property originalSourceBalance: Real;
+  property originalDestinationBalance: Real;
+  property pendingSince: Integer;
+  property maxResolutionSeconds: Integer;
+
+  invariants {
+    self.pendingId <> null;
+    self.transferId <> null;
+    self.originalSourceBalance >= 0.0;
+    self.originalDestinationBalance >= 0.0;
+    self.maxResolutionSeconds > 0;
+  }
+}
+
+// ─── Stakeholder Agents ───────────────────────────────────────────────────
+
+agent Customer {
+  identity: customerId;
+  property customerId: String;
+  property name: String;
+  property email: String;
+
+  invariants {
+    self.customerId <> null;
+    self.name <> null;
+    self.email <> null;
+  }
+}
+
+agent Regulator {
+  identity: regulatorId;
+  property regulatorId: String;
+  property name: String;
+  property jurisdiction: String;
+
+  invariants {
+    self.regulatorId <> null;
+    self.name <> null;
+    self.jurisdiction <> null;
+  }
+}
+
+agent BankOperator {
+  identity: operatorId;
+  property operatorId: String;
+  property name: String;
+  property operatorRole: String;
+
+  invariants {
+    self.operatorId <> null;
+    self.name <> null;
+    self.operatorRole <> null;
+  }
+}
+
+// The dev/vendor team — debitor of every stakeholder commitment.
+// The system kind does not exist yet at Discovery; the provider org
+// is the entity promising to build it.
+agent BankingSystemVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  property regulatoryLicenseId: String;
+
+  invariants {
+    self.vendorId <> null;
+    self.name <> null;
+  }
+}
+
+// ─── Constraint-Goal Categories ──────────────────────────────────────────
+
+// GOAL-2: No overdraft — post-transfer source balance must be >= 0.
+category NoOverdraftConstraint where bearer: Account {
+  invariants {
+    bearer.balance >= 0.0;
+  }
+}
+
+// GOAL-1: Atomicity — a transfer must never be in a partially applied
+// state. Valid states are 'PENDING', 'COMPLETED', and 'ROLLED_BACK'.
+category AtomicTransferConstraint where bearer: Transfer {
+  invariants {
+    bearer.state = 'PENDING' or bearer.state = 'COMPLETED' or bearer.state = 'ROLLED_BACK';
+  }
+}
+
+// GOAL-3: Journal immutability — once written, a journal entry is frozen.
+category ImmutableJournalConstraint where bearer: JournalEntry {
+  invariants {
+    bearer.immutable = true;
+    bearer.amount > 0.0;
+  }
+}
+
+// GOAL-4: Bounded latency — pending state resolves within 30 seconds.
+category BoundedLatencyConstraint where bearer: PendingState {
+  invariants {
+    bearer.maxResolutionSeconds <= 30;
+  }
+}
+
+// ─── Hard-Goal Commitments ───────────────────────────────────────────────
+
+// GOAL-1: Atomic transfer — vendor commits to Customer that transfers
+// are never left in a partial state.
+commitment AtomicTransferCommitment
+  debitor: BankingSystemVendor
+  creditor: Customer {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxPartialStateSeconds: Integer;
+    predicate: self.maxPartialStateSeconds = 0;
+  }
+
+// GOAL-2: No overdraft — vendor commits to Customer that no transfer
+// will debit more than the available balance.
+commitment NoOverdraftCommitment
+  debitor: BankingSystemVendor
+  creditor: Customer {
+    identity: commitmentId;
+    property commitmentId: String;
+    property minimumAllowedBalance: Real;
+    predicate: self.minimumAllowedBalance >= 0.0;
+  }
+
+// GOAL-3: Audit journal — vendor commits to Regulator that every
+// successful transfer has an immutable journal entry created before
+// customer notification.
+commitment AuditJournalCommitment
+  debitor: BankingSystemVendor
+  creditor: Regulator {
+    identity: commitmentId;
+    property commitmentId: String;
+    property journalPrecedesNotification: Boolean;
+    predicate: self.journalPrecedesNotification = true;
+  }
+
+// GOAL-4: Bounded latency — vendor commits to BankOperator that pending
+// transfers resolve within 30 seconds.
+commitment BoundedLatencyCommitment
+  debitor: BankingSystemVendor
+  creditor: BankOperator {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxResolutionSeconds: Integer;
+    predicate: self.maxResolutionSeconds <= 30;
+  }
+
+// Vision statement: vendor commits to Customer to provide a safe,
+// atomic, and auditable online transfer service.
+commitment BankingSystemVisionCommitment
+  debitor: BankingSystemVendor
+  creditor: Customer {
+    identity: commitmentId;
+    property commitmentId: String;
+    property visionStatement: String;
+    predicate: self.commitmentId <> null;
+  }
+
+// ─── Domain Story Happenings ─────────────────────────────────────────────
+
+// Main domain flow: a successful transfer from initiation to notification.
+happening TransferFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property involvedTransferId: String;
+  property involvedSourceAccountId: String;
+  property involvedDestinationAccountId: String;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+    self.involvedTransferId <> null;
+  }
+}
+
+// Sub-flow: the recovery routine that inspects pending entries on
+// startup and either completes or rolls them back.
+happening RecoveryFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property pendingTransferCount: Integer;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.pendingTransferCount >= 0;
+  }
+}
+
+// Sub-flow: failure path — something fails mid-transfer and both
+// accounts are reverted to their original balances.
+happening RollbackFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property involvedTransferId: String;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.involvedTransferId <> null;
+  }
+}

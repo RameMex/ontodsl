@@ -1,0 +1,95 @@
+schema "onto/0.1";
+namespace game_tournament_requirements;
+import "./discovery.onto";
+
+// ─── System Kind ──────────────────────────────────────────────────────
+// The single-elimination tournament bracket controller as a black box.
+// Specializes constraint categories from discovery so invariants inherit.
+// Mirrors commitment properties: targetScore, playerLossCount,
+// parentSlotOccupiedCount, isPlayable.
+
+kind TournamentBracketSystem
+  specializes ValidScoresConstraints,
+              SingleEliminationConstraints,
+              CorrectAdvancementConstraints,
+              ParentGatingConstraints {
+  identity: systemId;
+  property systemId: String;
+
+  // ── Mirrored commitment properties (substance for discharge proofs) ──
+  property targetScore: Real;                  // from ValidScoresCommitment
+  property playerLossCount: Integer;           // from SingleEliminationCommitment
+  property parentSlotOccupiedCount: Integer;   // from CorrectAdvancementCommitment
+  property isPlayable: Boolean;                // from ParentGatingCommitment
+
+  // ── Internal state (bracket bookkeeping) ─────────────────────────────
+  property matchCount: Integer;
+  property playersEliminatedCount: Integer;
+
+  invariants {
+    self.targetScore > 0.0;
+    self.playerLossCount <= 1;
+    self.parentSlotOccupiedCount <= 1;
+    self.parentSlotOccupiedCount >= 0;
+    self.matchCount >= 0;
+    self.playersEliminatedCount >= 0;
+  }
+
+  // ─── FR-1: Report Match Score ──────────────────────────────────────
+  // Arbiter submits (player_a_score, player_b_score). The system
+  // verifies validity: winner reached target, loser strictly less.
+  // Both players must be non-eliminated. On valid, records result,
+  // advances winner, eliminates loser.
+  // Discharges ValidScoresCommitment, SingleEliminationCommitment,
+  // CorrectAdvancementCommitment, and ParentGatingCommitment.
+  event reportMatchScore(playerAScore: Real, playerBScore: Real)
+    refines game_tournament_discovery::ValidScoresCommitment,
+            game_tournament_discovery::SingleEliminationCommitment,
+            game_tournament_discovery::CorrectAdvancementCommitment,
+            game_tournament_discovery::ParentGatingCommitment {
+    pre: playerAScore >= 0.0;
+    pre: playerBScore >= 0.0;
+    pre: self.isPlayable = true;
+    pre: self.parentSlotOccupiedCount < 1;
+    pre: self.playerLossCount = 0;
+
+    // Validity: one reached target, the other strictly less
+    pre: (playerAScore = self.targetScore and playerBScore < self.targetScore)
+         or (playerBScore = self.targetScore and playerAScore < self.targetScore);
+
+    post: self.matchCount = self.matchCount@pre + 1;
+    post: self.parentSlotOccupiedCount = self.parentSlotOccupiedCount@pre + 1;
+    post: self.playerLossCount = 1;               // loser is now eliminated
+    post: self.playersEliminatedCount = self.playersEliminatedCount@pre + 1;
+    post: self.isPlayable = false;                // consumed, parent gating satisfied
+
+    modifies: self.matchCount,
+              self.parentSlotOccupiedCount,
+              self.playerLossCount,
+              self.playersEliminatedCount,
+              self.isPlayable;
+  }
+
+  // ─── FR-2: Enable Parent Match ──────────────────────────────────────
+  // When both children of a parent are decided, the parent match becomes
+  // playable. This event flips isPlayable and resets parentSlotOccupiedCount.
+  // Discharges ParentGatingCommitment.
+  event enableParentMatch()
+    refines game_tournament_discovery::ParentGatingCommitment {
+    pre: self.parentSlotOccupiedCount = 1;
+    pre: not self.isPlayable;
+    post: self.isPlayable = true;
+    post: self.parentSlotOccupiedCount = 0;
+    modifies: self.isPlayable, self.parentSlotOccupiedCount;
+  }
+
+  // ─── FR-3: Reset Player Context ────────────────────────────────────
+  // When a new match is formed (e.g., after a winner advances), reset
+  // the player's loss count to 0 so they can play the next match.
+  // (Conceptual — the black-box system resets its own tracking property.)
+  event resetPlayer() {
+    pre: self.playerLossCount = 1;
+    post: self.playerLossCount = 0;
+    modifies: self.playerLossCount;
+  }
+}

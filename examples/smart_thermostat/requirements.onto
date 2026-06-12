@@ -1,0 +1,202 @@
+schema "onto/0.1";
+namespace smart_thermostat_requirements;
+import "./discovery.onto";
+
+// ─── Session Relator ──────────────────────────────────────────────────────
+//
+// Captures the interaction context between a HomeOwner and the system.
+// Both endpoints are mediated via explicit <<mediation>> relations below.
+
+relator UserSessionRelator mediates (HomeOwner, SmartThermostatSystem) {
+  identity: sessionId;
+  property sessionId: String;
+  property userId: String;
+
+  invariants {
+    self.sessionId <> null;
+    self.userId <> null;
+  }
+}
+
+// ─── System Kind (Black-Box Boundary) ────────────────────────────────────
+//
+// SmartThermostatSystem is the system-as-black-box at Requirements.
+// Properties encode every threshold/limit referenced by the commitments
+// so OCL post-conditions can directly imply the commitment predicates.
+
+kind SmartThermostatSystem {
+  identity: systemId;
+  property systemId: String;
+
+  // ── Setpoint state ──────────────────────────────────────────────────
+  property requestedSetpointF: Real;
+  property clampedSetpointF: Real;
+  property safeMinTempF: Real;
+  property safeMaxTempF: Real;
+
+  // ── Sensor state ────────────────────────────────────────────────────
+  property currentTempF: Real;
+  property plausibleMinF: Real;
+  property plausibleMaxF: Real;
+  property sensorPlausible: Boolean;
+
+  // ── Actuator state ──────────────────────────────────────────────────
+  property actuatorSignal: String;
+  property alertActive: Boolean;
+  property lastTransitionMinute: Real;
+  property minCycleIntervalMinutes: Real;
+
+  // ── Display state ───────────────────────────────────────────────────
+  property displayCurrentTempF: Real;
+  property displaySetpointF: Real;
+  property displayActuatorSignal: String;
+  property displayRefreshSeconds: Real;
+
+  // ── Clock ─────────────────────────────────────────────────────────
+  property currentMinute: Real;
+
+  invariants {
+    self.systemId <> null;
+
+    // Setpoint safety
+    self.safeMinTempF = 40.0;
+    self.safeMaxTempF = 90.0;
+    self.clampedSetpointF >= self.safeMinTempF;
+    self.clampedSetpointF <= self.safeMaxTempF;
+
+    // Sensor plausibility bounds
+    self.plausibleMinF = -40.0;
+    self.plausibleMaxF = 150.0;
+    self.plausibleMaxF > self.plausibleMinF;
+
+    // Compressor cycling
+    self.minCycleIntervalMinutes = 5.0;
+    self.lastTransitionMinute >= 0.0;
+    self.currentMinute >= 0.0;
+
+    // Display always reflects current state
+    self.displayRefreshSeconds > 0.0;
+    self.displayCurrentTempF = self.currentTempF;
+    self.displaySetpointF = self.clampedSetpointF;
+    self.displayActuatorSignal = self.actuatorSignal;
+
+    // Safe-halt consistency
+    self.sensorPlausible = true or self.actuatorSignal = 'OFF';
+  }
+
+  // ─── FR-1: Adjust Setpoint ──────────────────────────────────────────
+  // GOAL-1 — Track user setpoint within safe range.
+  // Discharges SetpointRangeCommitment.
+  event adjustSetpoint(requestedF: Real)
+    refines smart_thermostat_discovery::SetpointRangeCommitment {
+    pre: self.sensorPlausible = true;
+    pre: not self.alertActive;
+    post: self.requestedSetpointF = requestedF;
+    post: self.clampedSetpointF =
+            if requestedF < self.safeMinTempF then self.safeMinTempF
+            else if requestedF > self.safeMaxTempF then self.safeMaxTempF
+            else requestedF
+            endif endif;
+    post: self.clampedSetpointF >= self.safeMinTempF;
+    post: self.clampedSetpointF <= self.safeMaxTempF;
+    post: self.displaySetpointF = self.clampedSetpointF;
+    modifies: self.requestedSetpointF, self.clampedSetpointF, self.displaySetpointF;
+  }
+
+  // ─── FR-2: Process Sensor Reading ──────────────────────────────────
+  // GOAL-2 — Safe halt on implausible sensor reading.
+  // Discharges SafeHaltCommitment.
+  event processSensorReading(readingF: Real, atMinute: Real)
+    refines smart_thermostat_discovery::SafeHaltCommitment {
+    pre: atMinute >= self.currentMinute;
+    post: self.currentMinute = atMinute;
+    post: self.sensorPlausible =
+            (readingF >= self.plausibleMinF and readingF <= self.plausibleMaxF);
+    post: if not (readingF >= self.plausibleMinF and readingF <= self.plausibleMaxF)
+          then self.actuatorSignal = 'OFF' and self.alertActive = true
+          else self.alertActive = false
+          endif;
+    post: if (readingF >= self.plausibleMinF and readingF <= self.plausibleMaxF)
+          then self.currentTempF = readingF
+          else self.currentTempF = self.currentTempF@pre
+          endif;
+    post: self.plausibleMaxF > self.plausibleMinF;
+    post: self.displayCurrentTempF = self.currentTempF;
+    post: self.displayActuatorSignal = self.actuatorSignal;
+    modifies: self.currentTempF, self.sensorPlausible, self.actuatorSignal,
+              self.alertActive, self.currentMinute,
+              self.displayCurrentTempF, self.displayActuatorSignal;
+  }
+
+  // ─── FR-3: Command Actuator ─────────────────────────────────────────
+  // GOAL-1 + GOAL-3 — Setpoint tracking + compressor cycle guard.
+  // Discharges SetpointRangeCommitment and CompressorProtectionCommitment.
+  event commandActuator(atMinute: Real)
+    refines smart_thermostat_discovery::SetpointRangeCommitment,
+            smart_thermostat_discovery::CompressorProtectionCommitment {
+    pre: self.sensorPlausible = true;
+    pre: not self.alertActive;
+    pre: atMinute >= self.currentMinute;
+    pre: (atMinute - self.lastTransitionMinute) >= self.minCycleIntervalMinutes;
+    post: if self.currentTempF < self.clampedSetpointF
+          then self.actuatorSignal = 'HEAT'
+          else if self.currentTempF > self.clampedSetpointF
+          then self.actuatorSignal = 'COOL'
+          else self.actuatorSignal = 'OFF'
+          endif endif;
+    post: self.lastTransitionMinute = atMinute;
+    post: self.currentMinute = atMinute;
+    post: self.displayActuatorSignal = self.actuatorSignal;
+    post: self.clampedSetpointF >= self.safeMinTempF;
+    post: self.clampedSetpointF <= self.safeMaxTempF;
+    post: self.minCycleIntervalMinutes >= 5.0;
+    modifies: self.actuatorSignal, self.lastTransitionMinute,
+              self.currentMinute, self.displayActuatorSignal;
+  }
+
+  // ─── FR-4: Reject Actuator Command During Safe Halt ────────────────
+  // GOAL-2 — While in safe halt the actuator stays OFF.
+  event rejectCommandDuringSafeHalt()
+    refines smart_thermostat_discovery::SafeHaltCommitment {
+    pre: self.alertActive = true or self.sensorPlausible = false;
+    post: self.actuatorSignal = 'OFF';
+    post: self.alertActive = true;
+    modifies: self.actuatorSignal, self.alertActive;
+  }
+
+  // ─── FR-5: Refresh Display ─────────────────────────────────────────
+  // GOAL-4 — Current temperature, setpoint, and actuator state visible
+  // at all times. Discharges DisplayVisibilityCommitment.
+  event refreshDisplay()
+    refines smart_thermostat_discovery::DisplayVisibilityCommitment {
+    pre: self.displayRefreshSeconds > 0.0;
+    post: self.displayCurrentTempF = self.currentTempF;
+    post: self.displaySetpointF = self.clampedSetpointF;
+    post: self.displayActuatorSignal = self.actuatorSignal;
+    post: self.displayRefreshSeconds > 0.0;
+    modifies: self.displayCurrentTempF, self.displaySetpointF,
+              self.displayActuatorSignal;
+  }
+
+  // ─── FR-6: Clear Safe Halt ─────────────────────────────────────────
+  // Allows an authorized actor to clear safe-halt after sensor repair.
+  event clearSafeHalt(verifiedReadingF: Real, atMinute: Real)
+    refines smart_thermostat_discovery::SafeHaltCommitment {
+    pre: self.alertActive = true;
+    pre: verifiedReadingF >= self.plausibleMinF;
+    pre: verifiedReadingF <= self.plausibleMaxF;
+    pre: atMinute >= self.currentMinute;
+    post: self.sensorPlausible = true;
+    post: self.alertActive = false;
+    post: self.currentTempF = verifiedReadingF;
+    post: self.currentMinute = atMinute;
+    post: self.displayCurrentTempF = verifiedReadingF;
+    modifies: self.sensorPlausible, self.alertActive, self.currentTempF,
+              self.currentMinute, self.displayCurrentTempF;
+  }
+}
+
+// ─── Explicit Relations ───────────────────────────────────────────────────
+
+relation sessionToOwner: <<mediation>> from UserSessionRelator [1] to HomeOwner [1];
+relation sessionToSystem: <<mediation>> from UserSessionRelator [1] to SmartThermostatSystem [1];

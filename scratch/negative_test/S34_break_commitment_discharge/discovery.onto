@@ -1,0 +1,257 @@
+schema "onto/0.1";
+namespace insulin_pump_discovery;
+
+// =====================================================================
+// Discovery stage — insulin pump control system
+//
+// Captures the PROBLEM space: stakeholders, the vendor agent that
+// commits to building the system, hard goals as commitments, constraint
+// goals as categories, glossary terms as kinds/subkinds, and domain
+// stories as happenings.
+//
+// The system kind does NOT appear here — it belongs to Requirements.
+// No events are declared on stakeholder agents.
+// =====================================================================
+
+// ─── Glossary kinds ───────────────────────────────────────────────────
+
+kind BloodSugar {
+  identity: readingId;
+  property readingId: String;
+  property concentrationMgDl: Real;
+  property timestampMin: Real;
+
+  invariants {
+    self.readingId <> null;
+    self.concentrationMgDl >= 0.0;
+    self.timestampMin >= 0.0;
+  }
+}
+
+kind SafeZone {
+  identity: zoneId;
+  property zoneId: String;
+  property lowerBoundMgDl: Real;
+  property upperBoundMgDl: Real;
+
+  invariants {
+    self.zoneId <> null;
+    self.lowerBoundMgDl >= 0.0;
+    self.upperBoundMgDl > self.lowerBoundMgDl;
+  }
+}
+
+kind InsulinReservoir {
+  identity: reservoirId;
+  property reservoirId: String;
+  property capacityUnits: Real;
+  property currentUnits: Real;
+  property isLow: Boolean;
+
+  invariants {
+    self.reservoirId <> null;
+    self.capacityUnits > 0.0;
+    self.currentUnits >= 0.0;
+    self.currentUnits <= self.capacityUnits;
+  }
+}
+
+kind SelfTest {
+  identity: testId;
+  property testId: String;
+  property intervalMinutes: Real;
+  property lastTestTimestampMin: Real;
+  property passed: Boolean;
+
+  invariants {
+    self.testId <> null;
+    self.intervalMinutes > 0.0;
+    self.intervalMinutes <= 1.0;
+  }
+}
+
+// ─── Stakeholder agents ───────────────────────────────────────────────
+
+agent Patient {
+  identity: patientId;
+  property patientId: String;
+  property name: String;
+  property hasDiabetes: Boolean;
+
+  invariants {
+    self.patientId <> null;
+    self.name <> null;
+    self.hasDiabetes = true;
+  }
+}
+
+agent Clinician {
+  identity: clinicianId;
+  property clinicianId: String;
+  property name: String;
+  property certification: String;
+
+  invariants {
+    self.clinicianId <> null;
+    self.name <> null;
+  }
+}
+
+// The vendor/development team — debitor of every stakeholder commitment.
+// The actual system kind does not exist at Discovery; the vendor is
+// the organisational entity that promises to build and certify the device.
+agent PumpVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  property regulatoryBody: String;
+
+  invariants {
+    self.vendorId <> null;
+    self.name <> null;
+  }
+}
+
+// ─── Constraint goal categories ───────────────────────────────────────
+// Any system kind declared in Requirements must specialise these
+// categories and thereby inherit the documented invariants.
+
+category DoseSafetyConstraints {
+  // The single insulin dose delivered shall never exceed the configured
+  // safe maximum. Concrete enforcement attaches to the system kind in
+  // Requirements once the bearer is defined.
+  invariants {
+    true;
+  }
+}
+
+category FailSafeConstraints {
+  // On any detected fault the system must cease insulin delivery.
+  // The system kind in Requirements will carry the concrete
+  // faultDetected / isOperating invariants.
+  invariants {
+    true;
+  }
+}
+
+category AlertConstraints {
+  // Low reservoir and malfunction conditions must be surfaced to the
+  // patient. The system kind in Requirements will carry the concrete
+  // alarm properties and invariants.
+  invariants {
+    true;
+  }
+}
+
+// ─── Hard goals as commitments ────────────────────────────────────────
+
+// GOAL-1: Deliver the correct insulin dose.
+// The predicate captures the machine-checkable core: a configured safe
+// maximum must be positive, and the sensor reading interval is bounded.
+// The Requirements event's post-condition must imply this predicate.
+commitment CorrectDoseCommitment
+  debitor: PumpVendor
+  creditor: Patient {
+    identity: commitmentId;
+    property commitmentId: String;
+    property safeMaxDoseUnits: Real;
+    property sensorReadingIntervalMin: Real;
+    predicate: self.safeMaxDoseUnits > 9999.0
+                 and self.sensorReadingIntervalMin > 0.0
+                 and self.sensorReadingIntervalMin <= 10.0;
+  }
+
+// GOAL-2: Fail safe on any hardware fault.
+// The predicate asserts that the configured fault-response latency is
+// bounded — the vendor commits that failure detection and delivery
+// halt occur within a known maximum period.
+commitment FailSafeCommitment
+  debitor: PumpVendor
+  creditor: Patient {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxFaultResponseMinutes: Real;
+    predicate: self.maxFaultResponseMinutes > 0.0
+                 and self.maxFaultResponseMinutes <= 1.0;
+  }
+
+// GOAL-3: Alert the patient to conditions needing attention.
+// The vendor commits that low-reservoir and malfunction alarms are
+// surfaced within a bounded time and that the alarm threshold is
+// documented.
+commitment PatientAlertCommitment
+  debitor: PumpVendor
+  creditor: Patient {
+    identity: commitmentId;
+    property commitmentId: String;
+    property lowReservoirThresholdUnits: Real;
+    property maxAlertLatencyMin: Real;
+    predicate: self.lowReservoirThresholdUnits > 0.0
+                 and self.maxAlertLatencyMin > 0.0;
+  }
+
+// The clinician also has a concern: the device must be configurable
+// with per-patient safe-maximum parameters.
+commitment ClinicianConfigCommitment
+  debitor: PumpVendor
+  creditor: Clinician {
+    identity: commitmentId;
+    property commitmentId: String;
+    property configurableSafeMax: Boolean;
+    predicate: self.configurableSafeMax = true;
+  }
+
+// ─── Domain stories (happenings) ──────────────────────────────────────
+
+// Story 1: Normal dose-delivery cycle (every 10 minutes)
+happening DoseDeliveryFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property stepCount: Integer;
+
+  invariants {
+    self.flowId <> null;
+    self.stepCount >= 1;
+  }
+}
+
+// Story 2: Hardware fault handling
+happening FaultResponseFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+// Story 3: Self-test cycle (at least once per minute)
+happening SelfTestFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property intervalMinutes: Real;
+
+  invariants {
+    self.flowId <> null;
+    self.intervalMinutes > 0.0;
+    self.intervalMinutes <= 1.0;
+  }
+}
+
+// Story 4: Low-reservoir alarm flow
+happening LowReservoirAlarmFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+  }
+}

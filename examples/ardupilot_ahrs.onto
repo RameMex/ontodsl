@@ -1,0 +1,117 @@
+schema "onto/0.1";
+namespace ardupilot_ahrs;
+
+// =====================================================================
+// UFO-A model of ArduPilot libraries/AP_AHRS/AP_AHRS.{h,cpp}.
+//
+// AP_AHRS is the Attitude / Heading Reference System — the layer
+// that turns raw IMU samples (accel, gyro, mag, GPS) into a stable
+// attitude estimate (roll, pitch, yaw + quaternion). The DbC
+// surface we model:
+//
+//   * update() — periodic refresh (typically 400 Hz). Effect:
+//     Hardware reads (Telemetry-like), depends on IMU samples.
+//   * reset_attitude() — clears state, marks unhealthy until next
+//     update.
+//   * get_roll / get_pitch / get_yaw — finite radians, wrapped to
+//     [-PI, PI] (roll/yaw) and [-PI/2, PI/2] (pitch).
+//   * healthy — must be true before downstream controllers consume
+//     attitude output.
+//
+// Generate with --rust-f32.
+// =====================================================================
+
+kind AP_AHRS {
+  identity: ahrsId;
+
+  property ahrsId: String;
+
+  // Attitude state in radians. Initialised to zero (level, north).
+  property roll: Real internal default 0.0;
+  property pitch: Real internal default 0.0;
+  property yaw: Real internal default 0.0;
+
+  // Quaternion (NED → body). Initialised to identity rotation.
+  property q0: Real internal default 1.0;
+  property q1: Real internal default 0.0;
+  property q2: Real internal default 0.0;
+  property q3: Real internal default 0.0;
+
+  // Sensor health. False during boot and after a reset, until the
+  // first successful update() lands.
+  property healthy: Boolean internal default false;
+
+  invariants {
+    self.ahrsId <> null;
+    // Roll wraps to [-PI, PI].
+    self.roll >= 0.0 - 3.14160;
+    self.roll <= 3.14160;
+    // Pitch is bounded to [-PI/2, PI/2] (cannot be vertical).
+    self.pitch >= 0.0 - 1.57080;
+    self.pitch <= 1.57080;
+    // Yaw wraps to [-PI, PI].
+    self.yaw >= 0.0 - 3.14160;
+    self.yaw <= 3.14160;
+  }
+
+  // Periodic AHRS refresh. Pulls fresh IMU/GPS samples (Hardware
+  // effect), runs the active backend (EKF3 / DCM), and writes new
+  // attitude state. Post-conditions: state remains finite and
+  // (typically) healthy after first successful run.
+  event update() {
+    effects: HardwareRead, Telemetry;
+    writes:  roll, pitch, yaw, q0, q1, q2, q3, healthy;
+    post: self.roll.isFinite();
+    post: self.pitch.isFinite();
+    post: self.yaw.isFinite();
+    post: self.q0.isFinite();
+    post: self.q1.isFinite();
+    post: self.q2.isFinite();
+    post: self.q3.isFinite();
+    modifies: self.roll, self.pitch, self.yaw,
+              self.q0, self.q1, self.q2, self.q3,
+              self.healthy;
+  }
+
+  // Hard reset — used during ground init or recovery from sensor
+  // failure. Sets the attitude to level/north and marks unhealthy
+  // until the next update().
+  event reset_attitude() {
+    post: self.roll = 0.0;
+    post: self.pitch = 0.0;
+    post: self.yaw = 0.0;
+    post: self.q0 = 1.0;
+    post: self.q1 = 0.0;
+    post: self.q2 = 0.0;
+    post: self.q3 = 0.0;
+    post: self.healthy = false;
+    modifies: self.roll, self.pitch, self.yaw,
+              self.q0, self.q1, self.q2, self.q3,
+              self.healthy;
+  }
+
+  // Read-back accessors for downstream controllers. Each is a pure
+  // event that returns the field plus its invariant promises.
+  event get_roll(): Real {
+    post: result.isFinite();
+    post: result >= 0.0 - 3.14160;
+    post: result <= 3.14160;
+  }
+
+  event get_pitch(): Real {
+    post: result.isFinite();
+    post: result >= 0.0 - 1.57080;
+    post: result <= 1.57080;
+  }
+
+  event get_yaw(): Real {
+    post: result.isFinite();
+    post: result >= 0.0 - 3.14160;
+    post: result <= 3.14160;
+  }
+
+  // Healthy returns the current health flag — used as a gate by
+  // attitude controllers ("don't drive motors with stale attitude").
+  event is_healthy(): Boolean {
+  }
+}

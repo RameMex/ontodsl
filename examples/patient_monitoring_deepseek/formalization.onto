@@ -1,0 +1,235 @@
+schema "onto/0.1";
+namespace patient_monitoring_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =========================================================================
+// Formalization Stage — Bedside Vital-Signs Monitor
+//
+// CORRECTION strategy:
+//   The PlausibleReadingCommitment predicate uses allInstances() which
+//   is a GLOBAL quantifier. No single event on a single instance can
+//   imply a property about ALL instances. We therefore CANNOT discharge
+//   this commitment from any event on the formalized subkind.
+//
+//   The correct approach: do NOT include a `refines` clause targeting
+//   PlausibleReadingCommitment. Instead, we document the relationship
+//   via the fact that the base kind (BedsideMonitorSystem in discovery)
+//   already specializes PlausibilityConstraints which has the invariant
+//   bearer.implausibleThresholdLower <= 20.0 AND bearer.implausibleThresholdUpper >= 250.0.
+//   That invariant covers the same semantics at the instance level.
+//
+//   The commitment is discharged at the SYSTEM level by the existential
+//   fact that the system EXISTS with those threshold properties. The
+//   vendor fulfills the commitment by BUILDING a system that conforms
+//   to PlausibilityConstraints. No event-level refines is needed.
+// =========================================================================
+
+// ─── Regulatory Anchor: FDA 510(k) Clearance ─────────────────────────
+category Fda510kCleared {
+  property fda510kNumber: String;
+  property indicationsForUse: String;
+  property submissionDate: Real;
+  invariants {
+    self.fda510kNumber <> null;
+    self.indicationsForUse <> null;
+    self.submissionDate > 0.0;
+  }
+}
+
+// ─── Regulatory Anchor: IEC 62304 Class C ─────────────────────────────
+category Iec62304ClassC {
+  property softwareSafetyClass: String;
+  property riskManagementFileRef: String;
+  invariants {
+    self.softwareSafetyClass = 'C';
+    self.riskManagementFileRef <> null;
+  }
+}
+
+// ─── Regulatory Anchor: HIPAA Compliance ─────────────────────────────
+category HipaaCompliant {
+  property phiHandlingPolicyRef: String;
+  property breachNotificationContact: String;
+  invariants {
+    self.phiHandlingPolicyRef <> null;
+    self.breachNotificationContact <> null;
+  }
+}
+
+// ─── Regulatory Anchor: AAMI/IEC 60601-1-8 ────────────────────────────
+category AamiIec60601_1_8Alarms {
+  property alarmPriorityLevels: String;
+  property alarmAudiblePatternsRef: String;
+  property maxAlarmLatencySeconds: Real;
+  invariants {
+    self.alarmPriorityLevels <> null;
+    self.alarmAudiblePatternsRef <> null;
+    self.maxAlarmLatencySeconds <= 2.0;
+  }
+}
+
+// ─── Formalized System Subkind ────────────────────────────────────────
+subkind BedsideMonitorSystemFormalized specializes BedsideMonitorSystemRequirements {
+  property fda510kNumber: String;
+  property indicationsForUse: String;
+  property submissionDate: Real;
+
+  property softwareSafetyClass: String;
+  property riskManagementFileRef: String;
+
+  property phiHandlingPolicyRef: String;
+  property breachNotificationContact: String;
+
+  property alarmPriorityLevels: String;
+  property alarmAudiblePatternsRef: String;
+  property maxAlarmLatencySeconds: Real;
+
+  invariants {
+    self.fda510kNumber <> null;
+    self.indicationsForUse <> null;
+    self.submissionDate > 0.0;
+    self.softwareSafetyClass = 'C';
+    self.riskManagementFileRef <> null;
+    self.phiHandlingPolicyRef <> null;
+    self.breachNotificationContact <> null;
+    self.alarmPriorityLevels <> null;
+    self.alarmAudiblePatternsRef <> null;
+    self.maxAlarmLatencySeconds <= 2.0;
+  }
+
+  // ─── Configuration Event (no refines to PlausibleReadingCommitment) ─
+  // The discovery commitment uses allInstances() which cannot be
+  // discharged by an instance-level event. The PlausibilityConstraints
+  // category (specialized by BedsideMonitorSystem in discovery) already
+  // provides the invariant coverage at the system kind level.
+  event formalConfigurePlausibilityBounds(
+    lowerBound: Real,
+    upperBound: Real,
+    alarmLatencyMs: Real,
+    signalLossMs: Real,
+    silenceRearmMs: Real
+  ) {
+    pre: lowerBound <= 20.0;
+    pre: upperBound >= 250.0;
+    pre: upperBound > lowerBound;
+    pre: alarmLatencyMs > 0.0;
+    pre: signalLossMs > 0.0;
+    pre: silenceRearmMs > 0.0;
+    post: self.implausibleThresholdLower = lowerBound;
+    post: self.implausibleThresholdUpper = upperBound;
+    post: self.maxAlarmLatencyMs = alarmLatencyMs;
+    post: self.maxSignalLossMsBeforeAlarm = signalLossMs;
+    post: self.silenceAutoRearmMs = silenceRearmMs;
+    post: self.alarmThresholdsConfigured = true;
+    modifies: self.implausibleThresholdLower, self.implausibleThresholdUpper,
+              self.maxAlarmLatencyMs, self.maxSignalLossMsBeforeAlarm,
+              self.silenceAutoRearmMs, self.alarmThresholdsConfigured;
+  }
+
+  // ─── Active Business Rule: Reject Implausible Reading ──────────────
+  event formalRejectImplausibleReading(newValue: Real, timestamp: Real) {
+    pre: timestamp >= 0.0;
+    pre: newValue < self.implausibleThresholdLower or
+         newValue > self.implausibleThresholdUpper;
+    pre: self.sensorConnected = true;
+    pre: self.implausibleThresholdLower <= 20.0;
+    pre: self.implausibleThresholdUpper >= 250.0;
+    post: self.heartRatePlausible = false;
+    post: self.rejectionCount = self.rejectionCount@pre + 1;
+    post: self.currentHeartRate = self.currentHeartRate@pre;
+    post: self.sensorLastSignalTimestamp = timestamp;
+    modifies: self.heartRatePlausible, self.rejectionCount, self.sensorLastSignalTimestamp;
+  }
+
+  // ─── Active Business Rule: Reject Zero / Negative Reading ──────────
+  event formalRejectNonPositiveReading(newValue: Real, timestamp: Real) {
+    pre: timestamp >= 0.0;
+    pre: newValue <= 0.0;
+    pre: self.sensorConnected = true;
+    pre: self.implausibleThresholdLower <= 20.0;
+    pre: self.implausibleThresholdUpper >= 250.0;
+    post: self.heartRatePlausible = false;
+    post: self.rejectionCount = self.rejectionCount@pre + 1;
+    post: self.currentHeartRate = self.currentHeartRate@pre;
+    post: self.sensorLastSignalTimestamp = timestamp;
+    modifies: self.heartRatePlausible, self.rejectionCount, self.sensorLastSignalTimestamp;
+  }
+
+  // ─── Active Business Rule: Threshold Alarm Latency Guard ───────────
+  event formalEnforceAlarmLatency(vitalType: String, actualValue: Real, crossingTimestamp: Real)
+    refines patient_monitoring_discovery::AlarmLatencyCommitment {
+    pre: crossingTimestamp >= 0.0;
+    pre: (actualValue > self.implausibleThresholdUpper) or
+         (actualValue < self.implausibleThresholdLower);
+    pre: crossingTimestamp - self.sensorLastSignalTimestamp > self.maxAlarmLatencyMs;
+    pre: self.alarmActive = false;
+    post: self.alarmActive = true;
+    post: self.alarmSilenced = false;
+    post: self.alarmType = if actualValue > self.implausibleThresholdUpper then 'high_hr' else 'low_hr' endif;
+    modifies: self.alarmActive, self.alarmSilenced, self.alarmType;
+  }
+
+  // ─── Active Business Rule: Sensor-Disconnect Enforcement ───────────
+  event formalEnforceSensorDisconnect(signalGapDetectedAt: Real)
+    refines patient_monitoring_discovery::SensorDisconnectCommitment {
+    pre: signalGapDetectedAt >= 0.0;
+    pre: self.sensorConnected = true;
+    pre: signalGapDetectedAt - self.sensorLastSignalTimestamp > self.maxSignalLossMsBeforeAlarm;
+    pre: self.alarmActive = false;
+    post: self.sensorConnected = false;
+    post: self.alarmActive = true;
+    post: self.alarmSilenced = false;
+    post: self.alarmType = 'disconnect';
+    modifies: self.sensorConnected, self.alarmActive, self.alarmSilenced, self.alarmType;
+  }
+
+  // ─── Active Business Rule: Silence Auto-Rearm Enforcement ──────────
+  event formalEnforceAutoRearm(rearmTimestamp: Real)
+    refines patient_monitoring_discovery::SilenceAutoRearmCommitment {
+    pre: rearmTimestamp >= 0.0;
+    pre: self.alarmSilenced = true;
+    pre: rearmTimestamp - self.alarmSilenceTimestamp >= self.silenceAutoRearmMs;
+    post: self.alarmSilenced = false;
+    post: self.alarmActive = true;
+    post: self.alarmSilenceTimestamp = self.alarmSilenceTimestamp@pre;
+    modifies: self.alarmSilenced;
+  }
+}
+
+// ─── Passive Assumption Record ────────────────────────────────────────
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+
+  // @assumption ASSUME-1: The ECG sensor delivers readings at a minimum
+  //   rate of 1 Hz (1 reading per second). The 5-second disconnect
+  //   threshold assumes at least one reading per second.
+  property assumption1: String;
+
+  // @assumption ASSUME-2: The clinician will configure alarm thresholds
+  //   during device setup before patient monitoring begins.
+  property assumption2: String;
+
+  // @assumption ASSUME-3: Network latency between sensor and monitor is
+  //   negligible (< 10 ms). The 2-second alarm latency budget assumes
+  //   no significant communication delay.
+  property assumption3: String;
+
+  // @assumption ASSUME-4: The monitor has an internal clock with at
+  //   least 100 ms resolution for timestamping events.
+  property assumption4: String;
+
+  // @assumption ASSUME-5: The alarm silencing button is a hardware input
+  //   with debounce < 50 ms — no software debounce needed.
+  property assumption5: String;
+
+  invariants {
+    self.assumptionId <> null;
+    self.assumption1 <> null;
+    self.assumption2 <> null;
+    self.assumption3 <> null;
+    self.assumption4 <> null;
+    self.assumption5 <> null;
+  }
+}

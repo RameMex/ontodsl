@@ -1,0 +1,77 @@
+schema "onto/0.1";
+namespace ardupilot_gps;
+
+// AP_GPS is the generic GPS frontend that fuses readings from up to 3 backend drivers.
+kind AP_GPS {
+  identity: gpsId;
+
+  property gpsId: String;
+
+  // Latest fix data
+  property latestFixLat: Real;
+  property latestFixLon: Real;
+  property latestFixAlt: Real;
+
+  // Ground movement data
+  property groundSpeed: Real;
+  property groundCourse: Real;
+
+  // Position accuracy
+  property hdop: Real; // Horizontal Dilution of Precision
+  property vdop: Real; // Vertical Dilution of Precision
+
+  // Fix status and metadata
+  property fixType: Integer;        // 0=NoFix, 1=NoFix2D, 2=2D, 3=3D, 4=DGPS, 5=Float, 6=RTK
+  property satelliteCount: Integer;
+  property lastFixTimeUs: Integer;  // Microseconds since boot
+
+  invariants {
+    self.gpsId <> null;
+    self.latestFixLat >= -90.0;
+    self.latestFixLat <= 90.0;
+    self.latestFixLon >= -180.0;
+    self.latestFixLon <= 180.0;
+    self.latestFixAlt.isFinite();
+    self.groundSpeed >= 0.0;
+    self.groundSpeed.isFinite();
+    self.groundCourse >= 0.0;
+    self.groundCourse <= 360.0;
+    self.groundCourse.isFinite();
+    self.hdop.isFinite();
+    self.vdop.isFinite();
+    self.fixType >= 0;
+    self.fixType <= 6;
+    // HDOP/VDOP are meaningful only if a fix type is present (not NoFix)
+    self.fixType > 0 implies self.hdop >= 0.0;
+    self.fixType > 0 implies self.vdop >= 0.0;
+    self.satelliteCount >= 0;
+    self.lastFixTimeUs >= 0;
+  }
+
+  // Polls backend drivers and updates the internal state with the highest-quality fix.
+  event update() {
+    modifies: self.latestFixLat, self.latestFixLon, self.latestFixAlt,
+              self.groundSpeed, self.groundCourse,
+              self.hdop, self.vdop,
+              self.fixType, self.satelliteCount, self.lastFixTimeUs;
+    effects: { HardwareRead, Telemetry };
+  }
+
+  // Queries for individual components of the current fix.
+  query getLatitude(): Real {
+    body: self.latestFixLat;
+  }
+
+  query getLongitude(): Real {
+    body: self.latestFixLon;
+  }
+
+  query getAltitude(): Real {
+    body: self.latestFixAlt;
+  }
+
+  // Returns the current GPS fix type.
+  query status(): Integer {
+    body: self.fixType;
+  }
+}

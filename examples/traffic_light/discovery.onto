@@ -1,0 +1,268 @@
+schema "onto/0.1";
+namespace traffic_light_discovery;
+
+// =====================================================================
+// Discovery — Intersection Traffic Light Controller
+//
+// Captures: stakeholders, vendor agent, glossary kinds, constraint
+// goal categories, hard-goal commitments, and domain story happenings.
+// The system kind does NOT appear here; that belongs to Requirements.
+// =====================================================================
+
+// ─── Glossary Kinds ──────────────────────────────────────────────────
+
+kind Approach {
+  identity: approachId;
+  property approachId: String;
+  property direction: String;
+  property signalState: String;
+  invariants {
+    self.approachId <> null;
+    self.direction <> null;
+    self.signalState <> null;
+  }
+}
+
+kind Phase {
+  identity: phaseId;
+  property phaseId: String;
+  property configuredDurationSeconds: Real;
+  property greenApproaches: Set<Approach>;
+  property redApproaches: Set<Approach>;
+  invariants {
+    self.phaseId <> null;
+    self.configuredDurationSeconds > 0.0;
+  }
+}
+
+kind YellowInterval {
+  identity: intervalId;
+  property intervalId: String;
+  property durationSeconds: Real;
+  property approach: Approach;
+  invariants {
+    self.intervalId <> null;
+    self.durationSeconds >= 3.0;
+    self.approach <> null;
+  }
+}
+
+kind PreemptionEvent {
+  identity: preemptionId;
+  property preemptionId: String;
+  property sensorActivatedAt: Real;
+  property allRedCommandedAt: Real;
+  property responseTimeSeconds: Real;
+  invariants {
+    self.preemptionId <> null;
+    self.responseTimeSeconds >= 0.0;
+    self.responseTimeSeconds <= 1.0;
+  }
+}
+
+kind PedestrianRequest {
+  identity: requestId;
+  property requestId: String;
+  property approach: Approach;
+  property walkGranted: Boolean;
+  invariants {
+    self.requestId <> null;
+    self.approach <> null;
+  }
+}
+
+// ─── Stakeholder Agents ──────────────────────────────────────────────
+
+agent RoadUser {
+  identity: roadUserId;
+  property roadUserId: String;
+  property userType: String;
+  invariants {
+    self.roadUserId <> null;
+  }
+}
+
+agent Pedestrian {
+  identity: pedestrianId;
+  property pedestrianId: String;
+  invariants {
+    self.pedestrianId <> null;
+  }
+}
+
+agent EmergencyResponder {
+  identity: responderId;
+  property responderId: String;
+  property vehicleType: String;
+  invariants {
+    self.responderId <> null;
+  }
+}
+
+agent TrafficAuthority {
+  identity: authorityId;
+  property authorityId: String;
+  property jurisdiction: String;
+  invariants {
+    self.authorityId <> null;
+  }
+}
+
+// The dev / vendor team — debitor of every stakeholder commitment.
+// The system kind does not exist yet; the vendor is the organisation
+// promising to build the controller.
+agent TrafficLightVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+  }
+}
+
+// ─── Constraint Goal Categories ──────────────────────────────────────
+
+// GOAL-1: Mutual exclusion of conflicting GREENs.
+// Referenced by the system kind in Requirements via 'specializes'.
+category MutualExclusionConstraints {
+  invariants {
+    true;
+  }
+}
+
+// GOAL-2: Yellow interval before RED.
+category YellowIntervalConstraints {
+  invariants {
+    true;
+  }
+}
+
+// GOAL-3: Emergency preemption within 1 second.
+category PreemptionTimingConstraints {
+  invariants {
+    true;
+  }
+}
+
+// GOAL-4: Pedestrian WALK safety (no WALK concurrent with conflicting GREEN).
+category PedestrianSafetyConstraints {
+  invariants {
+    true;
+  }
+}
+
+// ─── Hard-Goal Commitments ───────────────────────────────────────────
+
+// GOAL-1: No two crossing approaches simultaneously in GREEN.
+commitment MutualExclusionCommitment
+  debitor: TrafficLightVendor
+  creditor: RoadUser {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxSimultaneousConflictingGreens: Integer;
+    predicate: self.maxSimultaneousConflictingGreens = 0;
+  }
+
+// GOAL-2: Every GREEN→RED transition includes a YELLOW of >= 3 seconds.
+commitment YellowIntervalCommitment
+  debitor: TrafficLightVendor
+  creditor: RoadUser {
+    identity: commitmentId;
+    property commitmentId: String;
+    property minimumYellowSeconds: Real;
+    predicate: self.minimumYellowSeconds >= 3.0;
+  }
+
+// GOAL-3: ALL-RED commanded within 1 second of preemption sensor activation.
+commitment EmergencyPreemptionCommitment
+  debitor: TrafficLightVendor
+  creditor: EmergencyResponder {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxPreemptionResponseSeconds: Real;
+    predicate: self.maxPreemptionResponseSeconds <= 1.0;
+  }
+
+// GOAL-4: WALK granted in next compatible phase after pedestrian request.
+commitment PedestrianWalkCommitment
+  debitor: TrafficLightVendor
+  creditor: Pedestrian {
+    identity: commitmentId;
+    property commitmentId: String;
+    property walkRequestHonoured: Boolean;
+    predicate: self.walkRequestHonoured = true;
+  }
+
+// Vision statement: the vendor commits to safe, responsive intersection
+// control for the traffic authority.
+commitment SafeIntersectionControlCommitment
+  debitor: TrafficLightVendor
+  creditor: TrafficAuthority {
+    identity: commitmentId;
+    property commitmentId: String;
+    property safetyGuaranteed: Boolean;
+    predicate: self.safetyGuaranteed = true;
+  }
+
+// ─── Domain Story Happenings ─────────────────────────────────────────
+
+// Normal phase cycle: GREEN → YELLOW → RED → (all-red dwell) → next GREEN.
+happening NormalPhaseCycleFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+// Sub-story: GREEN side transitions through YELLOW to RED.
+happening GreenToRedTransitionFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property yellowDurationSeconds: Real;
+  invariants {
+    self.flowId <> null;
+    self.yellowDurationSeconds >= 3.0;
+  }
+}
+
+// Sub-story: all-red dwell before next phase begins.
+happening AllRedDwellFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+// Emergency preemption flow: sensor fires → ALL-RED within 1 second → vehicle passes → resume.
+happening EmergencyPreemptionFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property sensorActivatedAt: Real;
+  property allRedCommandedAt: Real;
+  invariants {
+    self.flowId <> null;
+    self.allRedCommandedAt >= self.sensorActivatedAt;
+    (self.allRedCommandedAt - self.sensorActivatedAt) <= 1.0;
+  }
+}
+
+// Pedestrian request flow: button pressed → request registered → WALK in next compatible phase.
+happening PedestrianRequestFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}

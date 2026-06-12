@@ -1,0 +1,530 @@
+schema "onto/0.1";
+namespace smart_thermostat_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// DESIGN STAGE — Component Decomposition
+// =====================================================================
+
+// ─── Component: TemperatureSensor ───────────────────────────────────
+kind TemperatureSensor {
+  identity: sensorId;
+  property sensorId: String;
+  property lastReading: Real;
+  property lastTimestamp: Real;
+  property isOperational: Boolean;
+
+  invariants {
+    self.sensorId <> null;
+    self.lastTimestamp >= 0.0;
+    self.isOperational = true or self.isOperational = false;
+  }
+
+  event takeReading(value: Real, timestamp: Real)
+    refines smart_thermostat_requirements::ThermostatSystem.processSensorReading {
+    pre: value >= -200.0;
+    pre: value <= 200.0;
+    pre: timestamp >= 0.0;
+    pre: self.isOperational;
+    post: self.lastReading = value;
+    post: self.lastTimestamp = timestamp;
+    post: self.isOperational = self.isOperational@pre;
+    modifies: self.lastReading, self.lastTimestamp;
+  }
+
+  event setFaulty() {
+    pre: self.isOperational;
+    post: self.isOperational = false;
+    modifies: self.isOperational;
+  }
+
+  event restore() {
+    pre: not self.isOperational;
+    post: self.isOperational = true;
+    post: self.lastReading = self.lastReading@pre;
+    post: self.lastTimestamp = self.lastTimestamp@pre;
+    modifies: self.isOperational;
+  }
+}
+
+// ─── Component: SetpointController ─────────────────────────────────
+kind SetpointController {
+  identity: controllerId;
+  property controllerId: String;
+  property clampedSetpoint: Real;
+  property safeMin: Real;
+  property safeMax: Real;
+  property currentTemperatureInput: Real;
+  property decisionCommand: String;
+
+  invariants {
+    self.controllerId <> null;
+    self.safeMin >= 40.0;
+    self.safeMax <= 90.0;
+    self.clampedSetpoint >= self.safeMin;
+    self.clampedSetpoint <= self.safeMax;
+    self.currentTemperatureInput >= -200.0;
+    self.currentTemperatureInput <= 200.0;
+    self.decisionCommand = 'HEAT' or self.decisionCommand = 'COOL' or self.decisionCommand = 'OFF';
+  }
+
+  event receiveUserSetpoint(requestedSetpoint: Real)
+    refines smart_thermostat_requirements::ThermostatSystem.setUserSetpoint {
+    pre: requestedSetpoint >= -100.0;
+    pre: self.safeMin >= 40.0;
+    pre: self.safeMax <= 90.0;
+    post: self.clampedSetpoint = if requestedSetpoint < self.safeMin then self.safeMin
+                                  else if requestedSetpoint > self.safeMax then self.safeMax
+                                  else requestedSetpoint endif endif;
+    post: self.currentTemperatureInput = self.currentTemperatureInput@pre;
+    post: self.decisionCommand = self.decisionCommand@pre;
+    modifies: self.clampedSetpoint;
+  }
+
+  event receiveTemperatureInput(temp: Real)
+    refines smart_thermostat_requirements::ThermostatSystem.processSensorReading {
+    pre: temp >= -200.0;
+    pre: temp <= 200.0;
+    post: self.currentTemperatureInput = temp;
+    post: self.decisionCommand =
+      if temp < self.clampedSetpoint - 1.0 then 'HEAT'
+      else if temp > self.clampedSetpoint + 1.0 then 'COOL'
+      else 'OFF' endif endif;
+    post: self.clampedSetpoint = self.clampedSetpoint@pre;
+    modifies: self.currentTemperatureInput, self.decisionCommand;
+  }
+
+  event clearDecision() {
+    pre: true;
+    post: self.decisionCommand = 'OFF';
+    post: self.clampedSetpoint = self.clampedSetpoint@pre;
+    post: self.currentTemperatureInput = self.currentTemperatureInput@pre;
+    modifies: self.decisionCommand;
+  }
+
+  event initialize(clamped: Real, temp: Real) {
+    pre: clamped >= 40.0;
+    pre: clamped <= 90.0;
+    pre: temp >= -200.0;
+    pre: temp <= 200.0;
+    post: self.clampedSetpoint = clamped;
+    post: self.currentTemperatureInput = temp;
+    post: self.decisionCommand = 'OFF';
+    modifies: self.clampedSetpoint, self.currentTemperatureInput, self.decisionCommand;
+  }
+}
+
+// ─── Component: ActuatorDriver ──────────────────────────────────────
+kind ActuatorDriver {
+  identity: driverId;
+  property driverId: String;
+  property commandedState: String;
+  property lastTransitionTimestamp: Real;
+  property minIntervalSecs: Real;
+
+  invariants {
+    self.driverId <> null;
+    self.commandedState = 'HEAT' or self.commandedState = 'COOL' or self.commandedState = 'OFF';
+    self.lastTransitionTimestamp >= 0.0;
+    self.minIntervalSecs >= 300.0;
+  }
+
+  event issueCommand(newState: String, timestamp: Real)
+    refines smart_thermostat_requirements::ThermostatSystem.requestCommandTransition,
+            smart_thermostat_formalization::ThermostatSystemFormalized.guardCyclingViolation {
+    pre: newState = 'HEAT' or newState = 'COOL' or newState = 'OFF';
+    pre: timestamp >= 0.0;
+    pre: if newState <> self.commandedState then
+           timestamp - self.lastTransitionTimestamp >= self.minIntervalSecs
+         else
+           true
+         endif;
+    post: if newState <> self.commandedState@pre then
+            self.commandedState = newState
+            and
+            self.lastTransitionTimestamp = timestamp
+          else
+            self.commandedState = self.commandedState@pre
+            and
+            self.lastTransitionTimestamp = timestamp
+          endif;
+    modifies: self.commandedState, self.lastTransitionTimestamp;
+  }
+
+  event forceOff(timestamp: Real) {
+    pre: timestamp >= 0.0;
+    post: self.commandedState = 'OFF';
+    post: self.lastTransitionTimestamp = timestamp;
+    modifies: self.commandedState, self.lastTransitionTimestamp;
+  }
+
+  event initialize() {
+    pre: true;
+    post: self.commandedState = 'OFF';
+    post: self.lastTransitionTimestamp = 0.0;
+    modifies: self.commandedState, self.lastTransitionTimestamp;
+  }
+}
+
+// ─── Component: DisplayManager ──────────────────────────────────────
+kind DisplayManager {
+  identity: displayId;
+  property displayId: String;
+  property displayedTemperature: Real;
+  property displayedSetpoint: Real;
+  property displayedActuatorState: String;
+  property displayError: String;
+  property isErrorActive: Boolean;
+
+  invariants {
+    self.displayId <> null;
+    self.displayedActuatorState = 'HEAT' or self.displayedActuatorState = 'COOL' or self.displayedActuatorState = 'OFF' or self.displayedActuatorState = 'SAFE_HALT';
+  }
+
+  event updateTemperature(temp: Real)
+    refines smart_thermostat_requirements::ThermostatSystem.displayCurrentState {
+    pre: temp >= -200.0;
+    pre: temp <= 200.0;
+    post: self.displayedTemperature = temp;
+    post: self.displayedSetpoint = self.displayedSetpoint@pre;
+    post: self.displayedActuatorState = self.displayedActuatorState@pre;
+    post: self.displayError = self.displayError@pre;
+    post: self.isErrorActive = self.isErrorActive@pre;
+    modifies: self.displayedTemperature;
+  }
+
+  event updateSetpoint(real: Real) {
+    pre: real >= 40.0;
+    pre: real <= 90.0;
+    post: self.displayedSetpoint = real;
+    post: self.displayedTemperature = self.displayedTemperature@pre;
+    post: self.displayedActuatorState = self.displayedActuatorState@pre;
+    post: self.displayError = self.displayError@pre;
+    post: self.isErrorActive = self.isErrorActive@pre;
+    modifies: self.displayedSetpoint;
+  }
+
+  event updateActuatorState(state: String)
+    refines smart_thermostat_requirements::ThermostatSystem.displayCurrentState {
+    pre: state = 'HEAT' or state = 'COOL' or state = 'OFF' or state = 'SAFE_HALT';
+    post: self.displayedActuatorState = state;
+    post: self.displayedTemperature = self.displayedTemperature@pre;
+    post: self.displayedSetpoint = self.displayedSetpoint@pre;
+    post: self.displayError = self.displayError@pre;
+    post: self.isErrorActive = self.isErrorActive@pre;
+    modifies: self.displayedActuatorState;
+  }
+
+  event showError(message: String) {
+    pre: message <> null;
+    post: self.displayError = message;
+    post: self.displayedActuatorState = 'SAFE_HALT';
+    post: self.isErrorActive = true;
+    post: self.displayedTemperature = self.displayedTemperature@pre;
+    post: self.displayedSetpoint = self.displayedSetpoint@pre;
+    modifies: self.displayError, self.displayedActuatorState, self.isErrorActive;
+  }
+
+  event clearError() {
+    pre: true;
+    post: self.displayError = '';
+    post: self.isErrorActive = false;
+    post: self.displayedSetpoint = self.displayedSetpoint@pre;
+    post: self.displayedTemperature = self.displayedTemperature@pre;
+    post: self.displayedActuatorState = self.displayedActuatorState@pre;
+    modifies: self.displayError, self.isErrorActive;
+  }
+
+  event initialize(setpoint: Real, temp: Real) {
+    pre: setpoint >= 40.0;
+    pre: setpoint <= 90.0;
+    pre: temp >= -200.0;
+    pre: temp <= 200.0;
+    post: self.displayedTemperature = temp;
+    post: self.displayedSetpoint = setpoint;
+    post: self.displayedActuatorState = 'OFF';
+    post: self.displayError = '';
+    post: self.isErrorActive = false;
+    modifies: self.displayedTemperature, self.displayedSetpoint, self.displayedActuatorState,
+              self.displayError, self.isErrorActive;
+  }
+}
+
+// ─── Component: SafetyMonitor ───────────────────────────────────────
+kind SafetyMonitor {
+  identity: monitorId;
+  property monitorId: String;
+  property plausibilityMin: Real;
+  property plausibilityMax: Real;
+  property systemHalted: Boolean;
+  property faultAlertRaised: Boolean;
+
+  invariants {
+    self.monitorId <> null;
+    self.plausibilityMin <= -40.0;
+    self.plausibilityMax >= 150.0;
+  }
+
+  event inspectReading(reading: Real, timestamp: Real): Boolean
+    refines smart_thermostat_requirements::ThermostatSystem.processSensorReading,
+            smart_thermostat_formalization::ThermostatSystemFormalized.guardPlausibleReading {
+    pre: reading >= -200.0;
+    pre: reading <= 200.0;
+    pre: timestamp >= 0.0;
+
+    post: if reading < self.plausibilityMin or reading > self.plausibilityMax then
+            self.systemHalted = true
+            and
+            self.faultAlertRaised = true
+            and
+            result = false
+          else
+            self.systemHalted = self.systemHalted@pre
+            and
+            self.faultAlertRaised = self.faultAlertRaised@pre
+            and
+            result = true
+          endif;
+
+    modifies: self.systemHalted, self.faultAlertRaised;
+  }
+
+  event reset() {
+    pre: true;
+    post: self.systemHalted = false;
+    post: self.faultAlertRaised = false;
+    modifies: self.systemHalted, self.faultAlertRaised;
+  }
+
+  event initialize() {
+    pre: true;
+    post: self.systemHalted = false;
+    post: self.faultAlertRaised = false;
+    modifies: self.systemHalted, self.faultAlertRaised;
+  }
+}
+
+// ─── Interface: SensorChannel ───────────────────────────────────────
+role SensorProvider mediated-by SensorChannel of TemperatureSensor {
+  property sensorId: String;
+  property lastReading: Real;
+  property isOperational: Boolean;
+}
+
+role SensorConsumer mediated-by SensorChannel of SafetyMonitor {
+  property monitorId: String;
+  property plausibilityMin: Real;
+  property plausibilityMax: Real;
+}
+
+relator SensorChannel mediates (SensorProvider, SensorConsumer) {
+  identity: channelId;
+  property channelId: String;
+  property sensorPlausibilityMin: Real;
+  property sensorPlausibilityMax: Real;
+  property lastDeliveredReading: Real;
+  property lastDeliveredTimestamp: Real;
+  property readingIsPlausible: Boolean;
+
+  invariants {
+    self.channelId <> null;
+    self.sensorPlausibilityMin <= -40.0;
+    self.sensorPlausibilityMax >= 150.0;
+    self.lastDeliveredTimestamp >= 0.0;
+  }
+
+  event deliverReading(value: Real, timestamp: Real): Boolean {
+    pre: value >= -200.0;
+    pre: value <= 200.0;
+    pre: timestamp >= 0.0;
+    post: self.lastDeliveredReading = value;
+    post: self.lastDeliveredTimestamp = timestamp;
+    post: self.readingIsPlausible = (value >= self.sensorPlausibilityMin and value <= self.sensorPlausibilityMax);
+    post: result = self.readingIsPlausible;
+    modifies: self.lastDeliveredReading, self.lastDeliveredTimestamp, self.readingIsPlausible;
+  }
+
+  event updatePlausibilityBounds(newMin: Real, newMax: Real) {
+    pre: newMin <= -40.0;
+    pre: newMax >= 150.0;
+    pre: newMin < newMax;
+    post: self.sensorPlausibilityMin = newMin;
+    post: self.sensorPlausibilityMax = newMax;
+    modifies: self.sensorPlausibilityMin, self.sensorPlausibilityMax;
+  }
+}
+
+// ─── Interface: ControlBus ──────────────────────────────────────────
+role ControllerEndpoint mediated-by ControlBus of SetpointController {
+  property controllerId: String;
+  property decisionCommand: String;
+  property currentTemperatureInput: Real;
+}
+
+role ActuatorEndpoint mediated-by ControlBus of ActuatorDriver {
+  property driverId: String;
+  property commandedState: String;
+  property lastTransitionTimestamp: Real;
+  property minIntervalSecs: Real;
+}
+
+relator ControlBus mediates (ControllerEndpoint, ActuatorEndpoint) {
+  identity: busId;
+  property busId: String;
+  property lastCommand: String;
+  property cyclingAllowed: Boolean;
+
+  invariants {
+    self.busId <> null;
+    self.lastCommand = 'HEAT' or self.lastCommand = 'COOL' or self.lastCommand = 'OFF';
+  }
+
+  // Properties tracking the endpoints' relevant state for this interface
+  property endpointCommandedState: String;
+  property endpointLastTransitionTimestamp: Real;
+  property endpointMinIntervalSecs: Real;
+  property endpointDecisionCommand: String;
+
+  invariants {
+    self.endpointCommandedState = 'HEAT' or self.endpointCommandedState = 'COOL' or self.endpointCommandedState = 'OFF';
+    self.endpointLastTransitionTimestamp >= 0.0;
+    self.endpointMinIntervalSecs >= 300.0;
+    self.endpointDecisionCommand = 'HEAT' or self.endpointDecisionCommand = 'COOL' or self.endpointDecisionCommand = 'OFF';
+  }
+
+  event transmitCommand(command: String, timestamp: Real) {
+    pre: command = 'HEAT' or command = 'COOL' or command = 'OFF';
+    pre: timestamp >= 0.0;
+    pre: if command <> self.endpointCommandedState then
+           timestamp - self.endpointLastTransitionTimestamp >= self.endpointMinIntervalSecs
+         else
+           true
+         endif;
+    post: self.lastCommand = command;
+    post: if command <> self.endpointCommandedState@pre then
+            self.endpointCommandedState = command
+            and
+            self.endpointLastTransitionTimestamp = timestamp
+          else
+            self.endpointCommandedState = self.endpointCommandedState@pre
+            and
+            self.endpointLastTransitionTimestamp = timestamp
+          endif;
+    modifies: self.lastCommand, self.endpointCommandedState, self.endpointLastTransitionTimestamp;
+  }
+
+  event transmitOffCommand(timestamp: Real) {
+    pre: timestamp >= 0.0;
+    post: self.lastCommand = 'OFF';
+    post: self.endpointCommandedState = 'OFF';
+    post: self.endpointLastTransitionTimestamp = timestamp;
+    modifies: self.lastCommand, self.endpointCommandedState, self.endpointLastTransitionTimestamp;
+  }
+
+  event syncDecisionCommand(cmd: String) {
+    pre: cmd = 'HEAT' or cmd = 'COOL' or cmd = 'OFF';
+    post: self.endpointDecisionCommand = cmd;
+    modifies: self.endpointDecisionCommand;
+  }
+
+  event syncActuatorState(state: String, ts: Real) {
+    pre: state = 'HEAT' or state = 'COOL' or state = 'OFF';
+    pre: ts >= 0.0;
+    post: self.endpointCommandedState = state;
+    post: self.endpointLastTransitionTimestamp = ts;
+    modifies: self.endpointCommandedState, self.endpointLastTransitionTimestamp;
+  }
+}
+
+// ─── Interface: UserInterfaceBus ────────────────────────────────────
+role DisplayEndpoint mediated-by UserInterfaceBus of DisplayManager {
+  property displayId: String;
+  property displayedTemperature: Real;
+  property displayedSetpoint: Real;
+  property displayedActuatorState: String;
+  property isErrorActive: Boolean;
+}
+
+role SetpointSource mediated-by UserInterfaceBus of SetpointController {
+  property controllerId: String;
+  property clampedSetpoint: Real;
+  property decisionCommand: String;
+}
+
+role ActuatorStateSource mediated-by UserInterfaceBus of ActuatorDriver {
+  property driverId: String;
+  property commandedState: String;
+}
+
+role SafetyStatusSource mediated-by UserInterfaceBus of SafetyMonitor {
+  property monitorId: String;
+  property systemHalted: Boolean;
+  property faultAlertRaised: Boolean;
+}
+
+relator UserInterfaceBus mediates (DisplayEndpoint, SetpointSource, ActuatorStateSource, SafetyStatusSource) {
+  identity: busId;
+  property busId: String;
+  property currentDisplayState: String;
+  property errorMessage: String;
+
+  // Properties mirroring relevant source state for the display
+  property sourceTemperature: Real;
+  property sourceSetpoint: Real;
+  property sourceActuatorState: String;
+  property sourceHalted: Boolean;
+  property sourceFaultActive: Boolean;
+
+  invariants {
+    self.busId <> null;
+    self.sourceActuatorState = 'HEAT' or self.sourceActuatorState = 'COOL' or self.sourceActuatorState = 'OFF' or self.sourceActuatorState = 'SAFE_HALT';
+  }
+
+  event refreshDisplay(timestamp: Real) {
+    pre: timestamp >= 0.0;
+    post: self.currentDisplayState = if self.sourceHalted then 'SAFE_HALT'
+                                       else self.sourceActuatorState endif;
+    modifies: self.currentDisplayState;
+  }
+
+  event syncDisplayData(temp: Real, setpoint: Real, actuatorState: String, halted: Boolean, faultActive: Boolean) {
+    pre: temp >= -200.0;
+    pre: temp <= 200.0;
+    pre: setpoint >= 40.0;
+    pre: setpoint <= 90.0;
+    pre: actuatorState = 'HEAT' or actuatorState = 'COOL' or actuatorState = 'OFF' or actuatorState = 'SAFE_HALT';
+    post: self.sourceTemperature = temp;
+    post: self.sourceSetpoint = setpoint;
+    post: self.sourceActuatorState = actuatorState;
+    post: self.sourceHalted = halted;
+    post: self.sourceFaultActive = faultActive;
+    post: self.currentDisplayState = if halted then 'SAFE_HALT' else actuatorState endif;
+    modifies: self.sourceTemperature, self.sourceSetpoint, self.sourceActuatorState,
+              self.sourceHalted, self.sourceFaultActive, self.currentDisplayState;
+  }
+}
+
+// ─── Happening: SensorReadCycle ─────────────────────────────────────
+happening SensorReadCycle {
+  identity: cycleId;
+  property cycleId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property steps: String;
+
+  invariants {
+    self.cycleId <> null;
+  }
+}
+
+// ─── Explicit Relations ─────────────────────────────────────────────
+relation sensorChannelMed: <<mediation>> from SensorChannel [1] to SensorProvider [1];
+relation sensorConsumerMed: <<mediation>> from SensorChannel [1] to SensorConsumer [1];
+relation controlBusControllerMed: <<mediation>> from ControlBus [1] to ControllerEndpoint [1];
+relation controlBusActuatorMed: <<mediation>> from ControlBus [1] to ActuatorEndpoint [1];
+relation uiBusDisplayMed: <<mediation>> from UserInterfaceBus [1] to DisplayEndpoint [1];
+relation uiBusSetpointMed: <<mediation>> from UserInterfaceBus [1] to SetpointSource [1];
+relation uiBusActuatorMed: <<mediation>> from UserInterfaceBus [1] to ActuatorStateSource [1];
+relation uiBusSafetyMed: <<mediation>> from UserInterfaceBus [1] to SafetyStatusSource [1];

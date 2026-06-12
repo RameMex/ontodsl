@@ -1,0 +1,84 @@
+schema "onto/0.1";
+namespace patient_monitoring_code;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+import "./design.onto";
+
+// =====================================================================
+// Code stage — patient-monitoring
+//
+// Implementation-level kinds for two of the four Design components:
+//
+//   EcgSensorImpl  (refines patient_monitoring_design::EcgSensorInterface)
+//   DisplayImpl    (refines patient_monitoring_design::DisplayController)
+//
+// Each Code kind:
+//   - Inherits the parent's properties + invariants via specialization.
+//   - Overrides each event to add implementation-level pre/post that
+//     are LSP-compatible (pre weakening, post strengthening) with the
+//     Design parent.
+//   - Uses no additional refinement constructs — the chain
+//     Discovery → Requirements → Formalization → Design → Code
+//     verifies under the SAME inter-stage rules that verified the
+//     Design→Requirements edge.
+//
+// Hypothesis under test (Phase 16): O5 (Design → Code refinement)
+// is structurally identical to O2 (Liskov cross-file) and O4
+// (property correspondence) applied to a new stage edge. No new
+// verifier code is required.
+// =====================================================================
+
+// ─── Code kind 1: ECG sensor implementation ─────────────────────────
+
+subkind EcgSensorImpl specializes EcgSensorInterface
+  renames {
+    // No renames yet — the Code stage adopts parent property names
+    // directly for this demo. Real implementations may rename
+    // properties to match concrete API conventions (e.g.
+    // lastValidBpm → currentHeartRate); the rename table from
+    // Phase 11 handles those cases.
+  } {
+
+  // Implementation-level event: the runtime wrapper that the
+  // codegen produces (TypeScript / Rust / C) enforces these
+  // contracts at the system boundary.
+  override event acceptReading(valueBpm: Real)
+    refines patient_monitoring_design::EcgSensorInterface.acceptReading {
+
+    // Liskov: pre weaker-or-equal than parent.
+    // Parent requires: valueBpm in [plausibilityLower, plausibilityUpper]
+    //                  AND sensorConnected = true.
+    // Child keeps the same plausibility window but ALSO accepts
+    // exact-boundary readings (parent uses strict open intervals
+    // in some interpretations; child explicitly uses ≥ / ≤ ).
+    pre: valueBpm >= self.plausibilityLowerBpm;
+    pre: valueBpm <= self.plausibilityUpperBpm;
+    pre: self.sensorConnected = true;
+
+    // Liskov: post stronger-or-equal than parent.
+    // Parent guarantees: lastRawBpm = valueBpm, lastValidBpm = valueBpm,
+    //                   signalAbsentSeconds = 0.
+    // Child guarantees ALL of the above PLUS that
+    // rejectedReadingCount is non-negative (already an invariant,
+    // restated for explicit DbC documentation).
+    post: self.lastRawBpm = valueBpm;
+    post: self.lastValidBpm = valueBpm;
+    post: self.signalAbsentSeconds = 0.0;
+    post: self.rejectedReadingCount = self.rejectedReadingCount@pre;
+
+    modifies: self.lastRawBpm, self.lastValidBpm,
+              self.signalAbsentSeconds;
+  }
+
+  override event rejectImplausibleReading(valueBpm: Real)
+    refines patient_monitoring_design::EcgSensorInterface.rejectImplausibleReading {
+    pre: valueBpm < self.plausibilityLowerBpm
+         or valueBpm > self.plausibilityUpperBpm;
+    post: self.lastRawBpm = valueBpm;
+    post: self.rejectedReadingCount =
+            self.rejectedReadingCount@pre + 1;
+    post: self.lastValidBpm = self.lastValidBpm@pre;
+    modifies: self.lastRawBpm, self.rejectedReadingCount;
+  }
+}

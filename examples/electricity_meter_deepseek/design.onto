@@ -1,0 +1,450 @@
+schema "onto/0.1";
+namespace electricity_meter_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// DESIGN — Decomposition into components and interfaces.
+// Each component is a kind with a single cohesive responsibility.
+// Components are siblings, NOT subkinds of MeterBillingSystem.
+// Interfaces between components are relator kinds.
+// Every component event that implements a parent event MUST use the
+// structured 'refines:' clause for traceability.
+// =====================================================================
+
+// ─── Component: Meter Interface ──────────────────────────────────────
+// Responsible for receiving raw readings from the physical meter.
+// Validates that readings are well-formed and parses tamper flags.
+// Outputs validated readings to the Meter Reading Processor.
+
+kind MeterInterface {
+  identity: interfaceId;
+  property interfaceId: String;
+  property lastRawReadingKwh: Real;
+  property lastRawReadingTimestamp: Real;
+  property lastRawTamperFlags: String;
+  property readingQueueSize: Integer;
+  property isConnected: Boolean;
+
+  invariants {
+    self.interfaceId <> null;
+    self.lastRawReadingKwh >= 0.0;
+    self.lastRawReadingTimestamp >= 0.0;
+    self.readingQueueSize >= 0;
+    self.readingQueueSize <= 1000;
+  }
+
+  // Receives a raw reading from the physical meter.
+  // Validates basic sanity (kwh >= 0, timestamp monotonic).
+  // Defines the refines chain back to the system contract.
+  event receiveReading(kwh: Real, timestamp: Real, tamperFlags: String)
+    refines electricity_meter_requirements::MeterBillingSystem.processReading {
+    pre: self.isConnected;
+    pre: kwh >= 0.0;
+    pre: timestamp >= self.lastRawReadingTimestamp;
+    pre: tamperFlags <> null;
+
+    post: self.lastRawReadingKwh = kwh;
+    post: self.lastRawReadingTimestamp = timestamp;
+    post: self.lastRawTamperFlags = tamperFlags;
+    post: self.readingQueueSize = self.readingQueueSize@pre + 1;
+
+    modifies: self.lastRawReadingKwh, self.lastRawReadingTimestamp,
+              self.lastRawTamperFlags, self.readingQueueSize;
+  }
+
+  // Reports connection status to the diagnostic interface.
+  event reportConnectionStatus(status: Boolean)
+    refines electricity_meter_formalization::MeterBillingSystemFormalized.recordAuditTrail {
+    pre: status <> self.isConnected;
+
+    post: self.isConnected = status;
+
+    modifies: self.isConnected;
+  }
+}
+
+// ─── Component: Meter Reading Validator ──────────────────────────────
+// Computes consumption deltas against the last accepted reading.
+// Validates delta >= 0 and rejects anomalous or tampered readings.
+// Forwards valid readings to the Billing Engine.
+
+kind MeterReadingValidator {
+  identity: validatorId;
+  property validatorId: String;
+  property lastAcceptedKwh: Real;
+  property lastAcceptedTimestamp: Real;
+  property lastComputedDelta: Real;
+  property lastDeltaIsValid: Boolean;
+  property anomalyCount: Integer;
+  property maxNegativeDeltaThreshold: Real;
+
+  invariants {
+    self.validatorId <> null;
+    self.lastAcceptedKwh >= 0.0;
+    self.lastAcceptedTimestamp >= 0.0;
+    self.lastComputedDelta >= 0.0;
+    self.anomalyCount >= 0;
+    self.maxNegativeDeltaThreshold >= 0.0;
+  }
+
+  // Validates a parsed reading against the last accepted one.
+  // Computes delta and checks:
+  //   - delta >= 0 (monotonic kWh)
+  //   - no tamper flags present
+  // Sets lastDeltaIsValid accordingly.
+  event validateReading(kwh: Real, timestamp: Real, tamperFlags: String)
+    refines electricity_meter_requirements::MeterBillingSystem.processReading {
+    pre: kwh >= 0.0;
+    pre: timestamp >= self.lastAcceptedTimestamp;
+    pre: tamperFlags <> null;
+
+    post: self.lastComputedDelta = kwh - self.lastAcceptedKwh;
+    post: self.lastDeltaIsValid = (kwh >= self.lastAcceptedKwh) and (tamperFlags = '');
+    post: if (kwh < self.lastAcceptedKwh) or (tamperFlags <> '') then
+            self.anomalyCount = self.anomalyCount@pre + 1
+          else
+            self.anomalyCount = self.anomalyCount@pre
+          endif;
+    post: self.lastAcceptedKwh = kwh;
+    post: self.lastAcceptedTimestamp = timestamp;
+
+    modifies: self.lastComputedDelta, self.lastDeltaIsValid,
+              self.anomalyCount, self.lastAcceptedKwh, self.lastAcceptedTimestamp;
+  }
+}
+
+// ─── Component: Billing Engine ───────────────────────────────────────
+// Applies billing increments for validated readings.
+// Maintains billing state: running total, increment history, freeze status.
+// Freezes billing when tamper is active — only resumes after clearance.
+
+kind BillingEngine {
+  identity: engineId;
+  property engineId: String;
+  property currentBillingTotal: Real;
+  property lastAppliedIncrement: Real;
+  property lastAppliedTimestamp: Real;
+  property isFrozen: Boolean;
+  property isCleared: Boolean;
+  property acceptedReadingCount: Integer;
+  property compensationTotal: Real;
+
+  invariants {
+    self.engineId <> null;
+    self.currentBillingTotal >= 0.0;
+    self.lastAppliedIncrement >= 0.0;
+    self.lastAppliedTimestamp >= 0.0;
+    self.acceptedReadingCount >= 0;
+    self.compensationTotal >= 0.0;
+    // Tamper freeze invariant: if frozen, billing is suspended.
+    not (self.isFrozen) or (not self.isCleared);
+    // Only clearance can resume after freeze.
+    not (self.isCleared) or (not self.isFrozen);
+  }
+
+  // Applies a billing increment for an accepted, validated reading.
+  // Only applies when not frozen.
+  event applyIncrement(delta: Real, timestamp: Real)
+    refines electricity_meter_requirements::MeterBillingSystem.processReading {
+    pre: delta >= 0.0;
+    pre: timestamp >= self.lastAppliedTimestamp;
+    pre: not self.isFrozen;
+    pre: self.isCleared;
+
+    post: self.currentBillingTotal = self.currentBillingTotal@pre + delta;
+    post: self.lastAppliedIncrement = delta;
+    post: self.lastAppliedTimestamp = timestamp;
+    post: self.acceptedReadingCount = self.acceptedReadingCount@pre + 1;
+
+    modifies: self.currentBillingTotal, self.lastAppliedIncrement,
+              self.lastAppliedTimestamp, self.acceptedReadingCount;
+  }
+
+  // Freezes billing due to tamper detection.
+  event freezeBilling()
+    refines electricity_meter_requirements::MeterBillingSystem.detectTamper {
+    pre: not self.isFrozen;
+
+    post: self.isFrozen = true;
+    post: self.isCleared = false;
+
+    modifies: self.isFrozen, self.isCleared;
+  }
+
+  // Clears tamper freeze after manual inspection and authorization.
+  event clearFreeze()
+    refines electricity_meter_requirements::MeterBillingSystem.clearTamper {
+    pre: self.isFrozen;
+    pre: not self.isCleared;
+
+    post: self.isFrozen = false;
+    post: self.isCleared = true;
+
+    modifies: self.isFrozen, self.isCleared;
+  }
+
+  // Records a compensating event for immutability-compliant adjustments.
+  // Uses if/then/else instead of .abs() to compute absolute value.
+  event recordCompensation(adjustment: Real)
+    refines electricity_meter_requirements::MeterBillingSystem.applyCompensation {
+    pre: adjustment <> 0.0;
+    pre: not self.isFrozen;
+
+    post: if adjustment >= 0.0 then
+            self.compensationTotal = self.compensationTotal@pre + adjustment
+          else
+            self.compensationTotal = self.compensationTotal@pre + (0.0 - adjustment)
+          endif;
+    post: self.currentBillingTotal = self.currentBillingTotal@pre + adjustment;
+    post: self.acceptedReadingCount = self.acceptedReadingCount@pre;
+
+    modifies: self.compensationTotal, self.currentBillingTotal,
+              self.acceptedReadingCount;
+  }
+}
+
+// ─── Component: Tamper Monitor ───────────────────────────────────────
+// Monitors tamper flags from the meter interface.
+// Records tamper events and coordinates with Billing Engine for freeze.
+// Tracks clearance state.
+
+kind TamperMonitor {
+  identity: monitorId;
+  property monitorId: String;
+  property isTamperActive: Boolean;
+  property lastTamperType: String;
+  property lastTamperDescription: String;
+  property lastTamperTimestamp: Real;
+  property tamperEventCount: Integer;
+  property isManualClearancePending: Boolean;
+
+  invariants {
+    self.monitorId <> null;
+    self.lastTamperTimestamp >= 0.0;
+    self.tamperEventCount >= 0;
+    // Active tamper means no clearance pending — clearance resolves it.
+    not (self.isTamperActive) or (not self.isManualClearancePending);
+  }
+
+  // Records a tamper event from the meter's tamper flags.
+  event recordTamper(eventType: String, description: String)
+    refines electricity_meter_requirements::MeterBillingSystem.detectTamper {
+    pre: eventType <> null;
+    pre: description <> null;
+    pre: not self.isTamperActive;
+
+    post: self.isTamperActive = true;
+    post: self.lastTamperType = eventType;
+    post: self.lastTamperDescription = description;
+    post: self.lastTamperTimestamp = self.lastTamperTimestamp@pre + 1.0;  // simplified: real clock
+    post: self.tamperEventCount = self.tamperEventCount@pre + 1;
+
+    modifies: self.isTamperActive, self.lastTamperType,
+              self.lastTamperDescription, self.lastTamperTimestamp,
+              self.tamperEventCount;
+  }
+
+  // Records a manual clearance after field technician inspects.
+  event recordClearance(clearanceId: String)
+    refines electricity_meter_requirements::MeterBillingSystem.clearTamper {
+    pre: clearanceId <> null;
+    pre: self.isTamperActive;
+
+    post: self.isTamperActive = false;
+    post: self.isManualClearancePending = true;
+
+    modifies: self.isTamperActive, self.isManualClearancePending;
+  }
+
+  // Resolves pending clearance (billing engine has been notified).
+  event resolveClearance()
+    refines electricity_meter_requirements::MeterBillingSystem.clearTamper {
+    pre: self.isManualClearancePending;
+    pre: not self.isTamperActive;
+
+    post: self.isManualClearancePending = false;
+
+    modifies: self.isManualClearancePending;
+  }
+}
+
+// ─── Component: Audit Logger ─────────────────────────────────────────
+// Immutable append-only log of all events for regulatory compliance.
+// Satisfies NISTIR 7628 non-repudiation requirements.
+
+kind AuditLogger {
+  identity: loggerId;
+  property loggerId: String;
+  property logEntryCount: Integer;
+  property retentionDays: Integer;
+  property lastEntryTimestamp: Real;
+
+  invariants {
+    self.loggerId <> null;
+    self.logEntryCount >= 0;
+    self.retentionDays >= 365;
+    self.lastEntryTimestamp >= 0.0;
+  }
+
+  // Writes an event to the immutable log.
+  event writeEntry(eventType: String, payload: String, timestamp: Real)
+    refines electricity_meter_formalization::MeterBillingSystemFormalized.recordAuditTrail {
+    pre: eventType <> null;
+    pre: payload <> null;
+    pre: timestamp >= self.lastEntryTimestamp;
+
+    post: self.logEntryCount = self.logEntryCount@pre + 1;
+    post: self.lastEntryTimestamp = timestamp;
+
+    modifies: self.logEntryCount, self.lastEntryTimestamp;
+  }
+
+  // Checks retention limit according to GDPR / NIST requirements.
+  event checkRetentionLimit()
+    refines electricity_meter_formalization::MeterBillingSystemFormalized.rejectRetentionOverflow {
+    pre: self.retentionDays >= 365;
+
+    // No state change — pure observation / alarm check.
+    post: self.logEntryCount = self.logEntryCount@pre;
+    post: self.lastEntryTimestamp = self.lastEntryTimestamp@pre;
+
+    modifies: self.logEntryCount, self.lastEntryTimestamp;
+  }
+}
+
+// ─── Roles for Component-to-Component Interfaces ─────────────────────
+// Each component that participates in a mediated relationship gets a role.
+// The mediated-by references MUST match existing relator names.
+
+role MeterInterfaceEndpoint mediated-by MeterReadingChannel of MeterInterface {
+  property lastRawReadingKwh: Real;
+  property lastRawTamperFlags: String;
+}
+
+role MeterValidatorEndpoint mediated-by MeterReadingChannel of MeterReadingValidator {
+  property lastAcceptedKwh: Real;
+  property lastComputedDelta: Real;
+  property lastDeltaIsValid: Boolean;
+}
+
+role BillingEngineEndpoint mediated-by TamperFreezeChannel of BillingEngine {
+  property isFrozen: Boolean;
+  property isCleared: Boolean;
+  property lastAppliedIncrement: Real;
+}
+
+role TamperMonitorEndpoint mediated-by TamperFreezeChannel of TamperMonitor {
+  property isTamperActive: Boolean;
+}
+
+// ─── Relators (Component Interfaces) ─────────────────────────────────
+// SOURCE must be a Relator, TARGET must be a kind/role/agent.
+// <<mediation>> from Relator [1] to Role [1..*]
+
+relator MeterReadingChannel mediates (MeterInterfaceEndpoint, MeterValidatorEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property lastReadingTransferred: Real;
+  property lastTamperFlagsTransferred: String;
+  property transferCount: Integer;
+
+  invariants {
+    self.channelId <> null;
+    self.lastReadingTransferred >= 0.0;
+    self.transferCount >= 0;
+    self.lastTamperFlagsTransferred <> null;
+  }
+
+  // Transfers a validated reading from MeterInterface to MeterReadingValidator
+  event transferReading(kwh: Real, tamperFlags: String)
+    refines electricity_meter_requirements::MeterBillingSystem.processReading {
+    pre: kwh >= 0.0;
+    pre: tamperFlags <> null;
+
+    post: self.lastReadingTransferred = kwh;
+    post: self.lastTamperFlagsTransferred = tamperFlags;
+    post: self.transferCount = self.transferCount@pre + 1;
+
+    modifies: self.lastReadingTransferred,
+              self.lastTamperFlagsTransferred, self.transferCount;
+  }
+}
+
+relator TamperFreezeChannel mediates (TamperMonitorEndpoint, BillingEngineEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property freezeCount: Integer;
+  property clearanceCount: Integer;
+  property lastFreezeTimestamp: Real;
+
+  invariants {
+    self.channelId <> null;
+    self.freezeCount >= 0;
+    self.clearanceCount >= 0;
+    self.lastFreezeTimestamp >= 0.0;
+    // Freeze and clearance counts should be consistent: freeze >= clearance
+    self.freezeCount >= self.clearanceCount;
+  }
+
+  // Sends a freeze signal from TamperMonitor to BillingEngine.
+  event signalFreeze(timestamp: Real)
+    refines electricity_meter_requirements::MeterBillingSystem.detectTamper {
+    pre: timestamp >= self.lastFreezeTimestamp;
+
+    post: self.freezeCount = self.freezeCount@pre + 1;
+    post: self.lastFreezeTimestamp = timestamp;
+
+    modifies: self.freezeCount, self.lastFreezeTimestamp;
+  }
+
+  // Sends a clearance signal from TamperMonitor to BillingEngine.
+  event signalClearance(timestamp: Real)
+    refines electricity_meter_requirements::MeterBillingSystem.clearTamper {
+    pre: timestamp >= self.lastFreezeTimestamp;
+
+    post: self.clearanceCount = self.clearanceCount@pre + 1;
+    post: self.lastFreezeTimestamp = timestamp;
+
+    modifies: self.clearanceCount, self.lastFreezeTimestamp;
+  }
+}
+
+// ─── Happenings (End-to-End Data Flows) ─────────────────────────────
+// Captures the full story of a meter reading being processed.
+// MUST declare identity: <propertyName>;
+
+happening MeterReadingFlowDesign {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;     // "MeterInterface.receiveReading"
+  property validationOutcome: String; // "Valid" or "RejectedAnomaly" or "TamperFreeze"
+  property billingOutcome: String;    // "IncrementApplied" or "Frozen" or "Rejected"
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.validationOutcome <> null;
+    self.billingOutcome <> null;
+  }
+
+  // The flow steps are:
+  // 1. Meter receives raw reading (MeterInterface.receiveReading)
+  // 2. Reading transferred via MeterReadingChannel (transferReading)
+  // 3. Validator processes it (MeterReadingValidator.validateReading)
+  // 4a. If valid and no tamper → BillingEngine applies increment (applyIncrement)
+  // 4b. If tamper detected → TamperMonitor records (recordTamper) +
+  //     TamperFreezeChannel signals freeze (signalFreeze) +
+  //     BillingEngine freezes (freezeBilling)
+  // 5. AuditLogger records the event (writeEntry)
+}
+
+// ─── Explicit Relations ──────────────────────────────────────────────
+// <<mediation>> from Relator [1] to Role [1..*]
+// SOURCE MUST be a Relator (the relator kind), TARGET must be the Role.
+
+relation meterInterfaceToChannel: <<mediation>> from MeterReadingChannel [1] to MeterInterfaceEndpoint [1];
+relation validatorToChannel: <<mediation>> from MeterReadingChannel [1] to MeterValidatorEndpoint [1];
+relation billingToChannel: <<mediation>> from TamperFreezeChannel [1] to BillingEngineEndpoint [1];
+relation tamperToChannel: <<mediation>> from TamperFreezeChannel [1] to TamperMonitorEndpoint [1];

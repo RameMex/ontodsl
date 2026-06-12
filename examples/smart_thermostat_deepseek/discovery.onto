@@ -1,0 +1,223 @@
+schema "onto/0.1";
+namespace smart_thermostat_discovery;
+
+// ─── Stakeholders ────────────────────────────────────────────────────
+
+agent HomeOwner {
+  identity: ownerId;
+  property ownerId: String;
+  property name: String;
+  property email: String;
+  invariants {
+    self.ownerId <> null;
+    self.name <> null;
+  }
+}
+
+agent Regulator {
+  identity: regulatorId;
+  property regulatorId: String;
+  property jurisdiction: String;
+  property departmentName: String;
+  invariants {
+    self.regulatorId <> null;
+  }
+}
+
+agent Contractor {
+  identity: contractorId;
+  property contractorId: String;
+  property companyName: String;
+  property certificationNumber: String;
+  invariants {
+    self.contractorId <> null;
+  }
+}
+
+// ─── Vendor (debitor of all commitments) ─────────────────────────────
+
+agent ThermostatVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  property warrantyYears: Integer;
+  invariants {
+    self.vendorId <> null;
+    self.warrantyYears >= 1;
+  }
+}
+
+// ─── System Kind (single declaration with all properties) ────────────
+
+kind ThermostatSystemKind {
+  identity: systemId;
+  property systemId: String;
+  property safeMinSetpoint: Real;
+  property safeMaxSetpoint: Real;
+  property sensorPlausibilityMin: Real;
+  property sensorPlausibilityMax: Real;
+  property faultAlertActive: Boolean;
+  property minCycleIntervalSecs: Real;
+  property currentTemperature: Real;
+  property currentSetpoint: Real;
+  property currentActuatorCommand: String;
+  invariants {
+    self.systemId <> null;
+  }
+}
+
+// ─── Commitments (Hard Goals / Stakeholder Concerns) ─────────────────
+// Predicate properties are now on the system kind, so self.<prop>
+// resolves correctly in the discharge proof context.
+
+// GOAL-1: Track user setpoint within safe range
+commitment SafeSetpointCommitment
+  debitor: ThermostatVendor
+  creditor: HomeOwner {
+    identity: commitmentId;
+    property commitmentId: String;
+    property safeMinSetpoint: Real;
+    property safeMaxSetpoint: Real;
+    predicate: self.safeMinSetpoint >= 40.0 and self.safeMaxSetpoint <= 90.0;
+  }
+
+// GOAL-2: Safe halt on implausible sensor reading
+commitment PlausibleSensorCommitment
+  debitor: ThermostatVendor
+  creditor: HomeOwner {
+    identity: commitmentId;
+    property commitmentId: String;
+    property sensorPlausibilityMin: Real;
+    property sensorPlausibilityMax: Real;
+    predicate: self.sensorPlausibilityMin <= -40.0 and self.sensorPlausibilityMax >= 150.0;
+  }
+
+// GOAL-2 also: user notification on fault
+commitment FaultNotificationCommitment
+  debitor: ThermostatVendor
+  creditor: HomeOwner {
+    identity: commitmentId;
+    property commitmentId: String;
+    property faultAlertActive: Boolean;
+    predicate: self.faultAlertActive = false;
+  }
+
+// GOAL-3: Respect compressor cycling limit
+commitment CyclingLimitCommitment
+  debitor: ThermostatVendor
+  creditor: HomeOwner {
+    identity: commitmentId;
+    property commitmentId: String;
+    property minCycleIntervalSecs: Real;
+    predicate: self.minCycleIntervalSecs >= 300.0;
+  }
+
+// GOAL-4: Display current state to user
+commitment DisplayStateCommitment
+  debitor: ThermostatVendor
+  creditor: HomeOwner {
+    identity: commitmentId;
+    property commitmentId: String;
+    property currentTemperature: Real;
+    property currentSetpoint: Real;
+    property currentActuatorCommand: String;
+    predicate: self.currentTemperature <> null and
+               self.currentSetpoint <> null and
+               self.currentActuatorCommand <> null;
+  }
+
+// ─── Constraint Goals (Categories) ───────────────────────────────────
+// Uses member-quantified form. The bearer type resolves to the
+// ThermostatSystemKind declared above.
+
+category TemperatureSafetyConstraints where bearer: ThermostatSystemKind {
+  invariants {
+    bearer.safeMinSetpoint >= 40.0;
+    bearer.safeMaxSetpoint <= 90.0;
+  }
+}
+
+category SensorPlausibilityConstraints where bearer: ThermostatSystemKind {
+  invariants {
+    bearer.sensorPlausibilityMin <= -40.0;
+    bearer.sensorPlausibilityMax >= 150.0;
+  }
+}
+
+category CyclingProtectionConstraints where bearer: ThermostatSystemKind {
+  invariants {
+    bearer.minCycleIntervalSecs >= 300.0;
+  }
+}
+
+// ─── Glossary Terms (Domain Kinds) ───────────────────────────────────
+
+kind SetpointRequest {
+  identity: requestId;
+  property requestId: String;
+  property requestedTemperature: Real;
+  property timestamp: Real;
+  invariants {
+    self.requestId <> null;
+    self.requestedTemperature >= -100.0;
+    self.timestamp > 0.0;
+  }
+}
+
+kind SensorReading {
+  identity: readingId;
+  property readingId: String;
+  property temperature: Real;
+  property timestamp: Real;
+  invariants {
+    self.readingId <> null;
+    self.timestamp > 0.0;
+  }
+}
+
+kind ActuatorCommand {
+  identity: commandId;
+  property commandId: String;
+  property commandState: String;
+  property timestamp: Real;
+  invariants {
+    self.commandId <> null;
+    self.commandState = 'HEAT' or self.commandState = 'COOL' or self.commandState = 'OFF';
+    self.timestamp > 0.0;
+  }
+}
+
+kind SafeHaltEvent {
+  identity: haltEventId;
+  property haltEventId: String;
+  property reason: String;
+  property timestamp: Real;
+  invariants {
+    self.haltEventId <> null;
+    self.timestamp > 0.0;
+  }
+}
+
+kind UserAlert {
+  identity: alertId;
+  property alertId: String;
+  property message: String;
+  property timestamp: Real;
+  invariants {
+    self.alertId <> null;
+    self.timestamp > 0.0;
+  }
+}
+
+// ─── Domain Story (Flow) ─────────────────────────────────────────────
+
+happening ThermostatControlCycle {
+  identity: cycleId;
+  property cycleId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property steps: String;
+  invariants {
+    self.cycleId <> null;
+  }
+}

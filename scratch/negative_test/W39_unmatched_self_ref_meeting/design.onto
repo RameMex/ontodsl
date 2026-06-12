@@ -1,0 +1,594 @@
+schema "onto/0.1";
+namespace meeting_scheduler_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Design — Meeting Scheduler
+//
+// Decomposes MeetingSchedulerSystem into four sibling components, each
+// owning a cohesive slice of state.  Components are NOT subkinds of
+// the system kind — the relationship is decomposition, not Liskov.
+//
+// Components:
+//   RequestManager        — lifecycle of a scheduling request
+//   ConstraintAggregator  — collects and maintains participant constraints
+//   DateSelector          — selects feasible dates; detects conflicts
+//   NotificationDispatcher — informs initiator and participants of outcomes
+//
+// Interfaces (relators):
+//   ConstraintChannel     — RequestManager  ↔ ConstraintAggregator
+//   SelectionChannel      — ConstraintAggregator ↔ DateSelector
+//   NotificationChannel   — DateSelector ↔ NotificationDispatcher
+//
+// End-to-end happenings (data flows that cross component boundaries):
+//   SchedulingFlowHappening
+//   ConstraintUpdateFlowHappening
+//   ConflictResolutionFlowHappening
+//
+// Refinement obligations (to be proved by Code stage):
+//   - Every component event must have pre weaker-or-equal and post
+//     stronger-or-equal than the Requirements event it refines (LSP).
+//   - The union of all components' modifies-clauses for a given FR
+//     must cover the system-level modifies of that FR.
+//   - No component event touches another component's properties
+//     (encapsulation).
+// =====================================================================
+
+
+// ─────────────────────────────────────────────────────────────────────
+// COMPONENT 1 — RequestManager
+//
+// Owns the lifecycle (status) of a scheduling request.  Knows who the
+// initiator is, what date range was requested, and whether the
+// initiator has been informed.
+// ─────────────────────────────────────────────────────────────────────
+
+kind RequestManager {
+  identity: managerId;
+  property managerId: String;
+
+  property currentRequestId: String;
+  property requestStatus: String;      // 'IDLE' | 'OPEN' | 'CONFIRMED' | 'CONFLICT'
+  property rangeEarliest: String;
+  property rangeLatest: String;
+  property invitedParticipantCount: Integer;
+  property initiatorId: String;
+  property initiatorEmail: String;
+  property initiatorInformed: Boolean;
+
+  invariants {
+    self.managerId <> null;
+    self.requestStatus = 'IDLE'
+      or self.requestStatus = 'OPEN'
+      or self.requestStatus = 'CONFIRMED'
+      or self.requestStatus = 'CONFLICT';
+    self.invitedParticipantCount >= 0;
+  }
+
+  // ================================================================
+  // refines: meeting_scheduler_requirements::MeetingSchedulerSystem.requestMeeting
+  //
+  // Pre is weaker-or-equal: parent requires IDLE — same here.
+  // Post is stronger-or-equal: parent sets all open-state fields;
+  //   this component sets exactly its own slice of those fields.
+  // ================================================================
+  event openRequest(
+    reqId: String,
+    earliest: String,
+    latest: String,
+    participantCount: Integer,
+    initId: String,
+    initEmail: String
+  ) {
+    pre: self.requestStatus = 'IDLE';
+    pre: reqId <> null;
+    pre: earliest <> null;
+    pre: latest <> null;
+    pre: participantCount > 0;
+    pre: initId <> null;
+
+    post: self.requestStatus = 'OPEN';
+    post: self.currentRequestId = reqId;
+    post: self.rangeEarliest = earliest;
+    post: self.rangeLatest = latest;
+    post: self.invitedParticipantCount = participantCount;
+    post: self.initiatorId = initId;
+    post: self.initiatorEmail = initEmail;
+    post: self.initiatorInformed = false;
+
+    modifies:
+      self.requestStatus,
+      self.currentRequestId,
+      self.rangeEarliest,
+      self.rangeLatest,
+      self.invitedParticipantCount,
+      self.initiatorId,
+      self.initiatorEmail,
+      self.initiatorInformed;
+  }
+
+  // ================================================================
+  // refines: meeting_scheduler_requirements::MeetingSchedulerSystem.confirmMeeting
+  //   (RequestManager's slice: status + initiatorInformed)
+  // ================================================================
+  event markConfirmed() {
+    pre: self.requestStatus = 'OPEN';
+
+    post: self.requestStatus = 'CONFIRMED';
+    post: self.initiatorInformed = true;
+
+    modifies:
+      self.requestStatus,
+      self.initiatorInformed;
+  }
+
+  // ================================================================
+  // refines: meeting_scheduler_requirements::MeetingSchedulerSystem.reportConflict
+  //   (RequestManager's slice: status + initiatorInformed)
+  // ================================================================
+  event markConflict() {
+    pre: self.requestStatus = 'OPEN';
+
+    post: self.requestStatus = 'CONFLICT';
+    post: self.initiatorInformed = true;
+
+    modifies:
+      self.requestStatus,
+      self.initiatorInformed;
+  }
+
+  // ================================================================
+  // refines: meeting_scheduler_formalization::MeetingSchedulerSystemFormalized.rejectDuplicateRequest
+  //   (RequestManager owns the status guard for duplicate-open prevention)
+  // ================================================================
+  event rejectDuplicateOpen(newReqId: String) {
+    pre: self.requestStatus = 'OPEN';
+    pre: newReqId <> null;
+    pre: newReqId <> self.currentRequestId;
+
+    post: self.requestStatus = 'OPEN';
+
+    modifies: self.requestStatus;
+  }
+
+  // ================================================================
+  // refines: meeting_scheduler_formalization::MeetingSchedulerSystemFormalized.rejectInvertedRange
+  //   (RequestManager is the only component that knows the date range)
+  // ================================================================
+  event rejectInvertedRange(
+    earliest: String,
+    latest: String,
+    callerAssertedInverted: Boolean
+  ) {
+    pre: self.requestStatus = 'IDLE';
+    pre: earliest <> null;
+    pre: latest <> null;
+    pre: callerAssertedInverted = true;
+
+    post: self.requestStatus = 'IDLE';
+
+    modifies: self.requestStatus;
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// COMPONENT 2 — ConstraintAggregator
+//
+// Owns all participant constraint state: exclusion sets, preference
+// sets, and submission bookkeeping.  Knows nothing about the date
+// range or the request status (those belong to RequestManager).
+// ─────────────────────────────────────────────────────────────────────
+
+kind ConstraintAggregator {
+  identity: aggregatorId;
+  property aggregatorId: String;
+
+  property requestId: String;           // foreign key — which request
+  property allExcludedDates: Set<String>;
+  property commonPreferredDates: Set<String>;
+  property constraintSubmissionCount: Integer;
+  property invitedParticipantCount: Integer;
+  property allConstraintsCollected: Boolean;
+
+  invariants {
+    self.aggregatorId <> null;
+    self.constraintSubmissionCount >= 0;
+    self.invitedParticipantCount >= 0;
+    self.constraintSubmissionCount <= self.invitedParticipantCount;
+    self.allConstraintsCollected =
+      (self.constraintSubmissionCount = self.invitedParticipantCount
+        and self.invitedParticipantCount > 0);
+  }
+
+  // ================================================================
+  // Initialise this aggregator when a new request is opened.
+  // Called by the ConstraintChannel after RequestManager.openRequest
+  // succeeds.
+  // refines: meeting_scheduler_requirements::MeetingSchedulerSystem.requestMeeting
+  //   (ConstraintAggregator's slice: constraint counters + sets)
+  // ================================================================
+  event initialise(reqId: String, participantCount: Integer) {
+    pre: reqId <> null;
+    pre: participantCount > 0;
+    pre: self.requestId = null or self.requestId <> reqId;
+
+    post: self.requestId = reqId;
+    post: self.invitedParticipantCount = participantCount;
+    post: self.constraintSubmissionCount = 0;
+    post: self.allConstraintsCollected = false;
+
+    modifies:
+      self.requestId,
+      self.invitedParticipantCount,
+      self.constraintSubmissionCount,
+      self.allConstraintsCollected;
+  }
+
+  // ================================================================
+  // refines: meeting_scheduler_requirements::MeetingSchedulerSystem.submitConstraints
+  // ================================================================
+  event acceptConstraints(
+    participantId: String,
+    excluded: Set<String>,
+    preferred: Set<String>
+  ) {
+    pre: participantId <> null;
+    pre: self.constraintSubmissionCount < self.invitedParticipantCount;
+
+    post: excluded->forAll(d | self.allExcludedDates->includes(d));
+    post: preferred->forAll(d | self.commonPreferredDates->includes(d));
+    post: self.allExcludedDates@pre->forAll(d | self.allExcludedDates->includes(d));
+    post: self.constraintSubmissionCount = self.constraintSubmissionCount@pre + 1;
+    post: self.allConstraintsCollected =
+            (self.constraintSubmissionCount = self.invitedParticipantCount);
+
+    modifies:
+      self.allExcludedDates,
+      self.commonPreferredDates,
+      self.constraintSubmissionCount,
+      self.allConstraintsCollected;
+  }
+
+  // ================================================================
+  // refines: meeting_scheduler_requirements::MeetingSchedulerSystem.updateConstraints
+  // ================================================================
+  event applyConstraintUpdate(
+    participantId: String,
+    newExcluded: Set<String>,
+    newPreferred: Set<String>
+  ) {
+    pre: participantId <> null;
+
+    post: newExcluded->forAll(d | self.allExcludedDates->includes(d));
+    post: newPreferred->forAll(d | self.commonPreferredDates->includes(d));
+    post: self.allExcludedDates@pre->forAll(d | self.allExcludedDates->includes(d));
+
+    modifies:
+      self.allExcludedDates,
+      self.commonPreferredDates;
+  }
+
+  // ================================================================
+  // refines: meeting_scheduler_formalization::MeetingSchedulerSystemFormalized.rejectOverQuotaSubmission
+  // ================================================================
+  event rejectOverQuota(participantId: String) {
+    pre: participantId <> null;
+    pre: self.constraintSubmissionCount >= self.invitedParticipantCount;
+
+    post: self.constraintSubmissionCount = self.constraintSubmissionCount@pre;
+
+    modifies: self.constraintSubmissionCount;
+  }
+
+  // ================================================================
+  // refines: meeting_scheduler_formalization::MeetingSchedulerSystemFormalized.rejectStaleConstraintRetention
+  //   (ConstraintAggregator exposes a guard that callers invoke once
+  //    the owning request is terminal; the aggregator itself does not
+  //    hold the request status.)
+  // ================================================================
+  event rejectStaleUpdate(participantId: String) {
+    pre: participantId <> null;
+    pre: self.allConstraintsCollected = true;
+    pre: self.constraintSubmissionCount >= self.invitedParticipantCount;
+
+    post: self.constraintSubmissionCount = self.constraintSubmissionCount@pre;
+
+    modifies: self.constraintSubmissionCount;
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// COMPONENT 3 — DateSelector
+//
+// Owns the proposed-date slot.  Reads (but does not own) the exclusion
+// set — it receives it as a parameter from the SelectionChannel.
+// Detects and records whether a conflict exists.
+// ─────────────────────────────────────────────────────────────────────
+
+kind DateSelector {
+  identity: selectorId;
+  property selectorId: String;
+
+  property requestId: String;
+  property proposedDate: String;         // empty string means none selected
+  property conflictDetected: Boolean;
+  property minCandidateDates: Integer;   // NFR quality bound
+
+  invariants {
+    self.selectorId <> null;
+    self.minCandidateDates > 0;
+    // CONSTRAINT-1 (ExclusionRespected) at component level:
+    // the proposedDate must never be the empty-string sentinel AND
+    // simultaneously be the conflict state — the two flags are disjoint.
+    not (self.proposedDate <> '' and self.conflictDetected = true);
+  }
+
+  // ================================================================
+  // refines: meeting_scheduler_requirements::MeetingSchedulerSystem.proposeDate
+  //
+  // Caller (SelectionChannel) is responsible for verifying that
+  // candidate is inside the date range and outside allExcludedDates
+  // before invoking this event — matching the Requirements pre-condition
+  // that candidate is not in allExcludedDates.
+  // ================================================================
+  event selectDate(candidate: String) {
+    pre: candidate <> null;
+    pre: candidate <> '';
+
+    post: self.proposedDate = candidate;
+    post: self.conflictDetected = false;
+
+    modifies:
+      self.proposedDate,
+      self.conflictDetected;
+  }
+
+  // ================================================================
+  // refines: meeting_scheduler_requirements::MeetingSchedulerSystem.reportConflict
+  //   (DateSelector's slice: proposedDate cleared + conflictDetected set)
+  // ================================================================
+  event recordConflict() {
+    post: self.proposedDate = '';
+    post: self.conflictDetected = true;
+
+    modifies:
+      self.proposedDate,
+      self.conflictDetected;
+  }
+
+  // ================================================================
+  // Clear the proposed date when constraints are updated so that date
+  // selection is re-run.
+  // refines: meeting_scheduler_requirements::MeetingSchedulerSystem.updateConstraints
+  //   (DateSelector's slice: proposedDate = '')
+  // ================================================================
+  event clearProposal() {
+    pre: self.proposedDate <> '';
+
+    post: self.proposedDate = '';
+
+    modifies: self.proposedDate;
+  }
+
+  // ================================================================
+  // refines: meeting_scheduler_formalization::MeetingSchedulerSystemFormalized.rejectExcludedDate
+  //   (DateSelector owns proposedDate — so it owns this guard too)
+  // ================================================================
+  event rejectExcludedCandidate(candidate: String, isExcluded: Boolean) {
+    pre: candidate <> null;
+    pre: candidate <> '';
+    pre: isExcluded = true;
+
+    post: self.proposedDate = '';
+
+    modifies: self.proposedDate;
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// COMPONENT 4 — NotificationDispatcher
+//
+// Owns the notification-state flags.  Records whether participants
+// have been notified and what the confirmed date and location are.
+// Does NOT own request status — that belongs to RequestManager.
+// ─────────────────────────────────────────────────────────────────────
+
+kind NotificationDispatcher {
+  identity: dispatcherId;
+  property dispatcherId: String;
+
+  property requestId: String;
+  property confirmedDate: String;
+  property confirmedLocation: String;
+  property participantsNotified: Boolean;
+  property maxNotificationDelayHours: Real;   // NFR quality bound
+  property maxConflictResponseHours: Real;    // NFR quality bound
+
+  invariants {
+    self.dispatcherId <> null;
+    self.maxNotificationDelayHours > 0.0;
+    self.maxConflictResponseHours > 0.0;
+  }
+
+  // ================================================================
+  // refines: meeting_scheduler_requirements::MeetingSchedulerSystem.confirmMeeting
+  //   (NotificationDispatcher's slice: confirmedDate, location,
+  //    participantsNotified)
+  // ================================================================
+  event dispatchConfirmation(date: String, loc: String) {
+    pre: date <> null;
+    pre: date <> '';
+    pre: loc <> null;
+
+    post: self.confirmedDate = date;
+    post: self.confirmedLocation = loc;
+    post: self.participantsNotified = true;
+
+    modifies:
+      self.confirmedDate,
+      self.confirmedLocation,
+      self.participantsNotified;
+  }
+
+  // ================================================================
+  // refines: meeting_scheduler_requirements::MeetingSchedulerSystem.reportConflict
+  //   (NotificationDispatcher's slice: initiator notification of
+  //    conflict; participantsNotified stays false on conflict)
+  // ================================================================
+  event dispatchConflictNotice() {
+    post: self.participantsNotified = false;
+
+    modifies: self.participantsNotified;
+  }
+
+  // ================================================================
+  // refines: meeting_scheduler_formalization::MeetingSchedulerSystemFormalized.rejectPrematureConfirm
+  //   (NotificationDispatcher must not dispatch until a date is ready)
+  // ================================================================
+  event rejectPrematureDispatch(dateReady: Boolean) {
+    pre: dateReady = false;
+
+    post: self.participantsNotified = false;
+
+    modifies: self.participantsNotified;
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// ROLES  (one per component endpoint in each interface relator)
+// ─────────────────────────────────────────────────────────────────────
+
+// ── ConstraintChannel endpoints ──────────────────────────────────────
+role RequestManagerSender mediated-by ConstraintChannel of RequestManager {
+  property managerId: String;
+  property currentRequestId: String;
+}
+
+role ConstraintAggregatorReceiver mediated-by ConstraintChannel of ConstraintAggregator {
+  property aggregatorId: String;
+  property requestId: String;
+}
+
+// ── SelectionChannel endpoints ────────────────────────────────────────
+role ConstraintAggregatorProvider mediated-by SelectionChannel of ConstraintAggregator {
+  property aggregatorId: String;
+  property allExcludedDates: Set<String>;
+  property commonPreferredDates: Set<String>;
+  property allConstraintsCollected: Boolean;
+}
+
+role DateSelectorConsumer mediated-by SelectionChannel of DateSelector {
+  property selectorId: String;
+  property proposedDate: String;
+}
+
+// ── NotificationChannel endpoints ─────────────────────────────────────
+role DateSelectorSource mediated-by NotificationChannel of DateSelector {
+  property selectorId: String;
+  property proposedDate: String;
+  property conflictDetected: Boolean;
+}
+
+role NotificationDispatcherSink mediated-by NotificationChannel of NotificationDispatcher {
+  property dispatcherId: String;
+  property participantsNotified: Boolean;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// INTERFACES (relators between component pairs)
+// ─────────────────────────────────────────────────────────────────────
+
+// ── ConstraintChannel ─────────────────────────────────────────────────
+// Mediates: RequestManager → ConstraintAggregator
+// Contract: when a request is opened, the aggregator must be
+// initialised with the same requestId and participantCount.
+relator ConstraintChannel mediates (RequestManagerSender, ConstraintAggregatorReceiver) {
+  identity: channelId;
+  property channelId: String;
+  property requestId: String;
+  property participantCount: Integer;
+
+  invariants {
+    self.channelId <> null;
+    self.requestId <> null;
+    self.participantCount > 0;
+  }
+}
+
+// ── SelectionChannel ──────────────────────────────────────────────────
+// Mediates: ConstraintAggregator → DateSelector
+// Contract: DateSelector only runs selectDate after
+// allConstraintsCollected = true and passes it a candidate that is
+// not in allExcludedDates.  The channel enforces the handoff.
+relator SelectionChannel mediates (ConstraintAggregatorProvider, DateSelectorConsumer) {
+  identity: channelId;
+  property channelId: String;
+  property requestId: String;
+  property constraintsReady: Boolean;
+  property rangeEarliest: String;
+  property rangeLatest: String;
+
+  invariants {
+    self.channelId <> null;
+    self.requestId <> null;
+  }
+}
+
+// ── NotificationChannel ───────────────────────────────────────────────
+// Mediates: DateSelector → NotificationDispatcher
+// Contract: NotificationDispatcher fires dispatchConfirmation only
+// when DateSelector has a non-empty proposedDate and conflictDetected
+// is false; otherwise dispatchConflictNotice is used.
+relator NotificationChannel mediates (DateSelectorSource, NotificationDispatcherSink) {
+  identity: channelId;
+  property channelId: String;
+  property requestId: String;
+  property outcomeReady: Boolean;
+
+  invariants {
+    self.channelId <> null;
+    self.requestId <> null;
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// END-TO-END HAPPENINGS (data flows crossing component boundaries)
+// ─────────────────────────────────────────────────────────────────────
+
+// ── Happy-path scheduling flow ────────────────────────────────────────
+// Steps (ordered):
+//   1. RequestManager.openRequest          (initiator submits request)
+//   2. ConstraintAggregator.initialise     (via ConstraintChannel)
+//   3. ConstraintAggregator.acceptConstraints × N  (participants submit)
+//   4. DateSelector.selectDate             (via SelectionChannel)
+//   5. RequestManager.markConfirmed        (request status → CONFIRMED)
+//   6. NotificationDispatcher.dispatchConfirmation (via NotificationChannel)
+//
+// refines: meeting_scheduler_discovery::SchedulingFlow
+happening SchedulingFlowHappening {
+  identity: flowId;
+  property flowId: String;
+  property requestId: String;
+  property triggeredBy: String;   // 'Initiator calls RequestManager.openRequest'
+  property outcome: String;       // 'NotificationDispatcher.participantsNotified = true'
+
+  invariants {
+    self.flowId <> null;
+    self.requestId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}
+
+// ── Constraint update flow ────────────────────────────────────────────
+// Steps (ordered):
+//   1. ConstraintAggregator.applyConstraintUpdate  (participant re-submits)
+//   2. DateSelector.clearPropo

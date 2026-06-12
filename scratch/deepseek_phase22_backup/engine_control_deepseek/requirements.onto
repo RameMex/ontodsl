@@ -1,0 +1,160 @@
+schema "onto/0.1";
+namespace engine_control_requirements;
+import "./discovery.onto";
+
+// ─── System Kind ──────────────────────────────────────────────────────────
+// The engine control system as a black box.
+// Specializes the constraint categories from Discovery (which constrain
+// the bearer type EngineControlKind), thus inheriting their invariants.
+// NOTE: a 'kind' can specialize categories directly (S21/S22 rule).
+kind EngineControlSystem specializes OverspeedSafetyConstraints,
+                                 FaultToleranceCategory,
+                                 FlightPhaseConstraints {
+  identity: systemId;
+  property systemId: String;
+  property maxSafeSpeed: Real;           // from discovery categories
+  property fuelCutThreshold: Real;       // from discovery categories
+  property sensorCount: Integer;         // from discovery categories
+  property maxToleratedFaults: Integer;  // from discovery categories
+  property reverserEnabled: Boolean;     // from discovery categories
+  property isOnGround: Boolean;          // from discovery categories
+  property continuousIgnitionEnabled: Boolean;  // from flight phase categories
+  property flightPhase: String;          // from flight phase categories
+  property engineSpeed: Real;            // current rotational speed
+  property fuelFlowRate: Real;           // current fuel flow
+  property thrustCommanded: Real;        // commanded thrust (from cockpit)
+  property thrustAchieved: Real;         // actual thrust delivered
+  property overspeedProtectionFitted: Boolean;  // not all variants have it
+  property overspeedActive: Boolean;     // overspeed condition detected
+  property continuousIgnitionActive: Boolean;   // continuous ignition on/off
+  property faultySensorCount: Integer;   // number of known faulty sensors
+  property modelledValueAvailable: Boolean;     // modelled value ready for use
+  property sensorReadings: Set<Real>;    // current raw sensor readings
+
+  invariants {
+    // Base invariants from EngineControlKind in discovery (must entail
+    // category invariants)
+    self.systemId <> null;
+    self.maxSafeSpeed > 0.0;
+    self.fuelCutThreshold <= self.maxSafeSpeed;
+    self.sensorCount >= 2;
+    self.maxToleratedFaults >= 1;
+    // Own invariants
+    self.engineSpeed >= 0.0;
+    self.fuelFlowRate >= 0.0;
+    self.thrustCommanded >= 0.0;
+    self.thrustAchieved >= 0.0;
+    self.overspeedActive implies (self.engineSpeed > self.maxSafeSpeed);
+    self.faultySensorCount >= 0;
+    self.faultySensorCount <= self.sensorCount;
+    self.continuousIgnitionActive implies (self.flightPhase = 'TAKEOFF' or self.flightPhase = 'LANDING');
+    self.reverserEnabled implies self.isOnGround;
+  }
+
+  // ===================================================================
+  // GOAL-1: Overspeed Prevention
+  // ===================================================================
+  // FR-1a: Monitor engine speed — if overspeed is detected AND protection
+  // is fitted, cut fuel flow to bring speed within limits.
+  // Discharges OverspeedPreventionCommitment and FuelCutCommitment.
+  event handleOverspeedProtection(currentSpeed: Real)
+    refines engine_control_discovery::OverspeedPreventionCommitment,
+            engine_control_discovery::FuelCutCommitment {
+    pre: currentSpeed >= 0.0;
+    pre: self.overspeedProtectionFitted = true;
+    pre: not self.overspeedActive;  // hasn't been handled yet
+    post: if currentSpeed > self.maxSafeSpeed then
+            self.engineSpeed = currentSpeed
+          else
+            true
+          endif;
+    post: self.overspeedActive = (currentSpeed > self.maxSafeSpeed);
+    post: if self.overspeedActive then
+            self.fuelFlowRate <= self.fuelCutThreshold
+          else
+            true
+          endif;
+    modifies: self.engineSpeed, self.overspeedActive, self.fuelFlowRate;
+  }
+
+  // FR-1b: Without overspeed protection fitted, still monitor and alert
+  // but cannot cut fuel.
+  event monitorOverspeed(currentSpeed: Real) {
+    pre: currentSpeed >= 0.0;
+    pre: self.overspeedProtectionFitted = false;
+    post: self.engineSpeed = currentSpeed;
+    post: self.overspeedActive = (currentSpeed > self.maxSafeSpeed);
+    // No fuel cut — not fitted
+    modifies: self.engineSpeed, self.overspeedActive;
+  }
+
+  // ===================================================================
+  // GOAL-2: Ignition and Thrust Management
+  // ===================================================================
+  // FR-2a: When continuous ignition is commanded, enable it.
+  // Discharges ContinuousIgnitionCommitment.
+  event enableContinuousIgnition(ignitionOn: Boolean, currentPhase: String)
+    refines engine_control_discovery::ContinuousIgnitionCommitment {
+    pre: ignitionOn = true implies (currentPhase = 'TAKEOFF' or currentPhase = 'LANDING');
+    post: self.continuousIgnitionEnabled = ignitionOn;
+    post: self.continuousIgnitionActive = ignitionOn;
+    post: self.flightPhase = currentPhase;
+    modifies: self.continuousIgnitionEnabled, self.continuousIgnitionActive,
+              self.flightPhase;
+  }
+
+  // FR-2b: Maintain commanded thrust during flight.
+  // Discharges ThrustHoldCommitment.
+  event applyThrust(command: Real)
+    refines engine_control_discovery::ThrustHoldCommitment {
+    pre: command >= 0.0;
+    pre: not self.isOnGround;  // in flight
+    post: self.thrustCommanded = command;
+    post: self.thrustAchieved = command;  // ideal: holds at commanded
+    modifies: self.thrustCommanded, self.thrustAchieved;
+  }
+
+  // FR-2c: Deploy thrust reverser only when on the ground.
+  // Discharges ReverserGroundOnlyCommitment.
+  event deployThrustReverser(deploy: Boolean)
+    refines engine_control_discovery::ReverserGroundOnlyCommitment {
+    pre: self.isOnGround = true;  // only allowed on ground
+    post: self.reverserEnabled = deploy;
+    modifies: self.reverserEnabled;
+  }
+
+  // ===================================================================
+  // GOAL-3: Sensor Fault Tolerance
+  // ===================================================================
+  // FR-3a: Detect sensor fault and substitute modelled value.
+  // Discharges SensorFaultToleranceCommitment.
+  event handleSensorFault(faultyId: String, modelledValue: Real)
+    refines engine_control_discovery::SensorFaultToleranceCommitment {
+    pre: self.faultySensorCount < self.maxToleratedFaults;
+    pre: modelledValue >= 0.0;
+    pre: self.modelledValueAvailable = true;
+    post: self.faultySensorCount = self.faultySensorCount@pre + 1;
+    post: self.maxToleratedFaults >= self.faultySensorCount;
+    modifies: self.faultySensorCount;
+  }
+
+  // ===================================================================
+  // Additional Events (not from commitments but operational)
+  // ===================================================================
+  // FR-4: Transition flight phase (affects many constraints)
+  event setFlightPhase(newPhase: String, groundState: Boolean) {
+    pre: newPhase <> null;
+    pre: groundState implies newPhase = 'GROUND';
+    post: self.flightPhase = newPhase;
+    post: self.isOnGround = groundState;
+    modifies: self.flightPhase, self.isOnGround;
+  }
+
+  // FR-5: Reset sensor fault state (e.g. after maintenance or self-test)
+  event clearSensorFaults() {
+    pre: self.faultySensorCount > 0;
+    post: self.faultySensorCount = 0;
+    post: self.modelledValueAvailable = true;
+    modifies: self.faultySensorCount;
+  }
+}

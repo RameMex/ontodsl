@@ -1,0 +1,170 @@
+schema "onto/0.1";
+namespace inventory_warehouse_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// ─── Physical / Domain-logical Invariants (MEMBER-QUANTIFIED CATEGORIES) ──
+// These categories define constraints on the system kind. They reference ONLY
+// properties that exist on the REQUIREMENTS-stage WarehouseInventorySystem.
+// No regulatory documentary properties are referenced here — those belong
+// exclusively on the formalized subkind, not on the base kind referenced
+// by the categories.
+
+category PhysicallyPlausibleStock where bearer: WarehouseInventorySystem {
+  invariants {
+    bearer.stockOnHand >= 0.0;
+    bearer.cachedStock >= 0.0;
+    bearer.reconciledQty >= 0.0;
+    bearer.lowStockAlertThreshold >= 0.0;
+    bearer.maxJournalEntriesPerCycle > 0;
+  }
+}
+
+category JournalConsistency where bearer: WarehouseInventorySystem {
+  invariants {
+    bearer.movementJournalSize >= 0;
+    (if bearer.cachedStock > 0.0 then bearer.movementJournalSize > 0 else true endif);
+  }
+}
+
+category BackorderIntegrity where bearer: WarehouseInventorySystem {
+  invariants {
+    (if bearer.stockOnHand = 0.0 then bearer.isBackorderable = true else true endif);
+  }
+}
+
+category ReconciliationCompleteness where bearer: WarehouseInventorySystem {
+  invariants {
+    bearer.reconciledQty = bearer.cachedStock;
+  }
+}
+
+// ─── Regulatory / Compliance Anchors ─────────────────────────────────────
+// These categories constrain the formalized subkind. They reference properties
+// that exist ONLY on the formalized subkind (WarehouseInventorySystemFormalized),
+// NOT on the base WarehouseInventorySystem. To avoid S27, the bearer type
+// must be the formalized subkind — but in member-quantified categories, the
+// bearer type declaration is a forward reference. Since the formalized subkind
+// does not exist yet at parse time in this file, we must use a different
+// approach: reference ONLY properties that exist on WarehouseInventorySystem.
+// Regulatory documentary properties will be enforced directly via invariants
+// on the subkind, not via category membership.
+
+// ─── Passive Assumptions Record ──────────────────────────────────────────
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property assumptionCode: String;  // e.g. 'ASSUME-1', 'ASSUME-2'
+  property description: String;
+  property domainAuthority: String;  // e.g. 'WMS Best Practice', 'IATA'
+
+  invariants {
+    self.assumptionId <> null;
+    self.assumptionCode <> null;
+    self.description <> null;
+    self.domainAuthority <> null;
+  }
+}
+
+// @assumption ASSUME-1: The underlying database provides ACID transactions on journal writes.
+// @assumption ASSUME-2: The physical scan system on the receiving dock is 100% reliable.
+// @assumption ASSUME-3: Network latency between warehouse floor and backend < 500ms at P99.
+// @assumption ASSUME-4: The clock on the reconciliation server is NTP-synchronized to within 1s.
+// @assumption ASSUME-5: The backorder FIFO queue is processed within one minute of restock.
+// @assumption ASSUME-6: No concurrent stock changes during nightly reconciliation window.
+
+// ─── Formalized System Subkind (subkind of the requirements system kind) ─
+// A subkind inherits identity from its parent — NO identity block allowed.
+// All regulatory documentary properties are declared here.
+// Regulatory invariants are enforced directly on this subkind, not via
+// category membership (to avoid S27 on forward references).
+
+subkind WarehouseInventorySystemFormalized
+  specializes WarehouseInventorySystem {
+
+  // ─── Regulatory compliance documentary properties ──────────────────
+  property soxControlId: String;
+  property auditRetentionDays: Integer;
+  property gdprDataController: String;
+  property gdprProcessorContract: String;
+  property maxStackHeightCm: Integer;
+  property hazmatSegregationRequired: Boolean;
+
+  // ─── Invariants ────────────────────────────────────────────────────
+  invariants {
+    // Core domain invariants (inherited from parent, re-stated for clarity)
+    self.stockOnHand >= 0.0;
+    self.cachedStock >= 0.0;
+    self.reconciledQty >= 0.0;
+    self.movementJournalSize >= 0;
+
+    // Enforce JournalConsistency invariants explicitly
+    (if self.cachedStock > 0.0 then self.movementJournalSize > 0 else true endif);
+
+    // Enforce BackorderIntegrity invariants explicitly
+    (if self.stockOnHand = 0.0 then self.isBackorderable = true else true endif);
+
+    // Enforce ReconciliationCompleteness invariants explicitly
+    self.reconciledQty = self.cachedStock;
+
+    // Sarbanes-Oxley compliance invariants (direct enforcement)
+    self.soxControlId <> null;
+    self.auditRetentionDays >= 2555;
+
+    // GDPR compliance invariants (direct enforcement)
+    self.gdprDataController <> null;
+    self.gdprProcessorContract <> null;
+
+    // Safe Storage Regulation invariants (direct enforcement)
+    self.maxStackHeightCm > 0;
+  }
+
+  // ─── Active Business Rules (events) ─────────────────────────────────
+
+  // Active Business Rule: Reject allocation when stock insufficient and non-backorderable
+  event guardRejectAllocation(sku: SKU, requestedQty: Real)
+    refines inventory_warehouse_requirements::WarehouseInventorySystem.rejectAllocation {
+    pre: sku <> null;
+    pre: requestedQty > 0.0;
+    pre: requestedQty > self.stockOnHand;
+    pre: not sku.isBackorderable;
+    // no modifies clause — pure rejection event
+  }
+
+  // Active Business Rule: Flush journals before threshold
+  event guardJournalFlush(flushCount: Integer) {
+    pre: self.movementJournalSize >= self.maxJournalEntriesPerCycle;
+    pre: flushCount > 0;
+    pre: flushCount <= self.movementJournalSize;
+    post: self.movementJournalSize = self.movementJournalSize@pre - flushCount;
+    modifies: self.movementJournalSize;
+  }
+
+  // Active Business Rule: Enforce low-stock alert BEFORE allocation goes through
+  event guardLowStockAlert(sku: SKU, requestedQty: Real) {
+    pre: sku <> null;
+    pre: requestedQty > 0.0;
+    pre: self.stockOnHand - requestedQty >= 0.0;
+    pre: self.stockOnHand - requestedQty <= self.lowStockAlertThreshold;
+    // no modifies clause — pure observation/alert event
+  }
+
+  // Active Business Rule: Reject restock when the journal size is at max
+  event guardRejectRestockWhenJournalFull(sku: SKU, receivedQty: Real) {
+    pre: sku <> null;
+    pre: receivedQty > 0.0;
+    pre: self.movementJournalSize >= self.maxJournalEntriesPerCycle;
+    // no modifies clause — pure rejection
+  }
+
+  // Active Business Rule: Reconciliation must run after every maxJournalEntriesPerCycle writes
+  event guardForceReconciliation() {
+    pre: self.movementJournalSize >= self.maxJournalEntriesPerCycle;
+    post: self.reconciledQty = self.cachedStock;
+    modifies: self.reconciledQty;
+  }
+}
+
+// ─── Explicit Relations for Formalization-layer artifacts ────────────────
+
+relation formalAssumptionToFormalized: <<memberOf>> from FormalAssumptionRecord [0..*] to WarehouseInventorySystemFormalized [1];

@@ -1,0 +1,183 @@
+schema "onto/0.1";
+namespace insulin_pump_requirements;
+import "./discovery.onto";
+
+// ─── System Kind ────────────────────────────────────────────────────
+// We cannot reuse the name 'InsulinPumpSystem' (E2 duplicate).
+// We name it 'PumpControllerSystem' and have it specialize the
+// constraint categories. A 'kind' CAN specialize 'category' (S21 rule).
+// The discovery placeholder 'InsulinPumpSystem' is ignored — we
+// declare our own kind here that carries the identity.
+kind PumpControllerSystem
+  specializes DoseSafetyConstraints, HardwareSafety {
+  identity: systemId;
+  property systemId: String;
+  property safeMaxDoseUnits: Real;       // from DoseSafetyConstraints
+  property lastDeliveredDose: Real;
+  property lastReadingMgDl: Real;
+  property safeZoneLower: Real;
+  property safeZoneUpper: Real;
+  property isOperating: Boolean;
+  property faultDetected: Boolean;
+  property alarmActive: Boolean;
+  property lowReservoirAlertThreshold: Real;
+  property reservoirUnits: Real;
+  property selfTestIntervalSeconds: Integer;
+
+  invariants {
+    // Identity
+    self.systemId <> null;
+    // Safe dose bounds (entail DoseSafetyConstraints)
+    self.safeMaxDoseUnits > 0.0;
+    self.lastDeliveredDose <= self.safeMaxDoseUnits;
+    // Safe zone well-formed
+    self.safeZoneLower >= 0.0;
+    self.safeZoneUpper > self.safeZoneLower;
+    // Hardware safety invariants (entail HardwareSafety)
+    self.isOperating implies not self.faultDetected;
+    self.faultDetected implies not self.isOperating;
+    self.faultDetected implies self.alarmActive;
+    // Reservoir plausibility
+    self.reservoirUnits >= 0.0;
+    self.lowReservoirAlertThreshold >= 0.0;
+    // Self-test interval
+    self.selfTestIntervalSeconds >= 60;   // at least once per minute as per conversation
+    // Reading plausibility
+    self.lastReadingMgDl >= 0.0;
+  }
+
+  // ─── FR-1: Deliver insulin (GOAL-1) ───────────────────────────────
+  // Discharges CorrectDoseCommitment from Discovery.
+  // Behavior: if reading is outside safe zone and rising, deliver dose
+  // proportional to rate of increase, bounded by safeMaxDoseUnits.
+  event deliverInsulin(readingMgDl: Real, rateOfIncrease: Real): Real
+    refines insulin_pump_discovery::CorrectDoseCommitment {
+    pre: self.isOperating = true;
+    pre: not self.faultDetected;
+    pre: readingMgDl >= 0.0;
+    pre: readingMgDl > self.safeZoneUpper;        // only deliver when above safe zone
+    pre: rateOfIncrease >= 0.0;                   // only deliver when rising
+    // Pre-condition constraints for proportional dose:
+    // Dose = k * rateOfIncrease, clamped to safeMaxDoseUnits
+    pre: rateOfIncrease * 1.0 <= self.safeMaxDoseUnits;  // proportionality factor 1 for simplicity
+    // Reservoir must have enough insulin
+    pre: self.reservoirUnits >= rateOfIncrease * 1.0;
+
+    post: result <= self.safeMaxDoseUnits;                                 // never exceed safe maximum
+    post: self.lastDeliveredDose = result;                                 // record dose
+    post: self.lastReadingMgDl = readingMgDl;                              // record latest reading
+    post: self.reservoirUnits = self.reservoirUnits@pre - result;          // consume from reservoir
+    post: self.reservoirUnits >= 0.0;                                      // invariant preserved
+    post: self.isOperating = true;                                         // still operating
+    post: not self.faultDetected;                                          // still no fault
+    // Proportional: dose = 1.0 * rateOfIncrease (bounded by safeMax)
+    post: result = if (rateOfIncrease * 1.0) <= self.safeMaxDoseUnits
+                   then rateOfIncrease * 1.0
+                   else self.safeMaxDoseUnits
+                   endif;
+
+    modifies: self.lastDeliveredDose, self.lastReadingMgDl, self.reservoirUnits;
+  }
+
+  // ─── FR-2: Detect fault and fail safe (GOAL-2) ────────────────────
+  // Discharges FailSafeCommitment.
+  event detectFault(faultCode: String, isFault: Boolean)
+    refines insulin_pump_discovery::FailSafeCommitment {
+    pre: not self.faultDetected;
+    pre: faultCode <> null;
+
+    post: if isFault then
+            self.faultDetected = true
+          else
+            self.faultDetected = false
+          endif;
+    post: if self.faultDetected then
+            self.isOperating = false and
+            self.alarmActive = true
+          else
+            self.isOperating = true and
+            not self.alarmActive
+          endif;
+    // Safety: delivery stopped and alarm on any fault
+    post: self.faultDetected implies (not self.isOperating and self.alarmActive);
+    // New invariant: no illegal state
+    post: self.isOperating implies not self.faultDetected;
+
+    modifies: self.faultDetected, self.isOperating, self.alarmActive;
+  }
+
+  // ─── FR-2b: Sound alarm (part of GOAL-2, triggered by detectFault) ─
+  event soundAlarm()
+    refines insulin_pump_discovery::FailSafeCommitment {
+    pre: self.faultDetected = true;
+    pre: not self.alarmActive;            // alarm not already on
+
+    post: self.alarmActive = true;
+    // Since alarmActive changes, update modifies:
+    modifies: self.alarmActive;
+  }
+
+  // ─── FR-3: Alert patient (GOAL-3) ─────────────────────────────────
+  // Discharges AlertCommitment. Two variants: low reservoir and malfunction.
+  event alertLowReservoir()
+    refines insulin_pump_discovery::AlertCommitment {
+    pre: self.reservoirUnits > 0.0;                          // still some insulin
+    pre: self.reservoirUnits <= self.lowReservoirAlertThreshold;
+    pre: not self.alarmActive;                               // only one active alarm semantics
+
+    post: self.alarmActive = true;
+    modifies: self.alarmActive;
+  }
+
+  event alertMalfunction(faultDescription: String)
+    refines insulin_pump_discovery::AlertCommitment {
+    pre: self.faultDetected = true;          // fault must be known
+    pre: not self.alarmActive;              // alarm not already on (could combine with fault)
+
+    post: self.alarmActive = true;
+    modifies: self.alarmActive;
+  }
+
+  // ─── Utility events ───────────────────────────────────────────────
+
+  // Set configuration: safe max, safe zone, low-reservoir threshold
+  event configureSystem(safeMax: Real, zoneLower: Real, zoneUpper: Real, lowResThreshold: Real) {
+    pre: safeMax > 0.0;
+    pre: zoneLower >= 0.0;
+    pre: zoneUpper > zoneLower;
+    pre: lowResThreshold >= 0.0;
+
+    post: self.safeMaxDoseUnits = safeMax;
+    post: self.safeZoneLower = zoneLower;
+    post: self.safeZoneUpper = zoneUpper;
+    post: self.lowReservoirAlertThreshold = lowResThreshold;
+
+    modifies: self.safeMaxDoseUnits, self.safeZoneLower, self.safeZoneUpper, self.lowReservoirAlertThreshold;
+  }
+
+  // Initialize system (operational)
+  event initializeSystem() {
+    pre: not self.isOperating;
+    pre: not self.faultDetected;
+    pre: not self.alarmActive;
+    pre: self.safeMaxDoseUnits > 0.0;
+    pre: self.safeZoneUpper > self.safeZoneLower;
+    pre: self.reservoirUnits >= 0.0;
+
+    post: self.isOperating = true;
+    post: self.lastDeliveredDose = 0.0;
+    post: self.lastReadingMgDl = 0.0;
+
+    modifies: self.isOperating, self.lastDeliveredDose, self.lastReadingMgDl;
+  }
+
+  // Refill reservoir
+  event refillReservoir(amount: Real) {
+    pre: amount > 0.0;
+    pre: self.reservoirUnits + amount <= 100.0;    // capacity bound
+
+    post: self.reservoirUnits = self.reservoirUnits@pre + amount;
+
+    modifies: self.reservoirUnits;
+  }
+}

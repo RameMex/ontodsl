@@ -1,0 +1,308 @@
+schema "onto/0.1";
+namespace patient_monitoring_requirements;
+import "./discovery.onto";
+
+// =====================================================================
+// Requirements stage — bedside vital-signs monitor domain.
+//
+// The system is specified as a black box: one kind (VitalSignsMonitorSystem)
+// whose events are the Functional Requirements. Every event that discharges
+// a discovery commitment carries a structured 'refines:' clause so the
+// inter-stage verifier can prove the discharge obligation.
+//
+// Non-functional concerns (latency budgets, plausibility window,
+// silence ceiling, disconnect timeout) are modelled as plain
+// Real/Integer properties with invariants — simpler and more directly
+// checkable by Z3 than the 'quality' stereotype here.
+// =====================================================================
+
+// ─── System kind (black box) ─────────────────────────────────────────
+//
+// The system kind does NOT attempt to specialise the member-quantified
+// discovery categories (HeartRatePlausibilityConstraints etc.) because
+// those categories have a 'where bearer: <MemberKind>' clause binding
+// them to the domain glossary kinds (HeartRateReading, AlarmThreshold,
+// SilencedState). The system kind is NOT one of those member kinds.
+// Instead, we inline the same numeric thresholds as properties +
+// invariants, which achieves the same Z3-checkable obligation without
+// triggering a S35 bearer-mismatch.
+
+kind VitalSignsMonitorSystem {
+  identity: systemId;
+  property systemId: String;
+
+  // ── Current vital state ───────────────────────────────────────────
+  property currentHeartRateBpm: Real;
+  property lastValidHeartRateBpm: Real;
+  property isDisplayingReading: Boolean;
+
+  // ── Alarm threshold configuration ────────────────────────────────
+  property alarmLowBpm: Real;
+  property alarmHighBpm: Real;
+
+  // ── Alarm state ───────────────────────────────────────────────────
+  property alarmActive: Boolean;
+  property alarmSilenced: Boolean;
+  property alarmSilenceElapsedSeconds: Real;
+
+  // ── Sensor state ─────────────────────────────────────────────────
+  property sensorConnected: Boolean;
+  property signalAbsentSeconds: Real;
+  property sensorDisconnectAlarmActive: Boolean;
+
+  // ── Rejection counter (GOAL-1) ────────────────────────────────────
+  property rejectedReadingCount: Integer;
+
+  // ── NFR bounds (inline, Z3-checkable) ────────────────────────────
+  // Plausibility window — mirrors discovery HeartRatePlausibilityConstraints
+  property plausibilityLowerBpm: Real;   // = 20.0
+  property plausibilityUpperBpm: Real;   // = 250.0
+  // Alarm-latency ceiling — mirrors AlarmLatencyCommitment (GOAL-2)
+  property maxAlarmLatencySeconds: Real; // <= 2.0
+  // Sensor-disconnect timeout — mirrors SensorDisconnectDetectionCommitment (GOAL-3)
+  property disconnectTimeoutSeconds: Real; // <= 5.0
+  // Silence ceiling — mirrors AlarmSilenceAutoRearmCommitment (GOAL-4)
+  property maxSilenceDurationSeconds: Real; // <= 120.0
+
+  invariants {
+    self.systemId <> null;
+
+    // Plausibility window is valid and matches the domain glossary
+    self.plausibilityLowerBpm = 20.0;
+    self.plausibilityUpperBpm = 250.0;
+    self.plausibilityLowerBpm > 0.0;
+    self.plausibilityUpperBpm > self.plausibilityLowerBpm;
+
+    // Alarm threshold must sit within the plausibility window
+    self.alarmLowBpm >= self.plausibilityLowerBpm;
+    self.alarmHighBpm <= self.plausibilityUpperBpm;
+    self.alarmHighBpm > self.alarmLowBpm;
+
+    // NFR ceilings — discharge conditions must be at least as tight
+    self.maxAlarmLatencySeconds > 0.0;
+    self.maxAlarmLatencySeconds <= 2.0;
+    self.disconnectTimeoutSeconds > 0.0;
+    self.disconnectTimeoutSeconds <= 5.0;
+    self.maxSilenceDurationSeconds > 0.0;
+    self.maxSilenceDurationSeconds <= 120.0;
+
+    // Counters / durations are non-negative
+    self.rejectedReadingCount >= 0;
+    self.signalAbsentSeconds >= 0.0;
+    self.alarmSilenceElapsedSeconds >= 0.0;
+    self.currentHeartRateBpm >= 0.0;
+    self.lastValidHeartRateBpm >= 0.0;
+
+    // A silenced alarm must first be active (or have been active)
+    // expressed conservatively: silence implies alarm was triggered
+    self.alarmSilenced = true implies self.alarmActive = true;
+
+    // Silence elapsed cannot exceed the ceiling
+    self.alarmSilenceElapsedSeconds <= self.maxSilenceDurationSeconds;
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // FR-1  Accept a plausible heart-rate reading and update display.
+  //
+  // Pre : reading is within the plausibility window [20, 250].
+  // Post: currentHeartRateBpm reflects the new value; display is on;
+  //       sensor is considered connected; signalAbsentSeconds resets.
+  // ──────────────────────────────────────────────────────────────────
+  event acceptReading(valueBpm: Real) {
+    pre: valueBpm >= self.plausibilityLowerBpm;
+    pre: valueBpm <= self.plausibilityUpperBpm;
+    pre: self.sensorConnected = true;
+    post: self.currentHeartRateBpm = valueBpm;
+    post: self.lastValidHeartRateBpm = valueBpm;
+    post: self.isDisplayingReading = true;
+    post: self.signalAbsentSeconds = 0.0;
+    post: self.sensorDisconnectAlarmActive = false;
+    modifies: self.currentHeartRateBpm,
+              self.lastValidHeartRateBpm,
+              self.isDisplayingReading,
+              self.signalAbsentSeconds,
+              self.sensorDisconnectAlarmActive;
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // FR-2  Reject an implausible heart-rate reading.
+  //       Discharges GOAL-1 (ImplausibleReadingRejectionCommitment).
+  //
+  // Pre : reading is outside [20, 250].
+  // Post: reading is NOT displayed; rejectedReadingCount increments;
+  //       currentHeartRateBpm is unchanged (last valid value kept).
+  // The post-condition implies the commitment predicate because
+  //   plausibilityLowerBpm = 20 > 0  and
+  //   plausibilityUpperBpm = 250 > plausibilityLowerBpm
+  // are enforced by the system invariants above.
+  // ──────────────────────────────────────────────────────────────────
+  event rejectImplausibleReading(valueBpm: Real)
+    refines patient_monitoring_discovery::ImplausibleReadingRejectionCommitment {
+    pre: valueBpm < self.plausibilityLowerBpm
+         or valueBpm > self.plausibilityUpperBpm;
+    post: self.isDisplayingReading = self.isDisplayingReading@pre;
+    post: self.currentHeartRateBpm = self.currentHeartRateBpm@pre;
+    post: self.rejectedReadingCount = self.rejectedReadingCount@pre + 1;
+    modifies: self.rejectedReadingCount;
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // FR-3  Raise a threshold-crossing alarm.
+  //       Discharges GOAL-2 (AlarmLatencyCommitment).
+  //
+  // Pre : a valid reading is displayed; the reading crosses a
+  //       configured threshold; no alarm is currently active.
+  // Post: alarmActive is set; the latency at which the alarm is raised
+  //       is bounded by maxAlarmLatencySeconds (<= 2 s), which implies
+  //       the commitment predicate
+  //       (maxAlarmLatencySeconds > 0 and <= 2.0).
+  // ──────────────────────────────────────────────────────────────────
+  event raiseThresholdAlarm(valueBpm: Real, latencySeconds: Real)
+    refines patient_monitoring_discovery::AlarmLatencyCommitment {
+    pre: self.isDisplayingReading = true;
+    pre: valueBpm >= self.plausibilityLowerBpm;
+    pre: valueBpm <= self.plausibilityUpperBpm;
+    pre: valueBpm < self.alarmLowBpm or valueBpm > self.alarmHighBpm;
+    pre: not self.alarmActive;
+    pre: latencySeconds >= 0.0;
+    pre: latencySeconds <= self.maxAlarmLatencySeconds;
+    post: self.alarmActive = true;
+    post: self.alarmSilenced = false;
+    post: self.alarmSilenceElapsedSeconds = 0.0;
+    modifies: self.alarmActive,
+              self.alarmSilenced,
+              self.alarmSilenceElapsedSeconds;
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // FR-4  Clinician silences an active alarm.
+  //
+  // Pre : an alarm is active and not already silenced.
+  // Post: alarmSilenced is set; elapsed silence timer resets.
+  // ──────────────────────────────────────────────────────────────────
+  event silenceAlarm() {
+    pre: self.alarmActive = true;
+    pre: not self.alarmSilenced;
+    post: self.alarmSilenced = true;
+    post: self.alarmSilenceElapsedSeconds = 0.0;
+    modifies: self.alarmSilenced,
+              self.alarmSilenceElapsedSeconds;
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // FR-5  Auto-rearm a silenced alarm after the silence ceiling.
+  //       Discharges GOAL-4 (AlarmSilenceAutoRearmCommitment).
+  //
+  // Pre : alarm is active AND silenced; elapsed silence >=
+  //       maxSilenceDurationSeconds.
+  // Post: alarmSilenced is cleared (alarm audible again); elapsed
+  //       timer resets.
+  // The post implies the commitment predicate because the system
+  // invariant enforces maxSilenceDurationSeconds <= 120.0.
+  // ──────────────────────────────────────────────────────────────────
+  event autoRearmAlarm(elapsedSeconds: Real)
+    refines patient_monitoring_discovery::AlarmSilenceAutoRearmCommitment {
+    pre: self.alarmActive = true;
+    pre: self.alarmSilenced = true;
+    pre: elapsedSeconds >= self.maxSilenceDurationSeconds;
+    post: self.alarmSilenced = false;
+    post: self.alarmSilenceElapsedSeconds = 0.0;
+    modifies: self.alarmSilenced,
+              self.alarmSilenceElapsedSeconds;
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // FR-6  Clear an alarm when the condition normalises.
+  //
+  // Pre : alarm is active; the current reading is back within
+  //       configured thresholds.
+  // Post: alarmActive and alarmSilenced are cleared.
+  // ──────────────────────────────────────────────────────────────────
+  event clearAlarm() {
+    pre: self.alarmActive = true;
+    pre: self.currentHeartRateBpm >= self.alarmLowBpm;
+    pre: self.currentHeartRateBpm <= self.alarmHighBpm;
+    post: self.alarmActive = false;
+    post: self.alarmSilenced = false;
+    post: self.alarmSilenceElapsedSeconds = 0.0;
+    modifies: self.alarmActive,
+              self.alarmSilenced,
+              self.alarmSilenceElapsedSeconds;
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // FR-7  Record accumulating sensor-signal absence.
+  //
+  // Pre : sensor was connected; signal has now been absent for
+  //       absentSeconds (< disconnectTimeoutSeconds — not yet a
+  //       full disconnect).
+  // Post: signalAbsentSeconds is updated; sensorConnected remains
+  //       true until the timeout fires (FR-8).
+  // ──────────────────────────────────────────────────────────────────
+  event recordSignalAbsence(absentSeconds: Real) {
+    pre: self.sensorConnected = true;
+    pre: absentSeconds >= 0.0;
+    pre: absentSeconds < self.disconnectTimeoutSeconds;
+    post: self.signalAbsentSeconds = absentSeconds;
+    modifies: self.signalAbsentSeconds;
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // FR-8  Raise sensor-disconnected alarm after timeout.
+  //       Discharges GOAL-3 (SensorDisconnectDetectionCommitment).
+  //
+  // Pre : sensor was considered connected; signal has been absent for
+  //       more than disconnectTimeoutSeconds (> 5 s by invariant).
+  // Post: sensorConnected is false; sensorDisconnectAlarmActive is
+  //       raised; display is turned off (no valid reading to show).
+  // The post implies the commitment predicate because the invariant
+  // enforces disconnectTimeoutSeconds > 0 and <= 5.0.
+  // ──────────────────────────────────────────────────────────────────
+  event raiseSensorDisconnectAlarm(absentSeconds: Real)
+    refines patient_monitoring_discovery::SensorDisconnectDetectionCommitment {
+    pre: self.sensorConnected = true;
+    pre: absentSeconds > self.disconnectTimeoutSeconds;
+    post: self.sensorConnected = false;
+    post: self.sensorDisconnectAlarmActive = true;
+    post: self.isDisplayingReading = false;
+    post: self.signalAbsentSeconds = absentSeconds;
+    modifies: self.sensorConnected,
+              self.sensorDisconnectAlarmActive,
+              self.isDisplayingReading,
+              self.signalAbsentSeconds;
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // FR-9  Resume normal monitoring when signal is restored.
+  //
+  // Pre : sensor was disconnected (alarm active).
+  // Post: sensorConnected is restored; disconnect alarm clears;
+  //       signalAbsentSeconds resets.
+  // ──────────────────────────────────────────────────────────────────
+  event resumeAfterReconnect() {
+    pre: self.sensorConnected = false;
+    pre: self.sensorDisconnectAlarmActive = true;
+    post: self.sensorConnected = true;
+    post: self.sensorDisconnectAlarmActive = false;
+    post: self.signalAbsentSeconds = 0.0;
+    modifies: self.sensorConnected,
+              self.sensorDisconnectAlarmActive,
+              self.signalAbsentSeconds;
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // FR-10 Configure alarm thresholds.
+  //
+  // Pre : new thresholds are within the plausibility window and
+  //       lowBpm < highBpm.
+  // Post: alarmLowBpm and alarmHighBpm are updated.
+  // ──────────────────────────────────────────────────────────────────
+  event configureThresholds(lowBpm: Real, highBpm: Real) {
+    pre: lowBpm >= self.plausibilityLowerBpm;
+    pre: highBpm <= self.plausibilityUpperBpm;
+    pre: highBpm > lowBpm;
+    post: self.alarmLowBpm = lowBpm;
+    post: self.alarmHighBpm = highBpm;
+    modifies: self.alarmLowBpm, self.alarmHighBpm;
+  }
+}

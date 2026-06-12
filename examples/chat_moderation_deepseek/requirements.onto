@@ -1,0 +1,119 @@
+schema "onto/0.1";
+namespace chat_moderation_requirements;
+import "./discovery.onto";
+
+// ─── System Kind (black box) ──────────────────────────────────────────
+// Specializes constraint categories from Discovery.
+// Mirrors commitment properties used in predicates.
+kind ChatModerationSystem
+  specializes HighConfidenceHideConstraints,
+              DecisionRecordingConstraints,
+              PendingReviewConstraints {
+
+  identity: systemId;
+  property systemId: String;
+
+  // ─── Mirrored from PendingReviewSLA.p95ReviewHours ──────────────────
+  property p95ReviewHours: Real;
+
+  // ─── Pipeline state ─────────────────────────────────────────────────
+  property inFlightMessages: Set<Message>;
+  property pendingHiddenMessages: Set<Message>;
+  property moderationDecisions: Set<ModerationDecision>;
+  property classifierAvailable: Boolean;
+
+  invariants {
+    self.systemId <> null;
+    self.p95ReviewHours > 0.0;
+    self.p95ReviewHours <= 4.0;
+    self.inFlightMessages->size() >= 0;
+    self.pendingHiddenMessages->size() >= 0;
+    self.moderationDecisions->size() >= 0;
+  }
+
+  // ─── Event: submitMessage ───────────────────────────────────────────
+  // Discharges HighConfidenceHide (post ensures hide for >=0.95) and
+  // DecisionRecording (post ensures record created) and
+  // PendingReviewSLA (post ensures p95 constraint propagated).
+  //
+  // ★ FIXED: Removed `let` expression + removal of string concatenation
+  //   (`+`) for the decisionId. Instead, we assert the existence of some
+  //   ModerationDecision in the set with the correct outcome, classifier-
+  //   Confidence, and threshold, without specifying an exact decisionId.
+  //   The decisionId is a naming concern the implementation handles.
+  event submitMessage(msg: Message, classifierConfidence: Real)
+    refines chat_moderation_discovery::HighConfidenceHide,
+            chat_moderation_discovery::DecisionRecording,
+            chat_moderation_discovery::PendingReviewSLA {
+    pre: msg <> null;
+    pre: msg.messageId <> null;
+    pre: classifierConfidence >= 0.0;
+    pre: classifierConfidence <= 1.0;
+    pre: self.classifierAvailable = true;
+
+    post: if classifierConfidence >= 0.95 then
+            self.pendingHiddenMessages->includes(msg)
+          else
+            not self.pendingHiddenMessages->includes(msg)
+          endif;
+
+    post: if classifierConfidence >= 0.95 then
+            msg.riskLevel = 'pending'
+          else
+            msg.riskLevel = 'low'
+          endif;
+
+    // DecisionRecording: a new ModerationDecision exists in the set
+    // with the correct outcome, confidence, threshold 0.95, and a non-null
+    // timestamp. The decisionId is left unspecified — it's a generated
+    // implementation detail.
+    post: self.moderationDecisions->exists(d |
+            d.outcome = (if classifierConfidence >= 0.95 then 'hidden' else 'allowed' endif)
+            and
+            d.classifierConfidence = classifierConfidence
+            and
+            d.thresholdUsed = 0.95
+            and
+            d.timestamp <> null
+          );
+
+    post: self.p95ReviewHours = self.p95ReviewHours@pre;
+
+    modifies: self.pendingHiddenMessages,
+              self.inFlightMessages,
+              self.moderationDecisions;
+  }
+
+  // ─── Event: releaseMessage (moderator releases a hidden message) ────
+  event releaseMessage(msg: Message) {
+    pre: msg <> null;
+    pre: self.pendingHiddenMessages->includes(msg);
+
+    post: not self.pendingHiddenMessages->includes(msg);
+    post: msg.riskLevel = 'low';
+
+    modifies: self.pendingHiddenMessages;
+  }
+
+  // ─── Event: confirmMessage (moderator confirms hide permanently) ────
+  event confirmMessage(msg: Message) {
+    pre: msg <> null;
+    pre: self.pendingHiddenMessages->includes(msg);
+
+    post: not self.pendingHiddenMessages->includes(msg);
+    post: msg.riskLevel = 'high';
+
+    modifies: self.pendingHiddenMessages;
+  }
+
+  // ─── Event: escalateUnreviewed (4-hour SLA timeout) ────────────────
+  event escalateUnreviewed(msg: Message) {
+    pre: msg <> null;
+    pre: self.pendingHiddenMessages->includes(msg);
+
+    post: self.pendingHiddenMessages->includes(msg);  // unchanged
+    post: msg.riskLevel = 'pending';  // unchanged
+
+    modifies: self.pendingHiddenMessages;
+  }
+}

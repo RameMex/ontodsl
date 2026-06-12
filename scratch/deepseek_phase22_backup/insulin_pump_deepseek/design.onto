@@ -1,0 +1,662 @@
+schema "onto/0.1";
+namespace insulin_pump_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Stage 4: Design — Component Decomposition
+// 
+// Decompose the system into cohesive components, each owning specific
+// state. Components communicate via relator-mediated interfaces.
+// Every component event refines at least one upstream event/commitment
+// for inter-stage traceability.
+//
+// Components (all sibling 'kind's — NOT subkinds of the system kind):
+//   - BloodSugarSensor      — reads blood sugar from hardware
+//   - InsulinPump           — delivers insulin via physical pump
+//   - SafetyMonitor         — runs self-tests, detects faults, manages alarm
+//   - ReservoirController   — tracks insulin level, triggers low-reservoir alerts
+//   - DoseLogicController   — decides dose size using sensor + config
+//   - ConfigurationManager  — stores/configures all safety thresholds
+//
+// Interfaces (relators):
+//   - SensorChannel          — mediates BloodSugarSensor ↔ DoseLogicController
+//   - PumpCommandChannel     — mediates DoseLogicController ↔ InsulinPump
+//   - SafetyBus              — mediates SafetyMonitor ↔ all other components (fault broadcast)
+//   - ReservoirMonitorLink   — mediates ReservoirController ↔ SafetyMonitor
+//
+// Happenings:
+//   - DoseHappening          — sensor read → logic → pump command (renamed to avoid collision with discovery.onto)
+//   - FaultHappening         — self-test fail → stop pump → alarm
+//   - LowReservoirHappening  — low level → alarm trigger
+// =====================================================================
+
+// ─── Component: BloodSugarSensor ────────────────────────────────────
+kind BloodSugarSensor {
+  identity: sensorId;
+  property sensorId: String;
+  property lastReadingMgDl: Real;
+  property sensorOperational: Boolean;
+  property sensorFault: Boolean;
+  property readingTimestamp: Integer;
+
+  invariants {
+    self.sensorId <> null;
+    self.lastReadingMgDl >= 0.0;
+    self.lastReadingMgDl <= 1000.0;
+    self.readingTimestamp >= 0;
+    self.sensorFault implies not self.sensorOperational;
+  }
+
+  event takeReading(): Real
+    refines insulin_pump_formalization::FormalizedPumpController.deliverInsulin {
+    pre: self.sensorOperational = true;
+    pre: not self.sensorFault;
+    post: self.lastReadingMgDl = result;
+    post: result >= 0.0;
+    post: result <= 1000.0;
+    modifies: self.lastReadingMgDl, self.readingTimestamp;
+  }
+
+  event reportSensorFault(faultCode: String)
+    refines insulin_pump_formalization::FormalizedPumpController.detectFault {
+    pre: self.sensorOperational = true;
+    pre: faultCode <> null;
+    post: self.sensorOperational = false;
+    post: self.sensorFault = true;
+    modifies: self.sensorOperational, self.sensorFault;
+  }
+
+  event clearSensorFault() {
+    pre: self.sensorFault = true;
+    post: self.sensorFault = false;
+    post: self.sensorOperational = true;
+    modifies: self.sensorFault, self.sensorOperational;
+  }
+}
+
+// ─── Component: InsulinPump ────────────────────────────────────────
+kind InsulinPump {
+  identity: pumpId;
+  property pumpId: String;
+  property lastDoseDelivered: Real;
+  property pumpOperational: Boolean;
+  property pumpFault: Boolean;
+  property currentDoseDelivering: Boolean;
+
+  invariants {
+    self.pumpId <> null;
+    self.lastDoseDelivered >= 0.0;
+    self.pumpFault implies not self.pumpOperational;
+  }
+
+  event deliverDose(dose: Real): Real
+    refines insulin_pump_formalization::FormalizedPumpController.deliverInsulin {
+    pre: self.pumpOperational = true;
+    pre: not self.pumpFault;
+    pre: dose > 0.0;
+    pre: not self.currentDoseDelivering;
+    post: self.lastDoseDelivered = dose;
+    post: self.currentDoseDelivering = true;
+    post: result = dose;
+    modifies: self.lastDoseDelivered, self.currentDoseDelivering;
+  }
+
+  event completeDelivery() {
+    pre: self.currentDoseDelivering = true;
+    post: self.currentDoseDelivering = false;
+    modifies: self.currentDoseDelivering;
+  }
+
+  event emergencyStop()
+    refines insulin_pump_formalization::FormalizedPumpController.detectFault {
+    pre: self.pumpOperational = true;
+    post: self.currentDoseDelivering = false;
+    modifies: self.currentDoseDelivering;
+  }
+
+  event reportPumpFault(faultCode: String)
+    refines insulin_pump_formalization::FormalizedPumpController.detectFault {
+    pre: self.pumpOperational = true;
+    pre: faultCode <> null;
+    post: self.pumpOperational = false;
+    post: self.pumpFault = true;
+    modifies: self.pumpOperational, self.pumpFault;
+  }
+
+  event clearPumpFault() {
+    pre: self.pumpFault = true;
+    post: self.pumpFault = false;
+    post: self.pumpOperational = true;
+    modifies: self.pumpFault, self.pumpOperational;
+  }
+}
+
+// ─── Component: SafetyMonitor ──────────────────────────────────────
+kind SafetyMonitor {
+  identity: monitorId;
+  property monitorId: String;
+  property lastSelfTestTimestamp: Integer;
+  property selfTestIntervalSeconds: Integer;
+  property alarmActive: Boolean;
+  property systemSafe: Boolean;
+  property lastSelfTestPassed: Boolean;
+  property lastFaultCode: String;
+
+  invariants {
+    self.monitorId <> null;
+    self.selfTestIntervalSeconds >= 60;
+    self.lastSelfTestTimestamp >= 0;
+    not self.systemSafe implies self.alarmActive;
+  }
+
+  event runSelfTest(sensorOk: Boolean, pumpOk: Boolean, needleOk: Boolean)
+    refines insulin_pump_formalization::FormalizedPumpController.detectFault {
+    pre: self.systemSafe = true;
+    post: self.lastSelfTestTimestamp = self.lastSelfTestTimestamp@pre + self.selfTestIntervalSeconds;
+    post: self.lastSelfTestPassed = (sensorOk and pumpOk and needleOk);
+    post: if sensorOk and pumpOk and needleOk then
+            self.systemSafe = true
+          else
+            self.systemSafe = false
+          endif;
+    post: if not self.lastSelfTestPassed then
+            self.alarmActive = true
+          else
+            self.alarmActive = false
+          endif;
+    post: if not self.lastSelfTestPassed then
+            self.lastFaultCode = if not sensorOk then 'SENSOR_FAULT'
+                                 else if not pumpOk then 'PUMP_FAULT'
+                                 else 'NEEDLE_FAULT' endif endif
+          else
+            self.lastFaultCode = ''
+          endif;
+    modifies: self.lastSelfTestTimestamp, self.lastSelfTestPassed, self.systemSafe, self.alarmActive, self.lastFaultCode;
+  }
+
+  event triggerAlarm(reason: String)
+    refines insulin_pump_formalization::FormalizedPumpController.soundAlarm {
+    pre: not self.alarmActive;
+    pre: reason <> null;
+    post: self.alarmActive = true;
+    post: self.systemSafe = false;
+    modifies: self.alarmActive, self.systemSafe;
+  }
+
+  event clearAlarm() {
+    pre: self.alarmActive = true;
+    pre: self.lastSelfTestPassed = true;
+    post: self.alarmActive = false;
+    post: self.systemSafe = true;
+    post: self.lastFaultCode = '';
+    modifies: self.alarmActive, self.systemSafe, self.lastFaultCode;
+  }
+
+  event systemEmergencyStop()
+    refines insulin_pump_formalization::InsulinPumpSystemFormalized.rejectFailedSelfTest {
+    pre: self.systemSafe = true;
+    post: self.systemSafe = false;
+    post: self.alarmActive = true;
+    post: self.lastFaultCode = 'EMERGENCY_STOP';
+    modifies: self.systemSafe, self.alarmActive, self.lastFaultCode;
+  }
+}
+
+// ─── Component: ReservoirController ────────────────────────────────
+kind ReservoirController {
+  identity: reservoirId;
+  property reservoirId: String;
+  property currentUnits: Real;
+  property capacityUnits: Real;
+  property lowThresholdUnits: Real;
+  property lowReservoirAlertTriggered: Boolean;
+
+  invariants {
+    self.reservoirId <> null;
+    self.capacityUnits > 0.0;
+    self.currentUnits >= 0.0;
+    self.currentUnits <= self.capacityUnits;
+    self.lowThresholdUnits >= 0.0;
+    self.lowThresholdUnits <= self.capacityUnits;
+  }
+
+  event consumeInsulin(units: Real): Real
+    refines insulin_pump_formalization::FormalizedPumpController.deliverInsulin {
+    pre: units > 0.0;
+    pre: self.currentUnits >= units;
+    post: self.currentUnits = self.currentUnits@pre - units;
+    post: result = self.currentUnits;
+    post: if self.currentUnits <= self.lowThresholdUnits then
+            self.lowReservoirAlertTriggered = true
+          else
+            self.lowReservoirAlertTriggered = false
+          endif;
+    modifies: self.currentUnits, self.lowReservoirAlertTriggered;
+  }
+
+  event refillReservoir(amount: Real)
+    refines insulin_pump_formalization::FormalizedPumpController.refillReservoir {
+    pre: amount > 0.0;
+    pre: self.currentUnits + amount <= self.capacityUnits;
+    post: self.currentUnits = self.currentUnits@pre + amount;
+    modifies: self.currentUnits;
+  }
+
+  event setLowThreshold(threshold: Real) {
+    pre: threshold >= 0.0;
+    pre: threshold <= self.capacityUnits;
+    post: self.lowThresholdUnits = threshold;
+    modifies: self.lowThresholdUnits;
+  }
+
+  event triggerLowAlert(): Boolean
+    refines insulin_pump_formalization::FormalizedPumpController.alertLowReservoir {
+    pre: self.currentUnits <= self.lowThresholdUnits;
+    pre: not self.lowReservoirAlertTriggered;
+    post: self.lowReservoirAlertTriggered = true;
+    post: result = true;
+    modifies: self.lowReservoirAlertTriggered;
+  }
+
+  event clearLowAlert() {
+    pre: self.lowReservoirAlertTriggered = true;
+    post: self.lowReservoirAlertTriggered = false;
+    modifies: self.lowReservoirAlertTriggered;
+  }
+}
+
+// ─── Component: DoseLogicController ────────────────────────────────
+kind DoseLogicController {
+  identity: logicId;
+  property logicId: String;
+  property lastReadingMgDl: Real;
+  property safeZoneLower: Real;
+  property safeZoneUpper: Real;
+  property safeMaxDoseUnits: Real;
+  property lastDoseCalculated: Real;
+  property isArmed: Boolean;
+
+  invariants {
+    self.logicId <> null;
+    self.safeMaxDoseUnits > 0.0;
+    self.safeZoneLower >= 0.0;
+    self.safeZoneUpper > self.safeZoneLower;
+    self.lastReadingMgDl >= 0.0;
+    self.lastDoseCalculated >= 0.0;
+    self.lastDoseCalculated <= self.safeMaxDoseUnits;
+  }
+
+  event computeDose(readingMgDl: Real, rateOfIncrease: Real): Real
+    refines insulin_pump_formalization::FormalizedPumpController.deliverInsulin {
+    pre: self.isArmed = true;
+    pre: readingMgDl >= 0.0;
+    pre: readingMgDl <= 1000.0;
+    pre: readingMgDl > self.safeZoneUpper;
+    pre: rateOfIncrease >= 0.0;
+    pre: rateOfIncrease <= self.safeMaxDoseUnits;
+    post: self.lastReadingMgDl = readingMgDl;
+    post: self.lastDoseCalculated = if rateOfIncrease <= self.safeMaxDoseUnits
+                                    then rateOfIncrease
+                                    else self.safeMaxDoseUnits
+                                    endif;
+    post: result = self.lastDoseCalculated;
+    post: result <= self.safeMaxDoseUnits;
+    modifies: self.lastReadingMgDl, self.lastDoseCalculated;
+  }
+
+  event setSafeZone(lower: Real, upper: Real)
+    refines insulin_pump_formalization::FormalizedPumpController.configureSystem {
+    pre: lower >= 0.0;
+    pre: upper > lower;
+    post: self.safeZoneLower = lower;
+    post: self.safeZoneUpper = upper;
+    modifies: self.safeZoneLower, self.safeZoneUpper;
+  }
+
+  event setSafeMaxDose(maxDose: Real)
+    refines insulin_pump_formalization::FormalizedPumpController.configureSystem {
+    pre: maxDose > 0.0;
+    post: self.safeMaxDoseUnits = maxDose;
+    modifies: self.safeMaxDoseUnits;
+  }
+
+  event setArmed(armed: Boolean) {
+    post: self.isArmed = armed;
+    modifies: self.isArmed;
+  }
+}
+
+// ─── Component: ConfigurationManager ───────────────────────────────
+kind ConfigurationManager {
+  identity: configId;
+  property configId: String;
+  property storedSafeMaxDose: Real;
+  property storedSafeZoneLower: Real;
+  property storedSafeZoneUpper: Real;
+  property storedLowReservoirThreshold: Real;
+  property storedSelfTestInterval: Integer;
+
+  invariants {
+    self.configId <> null;
+    self.storedSafeMaxDose > 0.0;
+    self.storedSafeZoneLower >= 0.0;
+    self.storedSafeZoneUpper > self.storedSafeZoneLower;
+    self.storedLowReservoirThreshold >= 0.0;
+    self.storedSelfTestInterval >= 60;
+  }
+
+  event initializeConfiguration(safeMax: Real, zoneLower: Real, zoneUpper: Real,
+                                lowResThreshold: Real, testInterval: Integer)
+    refines insulin_pump_formalization::FormalizedPumpController.initializeSystem {
+    pre: safeMax > 0.0;
+    pre: zoneLower >= 0.0;
+    pre: zoneUpper > zoneLower;
+    pre: lowResThreshold >= 0.0;
+    pre: testInterval >= 60;
+    post: self.storedSafeMaxDose = safeMax;
+    post: self.storedSafeZoneLower = zoneLower;
+    post: self.storedSafeZoneUpper = zoneUpper;
+    post: self.storedLowReservoirThreshold = lowResThreshold;
+    post: self.storedSelfTestInterval = testInterval;
+    modifies: self.storedSafeMaxDose, self.storedSafeZoneLower, self.storedSafeZoneUpper,
+              self.storedLowReservoirThreshold, self.storedSelfTestInterval;
+  }
+
+  query getSafeMaxDose(): Real {
+    body: self.storedSafeMaxDose;
+  }
+
+  query getSafeZoneLower(): Real {
+    body: self.storedSafeZoneLower;
+  }
+
+  query getSafeZoneUpper(): Real {
+    body: self.storedSafeZoneUpper;
+  }
+
+  query getLowReservoirThreshold(): Real {
+    body: self.storedLowReservoirThreshold;
+  }
+
+  query getSelfTestInterval(): Integer {
+    body: self.storedSelfTestInterval;
+  }
+}
+
+// ─── ROLE declarations (for mediation) ──────────────────────────────
+role SensorEndpoint mediated-by SensorChannel of BloodSugarSensor {
+  property sensorId: String;
+  property lastReadingMgDl: Real;
+  property sensorOperational: Boolean;
+  property sensorFault: Boolean;
+}
+
+role LogicReceiverEndpoint mediated-by SensorChannel of DoseLogicController {
+  property logicId: String;
+  property lastReadingMgDl: Real;
+}
+
+role LogicCommandEndpoint mediated-by PumpCommandChannel of DoseLogicController {
+  property logicId: String;
+  property lastDoseCalculated: Real;
+  property isArmed: Boolean;
+}
+
+role PumpCommandReceiverEndpoint mediated-by PumpCommandChannel of InsulinPump {
+  property pumpId: String;
+  property pumpOperational: Boolean;
+  property pumpFault: Boolean;
+}
+
+role SafetyBroadcastEndpoint mediated-by SafetyBus of SafetyMonitor {
+  property monitorId: String;
+  property alarmActive: Boolean;
+  property systemSafe: Boolean;
+  property lastFaultCode: String;
+}
+
+role SafetySubscriberEndpoint mediated-by SafetyBus of DoseLogicController {
+  property logicId: String;
+  property isArmed: Boolean;
+}
+
+role ReservoirSensorEndpoint mediated-by ReservoirMonitorLink of ReservoirController {
+  property reservoirId: String;
+  property currentUnits: Real;
+  property lowThresholdUnits: Real;
+  property lowReservoirAlertTriggered: Boolean;
+}
+
+role SafetyAlarmEndpoint mediated-by ReservoirMonitorLink of SafetyMonitor {
+  property monitorId: String;
+  property alarmActive: Boolean;
+}
+
+// ─── Relators (Interfaces) ─────────────────────────────────────────
+// Relators own the properties that represent the mediated endpoints.
+// They do NOT modify role properties directly — they modify their own.
+relator SensorChannel mediates (SensorEndpoint, LogicReceiverEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property maxLatencyMs: Integer;
+  property storedReading: Real;
+
+  invariants {
+    self.channelId <> null;
+    self.maxLatencyMs > 0;
+    self.maxLatencyMs <= 10000;
+    self.storedReading >= 0.0;
+    self.storedReading <= 1000.0;
+  }
+
+  event transferReading(value: Real) {
+    pre: value >= 0.0;
+    pre: value <= 1000.0;
+    post: self.storedReading = value;
+    modifies: self.storedReading;
+  }
+}
+
+relator PumpCommandChannel mediates (LogicCommandEndpoint, PumpCommandReceiverEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property lastCommandUnits: Real;
+  property storedDose: Real;
+
+  invariants {
+    self.channelId <> null;
+    self.lastCommandUnits >= 0.0;
+    self.storedDose >= 0.0;
+  }
+
+  event sendDoseCommand(dose: Real) {
+    pre: dose > 0.0;
+    pre: dose <= self.LogicCommandEndpoint.lastDoseCalculated;
+    pre: self.LogicCommandEndpoint.isArmed = true;
+    pre: self.PumpCommandReceiverEndpoint.pumpOperational = true;
+    pre: not self.PumpCommandReceiverEndpoint.pumpFault;
+    post: self.lastCommandUnits = dose;
+    post: self.storedDose = dose;
+    modifies: self.lastCommandUnits, self.storedDose;
+  }
+}
+
+relator SafetyBus mediates (SafetyBroadcastEndpoint, SafetySubscriberEndpoint) {
+  identity: busId;
+  property busId: String;
+  property lastBroadcastFaultCode: String;
+  property broadcastActive: Boolean;
+
+  invariants {
+    self.busId <> null;
+  }
+
+  event broadcastFault(faultCode: String) {
+    pre: faultCode <> null;
+    post: self.lastBroadcastFaultCode = faultCode;
+    post: self.broadcastActive = true;
+    modifies: self.lastBroadcastFaultCode, self.broadcastActive;
+  }
+
+  event clearFaultBroadcast() {
+    pre: self.broadcastActive = true;
+    post: self.broadcastActive = false;
+    post: self.lastBroadcastFaultCode = '';
+    modifies: self.broadcastActive, self.lastBroadcastFaultCode;
+  }
+}
+
+relator ReservoirMonitorLink mediates (ReservoirSensorEndpoint, SafetyAlarmEndpoint) {
+  identity: linkId;
+  property linkId: String;
+  property lowReservoirFlag: Boolean;
+
+  invariants {
+    self.linkId <> null;
+  }
+
+  event triggerLowReservoirAlarm() {
+    pre: self.ReservoirSensorEndpoint.currentUnits <= self.ReservoirSensorEndpoint.lowThresholdUnits;
+    pre: self.ReservoirSensorEndpoint.lowReservoirAlertTriggered = false;
+    pre: not self.SafetyAlarmEndpoint.alarmActive;
+    post: self.lowReservoirFlag = true;
+    modifies: self.lowReservoirFlag;
+  }
+}
+
+// ─── Happenings (end-to-end data flows) ─────────────────────────────
+// Renamed to avoid collision with discovery.onto's DoseDeliveryFlow and FaultResponseFlow.
+happening DoseHappening {
+  identity: flowId;
+  property flowId: String;
+  property startedAt: Integer;
+  property completedAt: Integer;
+  property sensorReading: Real;
+  property doseCalculated: Real;
+  property doseDelivered: Real;
+  property successful: Boolean;
+
+  invariants {
+    self.flowId <> null;
+    self.startedAt >= 0;
+    self.completedAt >= self.startedAt;
+    self.sensorReading >= 0.0;
+    self.sensorReading <= 1000.0;
+    self.doseCalculated >= 0.0;
+    self.doseDelivered >= 0.0;
+    self.successful implies (self.doseDelivered = self.doseCalculated);
+  }
+
+  event step_sensorRead(value: Real): Real
+    refines insulin_pump_requirements::PumpControllerSystem.deliverInsulin {
+    pre: value >= 0.0;
+    post: self.sensorReading = value;
+    post: result = value;
+    modifies: self.sensorReading;
+  }
+
+  event step_computeDose(rate: Real): Real {
+    pre: self.sensorReading > 0.0;
+    pre: rate >= 0.0;
+    post: self.doseCalculated = if rate <= 10.0 then rate else 10.0 endif;
+    post: result = self.doseCalculated;
+    modifies: self.doseCalculated;
+  }
+
+  event step_deliverDose(): Real {
+    pre: self.doseCalculated > 0.0;
+    post: self.doseDelivered = self.doseCalculated;
+    post: self.successful = true;
+    post: result = self.doseDelivered;
+    modifies: self.doseDelivered, self.successful;
+  }
+
+  event step_fail(reason: String) {
+    pre: reason <> null;
+    post: self.successful = false;
+    post: self.doseDelivered = 0.0;
+    modifies: self.successful, self.doseDelivered;
+  }
+}
+
+happening FaultHappening {
+  identity: flowId;
+  property flowId: String;
+  property startedAt: Integer;
+  property completedAt: Integer;
+  property faultCode: String;
+  property sensorOk: Boolean;
+  property pumpOk: Boolean;
+  property needleOk: Boolean;
+  property alarmActivated: Boolean;
+  property deliveryStopped: Boolean;
+  property systemSafeAfter: Boolean;
+
+  invariants {
+    self.flowId <> null;
+    self.startedAt >= 0;
+    self.completedAt >= self.startedAt;
+    self.faultCode <> null implies (not self.sensorOk or not self.pumpOk or not self.needleOk);
+    self.alarmActivated implies not self.systemSafeAfter;
+  }
+
+  event step_selfTest(sOk: Boolean, pOk: Boolean, nOk: Boolean): Boolean {
+    pre: self.completedAt = 0;
+    post: self.sensorOk = sOk;
+    post: self.pumpOk = pOk;
+    post: self.needleOk = nOk;
+    post: result = (sOk and pOk and nOk);
+    post: if not (sOk and pOk and nOk) then
+            self.faultCode = if not sOk then 'SENSOR_FAULT' else if not pOk then 'PUMP_FAULT' else 'NEEDLE_FAULT' endif endif
+          else
+            self.faultCode = ''
+          endif;
+    modifies: self.sensorOk, self.pumpOk, self.needleOk, self.faultCode;
+  }
+
+  event step_activateAlarm() {
+    pre: self.faultCode <> '';
+    post: self.alarmActivated = true;
+    post: self.systemSafeAfter = false;
+    modifies: self.alarmActivated, self.systemSafeAfter;
+  }
+
+  event step_stopDelivery() {
+    pre: self.faultCode <> '';
+    pre: not self.deliveryStopped;
+    post: self.deliveryStopped = true;
+    modifies: self.deliveryStopped;
+  }
+}
+
+happening LowReservoirHappening {
+  identity: flowId;
+  property flowId: String;
+  property startedAt: Integer;
+  property completedAt: Integer;
+  property reservoirLevel: Real;
+  property alarmTriggered: Boolean;
+
+  invariants {
+    self.flowId <> null;
+    self.startedAt >= 0;
+    self.completedAt >= self.startedAt;
+    self.reservoirLevel >= 0.0;
+  }
+
+  event step_checkLevel(level: Real) {
+    pre: level >= 0.0;
+    pre: level <= 100.0;
+    post: self.reservoirLevel = level;
+    modifies: self.reservoirLevel;
+  }
+
+  event step_raiseAlarm() {
+    pre: self.reservoirLevel <= 5.0;
+    pre: not self.alarmTriggered;
+    post: self.alarmTriggered = true;
+    modifies: self.alarmTriggered;
+  }
+}

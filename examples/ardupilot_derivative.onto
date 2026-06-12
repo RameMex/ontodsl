@@ -1,0 +1,72 @@
+schema "onto/0.1";
+namespace ardupilot_filters;
+
+// =====================================================================
+// UFO-A model of ArduPilot libraries/Filter/DerivativeFilter.{h,cpp}.
+//
+// Source:
+//   https://github.com/ArduPilot/ardupilot/blob/master/libraries/Filter/DerivativeFilter.h
+//   https://github.com/ArduPilot/ardupilot/blob/master/libraries/Filter/DerivativeFilter.cpp
+//
+// Template `<T, FILTER_SIZE>` collapses to a concrete `float, 5`
+// flavour here (the most common typedef DerivativeFilterFloat_Size5).
+// The contract surface:
+//
+//   * update(sample, timestamp) — appends a new datapoint. C++ does
+//     not validate sample/timestamp; we add isFinite() preconditions
+//     since this filter feeds derivative/control paths.
+//   * slope() — returns the cached derivative. Must be finite (the
+//     C++ slow path returns 0.0 on degenerate cases; we keep the
+//     same invariant by post-condition).
+//   * reset() — clears state.
+//
+// The microsecond-precision timestamp is Integer; samples are Real.
+//
+// Generate with --rust-f32 to mirror ArduPilot's `float` precision.
+// =====================================================================
+
+kind DerivativeFilter {
+  identity: filterId;
+
+  property filterId: String;
+  // Last cached slope; updated whenever slope() recomputes.
+  property lastSlope: Real internal default 0.0;
+  // True iff at least one update() landed since the last slope() /
+  // reset(); slope() short-circuits to lastSlope otherwise.
+  property newData: Boolean internal default false;
+
+  invariants {
+    self.filterId <> null;
+  }
+
+  // Mirrors C++ reset() — clears the ring buffer + flags.
+  event reset() {
+    post: self.newData = false;
+    post: self.lastSlope = 0.0;
+    modifies: self.lastSlope, self.newData;
+  }
+
+  // Mirrors C++ update(sample, timestamp):
+  //   * stores (sample, timestamp) into the ring buffer (not modeled
+  //     in OCL — the buffer is implementation detail)
+  //   * flips _new_data = true so the next slope() recomputes.
+  //
+  // Preconditions strengthen the C++ contract: a non-finite sample
+  // would propagate NaN into _last_slope on the next slope() call.
+  event update(sample: Real, timestamp: Integer) {
+    pre: sample.isFinite();
+    pre: timestamp >= 0;
+    post: self.newData = true;
+    modifies: self.newData;
+  }
+
+  // Mirrors C++ slope() — recomputes if _new_data, otherwise returns
+  // _last_slope. We surface the result via the Phase 16c return-type
+  // mechanism and pin the finite invariant on `result`.
+  event slope(): Real {
+    post: result.isFinite();
+    post: self.newData = false;
+    post: self.lastSlope = result;
+    modifies: self.lastSlope, self.newData;
+  }
+}

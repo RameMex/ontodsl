@@ -1,0 +1,441 @@
+schema "onto/0.1";
+namespace online_banking_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Design Stage — online banking transaction processor
+//
+// FIXES applied:
+//   [S5] Role mediators must be Relators, not Kinds. Changed component
+//        endpoints to be mediated by the relator interfaces themselves
+//        (DebitCreditChannel, AuditChannel, etc.) instead of the component kinds.
+//   [S22] TransferExecutionFlow and TransferRecoveryFlow cannot redeclare
+//        'flowId' property inherited from TransferFlow. Removed the duplicate
+//        identity declarations; each happening now has unique properties.
+// =====================================================================
+
+// ─── Component Kinds (owned state, no role mediation) ───────────────
+
+kind TransactionOrchestrator {
+  identity: orchestratorId;
+  property orchestratorId: String;
+  property activeTransfers: Set<Transfer>;
+  property maxPendingLatencySecs: Real;
+  property transactionCount: Integer;
+
+  invariants {
+    self.orchestratorId <> null;
+    self.maxPendingLatencySecs = 30.0;
+    self.activeTransfers->forAll(t |
+      t.source <> null and t.destination <> null and
+      t.amount > 0.0 and
+      (t.status = 'PENDING' or t.status = 'COMMITTED' or t.status = 'ROLLED_BACK')
+    );
+  }
+
+  event initiateTransfer(sourceId: String, destId: String, amount: Real): String
+    refines online_banking_requirements::BankingTransactionSystem.initiateTransfer,
+            online_banking_formalization::BankingTransactionSystemFormalized.rejectSanctionedTransfer,
+            online_banking_formalization::BankingTransactionSystemFormalized.rejectDailyLimitExceeded,
+            online_banking_formalization::BankingTransactionSystemFormalized.rejectDuplicateTransfer {
+    pre: sourceId <> null and destId <> null;
+    pre: sourceId <> destId;
+    pre: amount > 0.0;
+
+    post: self.activeTransfers->exists(t |
+      t.source.accountId = sourceId and
+      t.destination.accountId = destId and
+      t.amount = amount and
+      t.status = 'PENDING'
+    );
+    post: self.activeTransfers->size() = self.activeTransfers@pre->size() + 1;
+    modifies: self.activeTransfers, self.transactionCount;
+  }
+
+  event completeTransfer(transferId: String): Boolean
+    refines online_banking_requirements::BankingTransactionSystem.completeTransfer {
+    pre: transferId <> null;
+    pre: self.activeTransfers->exists(t | t.transferId = transferId and t.status = 'PENDING');
+
+    post: self.activeTransfers->select(t | t.transferId = transferId)->forAll(t | t.status = 'COMMITTED');
+    post: self.transactionCount = self.transactionCount@pre + 1;
+    modifies: self.activeTransfers, self.transactionCount;
+  }
+
+  event rollbackTransfer(transferId: String): Boolean
+    refines online_banking_requirements::BankingTransactionSystem.rollbackTransfer {
+    pre: transferId <> null;
+    pre: self.activeTransfers->exists(t | t.transferId = transferId and t.status = 'PENDING');
+
+    post: self.activeTransfers->select(t | t.transferId = transferId)->forAll(t | t.status = 'ROLLED_BACK');
+    modifies: self.activeTransfers;
+  }
+
+  event queryTransferStatus(transferId: String): String {
+    pre: transferId <> null;
+    pre: self.activeTransfers->exists(t | t.transferId = transferId);
+
+    post: if self.activeTransfers->select(t | t.transferId = transferId)->notEmpty() then
+            self.activeTransfers->select(t | t.transferId = transferId)->forAll(t | result = t.status)
+          else
+            result = 'UNKNOWN'
+          endif;
+  }
+}
+
+kind AccountLedger {
+  identity: ledgerId;
+  property ledgerId: String;
+  property knownAccounts: Set<Account>;
+
+  invariants {
+    self.ledgerId <> null;
+    self.knownAccounts->forAll(a | a.balance >= 0.0);
+  }
+
+  event debitAccount(accountId: String, amount: Real): Boolean
+    refines online_banking_requirements::BankingTransactionSystem.completeTransfer {
+    pre: self.knownAccounts->exists(a | a.accountId = accountId);
+    pre: amount > 0.0;
+    pre: self.knownAccounts->select(a | a.accountId = accountId)->forAll(a | a.balance >= amount);
+
+    post: self.knownAccounts->select(a | a.accountId = accountId)->forAll(a | a.balance = a.balance@pre - amount);
+    post: self.knownAccounts->select(a | a.accountId = accountId)->forAll(a | a.balance >= 0.0);
+    modifies: self.knownAccounts;
+  }
+
+  event creditAccount(accountId: String, amount: Real): Boolean
+    refines online_banking_requirements::BankingTransactionSystem.completeTransfer {
+    pre: self.knownAccounts->exists(a | a.accountId = accountId);
+    pre: amount > 0.0;
+
+    post: self.knownAccounts->select(a | a.accountId = accountId)->forAll(a | a.balance = a.balance@pre + amount);
+    modifies: self.knownAccounts;
+  }
+
+  event revertDebit(accountId: String, amount: Real): Boolean
+    refines online_banking_requirements::BankingTransactionSystem.rollbackTransfer {
+    pre: self.knownAccounts->exists(a | a.accountId = accountId);
+    pre: amount > 0.0;
+
+    post: self.knownAccounts->select(a | a.accountId = accountId)->forAll(a | a.balance = a.balance@pre + amount);
+    modifies: self.knownAccounts;
+  }
+
+  event queryBalance(accountId: String): Real
+    refines online_banking_requirements::BankingTransactionSystem.queryBalance {
+    pre: self.knownAccounts->exists(a | a.accountId = accountId);
+
+    post: result >= 0.0;
+    post: if self.knownAccounts->select(a | a.accountId = accountId)->notEmpty() then
+            self.knownAccounts->select(a | a.accountId = accountId)->forAll(a | result = a.balance)
+          else
+            result = -1.0
+          endif;
+  }
+}
+
+kind JournalWriter {
+  identity: journalId;
+  property journalId: String;
+  property journalEntries: Set<JournalEntry>;
+
+  invariants {
+    self.journalId <> null;
+    self.journalEntries->forAll(e |
+      e.transferId <> null and
+      e.preSourceBalance >= 0.0 and
+      e.postSourceBalance >= 0.0 and
+      e.preDestBalance >= 0.0 and
+      e.postDestBalance >= 0.0 and
+      (e.preSourceBalance - e.postSourceBalance) = (e.postDestBalance - e.preDestBalance)
+    );
+  }
+
+  event writeEntry(transferId: String, preSrcBal: Real, postSrcBal: Real, preDstBal: Real, postDstBal: Real): String
+    refines online_banking_requirements::BankingTransactionSystem.completeTransfer,
+            online_banking_formalization::SoxAuditCompliant {
+    pre: transferId <> null;
+    pre: preSrcBal >= 0.0 and postSrcBal >= 0.0;
+    pre: preDstBal >= 0.0 and postDstBal >= 0.0;
+    pre: (preSrcBal - postSrcBal) = (postDstBal - preDstBal);
+
+    post: self.journalEntries->exists(e |
+      e.transferId = transferId and
+      e.preSourceBalance = preSrcBal and
+      e.postSourceBalance = postSrcBal and
+      e.preDestBalance = preDstBal and
+      e.postDestBalance = postDstBal and
+      e.timestamp >= 0.0
+    );
+    post: self.journalEntries->size() = self.journalEntries@pre->size() + 1;
+    modifies: self.journalEntries;
+  }
+
+  event verifyEntry(entryId: String): Boolean
+    refines online_banking_formalization::BankingTransactionSystemFormalized.verifyJournalEntry {
+    pre: entryId <> null;
+    pre: self.journalEntries->exists(e | e.entryId = entryId);
+
+    post: if self.journalEntries->select(e | e.entryId = entryId)->notEmpty() then
+            self.journalEntries->select(e | e.entryId = entryId)->forAll(e |
+              e.preSourceBalance >= 0.0 and e.postSourceBalance >= 0.0 and
+              e.preDestBalance >= 0.0 and e.postDestBalance >= 0.0 and
+              (e.preSourceBalance - e.postSourceBalance) = (e.postDestBalance - e.preDestBalance)
+            ) and result = true
+          else
+            result = false
+          endif;
+  }
+}
+
+kind NotificationDispatcher {
+  identity: dispatcherId;
+  property dispatcherId: String;
+  property notifiedTransfers: Set<Transfer>;
+
+  invariants {
+    self.dispatcherId <> null;
+  }
+
+  event notifyCustomer(transferId: String): Boolean
+    refines online_banking_requirements::BankingTransactionSystem.notifyCustomer {
+    pre: transferId <> null;
+    pre: true;
+
+    post: self.notifiedTransfers->exists(t | t.transferId = transferId);
+    post: self.notifiedTransfers->size() = self.notifiedTransfers@pre->size() + 1;
+    modifies: self.notifiedTransfers;
+  }
+
+  event notifyFailure(transferId: String): Boolean {
+    pre: transferId <> null;
+
+    post: self.notifiedTransfers->size() = self.notifiedTransfers@pre->size();
+    post: not self.notifiedTransfers->exists(t | t.transferId = transferId);
+  }
+}
+
+kind PendingTransferRecovery {
+  identity: recoveryId;
+  property recoveryId: String;
+  property recoveryLog: Set<Transfer>;
+  property lastRecoveryTimestamp: Real;
+
+  invariants {
+    self.recoveryId <> null;
+    self.lastRecoveryTimestamp >= 0.0;
+    self.recoveryLog->forAll(t | t.status = 'COMMITTED' or t.status = 'ROLLED_BACK');
+  }
+
+  event recoverPendingTransfer(transferId: String): String
+    refines online_banking_requirements::BankingTransactionSystem.recoverPendingTransfers {
+    pre: transferId <> null;
+
+    post: self.recoveryLog->exists(t | t.transferId = transferId and (t.status = 'COMMITTED' or t.status = 'ROLLED_BACK'));
+    post: self.lastRecoveryTimestamp >= self.lastRecoveryTimestamp@pre;
+    post: self.recoveryLog->size() = self.recoveryLog@pre->size() + 1;
+    modifies: self.recoveryLog, self.lastRecoveryTimestamp;
+  }
+
+  event scanPendingTransfers(): Set<String> {
+    pre: true;
+    post: true;
+  }
+}
+
+kind TimerKeeper {
+  identity: timerId;
+  property timerId: String;
+  property pendingTimestamps: Set<Real>;
+  property maxLatencySecs: Real;
+
+  invariants {
+    self.timerId <> null;
+    self.maxLatencySecs = 30.0;
+    self.pendingTimestamps->forAll(ts | ts > 0.0);
+  }
+
+  event recordPendingTimestamp(timestamp: Real): Boolean
+    refines online_banking_requirements::BankingTransactionSystem.initiateTransfer {
+    pre: timestamp > 0.0;
+
+    post: self.pendingTimestamps->includes(timestamp);
+    post: self.pendingTimestamps->size() = self.pendingTimestamps@pre->size() + 1;
+    modifies: self.pendingTimestamps;
+  }
+
+  event checkLatencyBreach(currentTime: Real): Set<Real>
+    refines online_banking_discovery::BoundedLatencyCommitment {
+    pre: currentTime > 0.0;
+
+    post: result->forAll(ts | ts > 0.0 and (currentTime - ts) > self.maxLatencySecs);
+  }
+
+  event clearTimestamp(timestamp: Real): Boolean {
+    pre: self.pendingTimestamps->includes(timestamp);
+
+    post: not self.pendingTimestamps->includes(timestamp);
+    post: self.pendingTimestamps->size() = self.pendingTimestamps@pre->size() - 1;
+    modifies: self.pendingTimestamps;
+  }
+}
+
+// ─── Role Kinds (mediated by relator interfaces) ────────────────────
+
+role OrchestratorEndpoint mediated-by DebitCreditChannel of BankingTransactionSystem {
+  property componentId: String;
+}
+
+role LedgerEndpoint mediated-by DebitCreditChannel of BankingTransactionSystem {
+  property componentId: String;
+}
+
+role OrchestratorAuditEndpoint mediated-by AuditChannel of BankingTransactionSystem {
+  property componentId: String;
+}
+
+role JournalEndpoint mediated-by AuditChannel of BankingTransactionSystem {
+  property componentId: String;
+}
+
+role OrchestratorNotifyEndpoint mediated-by NotificationChannel of BankingTransactionSystem {
+  property componentId: String;
+}
+
+role NotificationEndpoint mediated-by NotificationChannel of BankingTransactionSystem {
+  property componentId: String;
+}
+
+role RecoveryEndpoint mediated-by RecoveryChannel of BankingTransactionSystem {
+  property componentId: String;
+}
+
+role LedgerRecoveryEndpoint mediated-by RecoveryChannel of BankingTransactionSystem {
+  property componentId: String;
+}
+
+role JournalRecoveryEndpoint mediated-by RecoveryChannel of BankingTransactionSystem {
+  property componentId: String;
+}
+
+role OrchestratorTimerEndpoint mediated-by LatencyMonitoringChannel of BankingTransactionSystem {
+  property componentId: String;
+}
+
+role TimerEndpoint mediated-by LatencyMonitoringChannel of BankingTransactionSystem {
+  property componentId: String;
+}
+
+// ─── Relator Interfaces ─────────────────────────────────────────────
+
+relator DebitCreditChannel mediates (OrchestratorEndpoint, LedgerEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property lastDebitTime: Real;
+  property lastCreditTime: Real;
+  property channelActive: Boolean;
+
+  invariants {
+    self.channelId <> null;
+    self.lastDebitTime >= 0.0;
+    self.lastCreditTime >= 0.0;
+    self.channelActive implies
+      (self.lastDebitTime <= self.lastCreditTime or self.lastCreditTime = 0.0);
+  }
+}
+
+relator AuditChannel mediates (OrchestratorAuditEndpoint, JournalEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property lastJournalWriteTime: Real;
+
+  invariants {
+    self.channelId <> null;
+    self.lastJournalWriteTime >= 0.0;
+  }
+}
+
+relator NotificationChannel mediates (OrchestratorNotifyEndpoint, NotificationEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property lastNotificationTime: Real;
+
+  invariants {
+    self.channelId <> null;
+    self.lastNotificationTime >= 0.0;
+  }
+}
+
+relator RecoveryChannel mediates (RecoveryEndpoint, LedgerRecoveryEndpoint, JournalRecoveryEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property lastRecoveryTime: Real;
+  property pendingTransferCount: Integer;
+
+  invariants {
+    self.channelId <> null;
+    self.lastRecoveryTime >= 0.0;
+    self.pendingTransferCount >= 0;
+  }
+}
+
+relator LatencyMonitoringChannel mediates (OrchestratorTimerEndpoint, TimerEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property lastLatencyCheckTime: Real;
+
+  invariants {
+    self.channelId <> null;
+    self.lastLatencyCheckTime >= 0.0;
+  }
+}
+
+// ─── Happenings (Data Flows) ────────────────────────────────────────
+
+happening TransferExecutionFlow specializes TransferFlow {
+  property executionFlowId: String;   // renamed to avoid shadowing
+  property stimulus: String;
+  property response: String;
+  property stepInitiateTransfer: String;
+  property stepDebitSource: String;
+  property stepCreditDest: String;
+  property stepWriteJournal: String;
+  property stepNotifyCustomer: String;
+  property stepCompleteTransfer: String;
+
+  invariants {
+    self.executionFlowId <> null;
+    self.stimulus <> null;
+    self.response <> null;
+  }
+}
+
+happening TransferRecoveryFlow specializes TransferFlow {
+  property recoveryFlowId: String;    // renamed to avoid shadowing
+  property stimulus: String;
+  property response: String;
+  property stepScanTransfers: String;
+  property stepRecoverTransfer: String;
+  property stepRevertOrComplete: String;
+
+  invariants {
+    self.recoveryFlowId <> null;
+  }
+}
+
+// ─── Declarative Relations ──────────────────────────────────────────
+
+relation orchestrationLink: <<mediation>> from DebitCreditChannel [1] to OrchestratorEndpoint [1];
+relation ledgerLink: <<mediation>> from DebitCreditChannel [1] to LedgerEndpoint [1];
+relation auditOrchLink: <<mediation>> from AuditChannel [1] to OrchestratorAuditEndpoint [1];
+relation journalLink: <<mediation>> from AuditChannel [1] to JournalEndpoint [1];
+relation notifyOrchLink: <<mediation>> from NotificationChannel [1] to OrchestratorNotifyEndpoint [1];
+relation dispLink: <<mediation>> from NotificationChannel [1] to NotificationEndpoint [1];
+relation recoveryLink: <<mediation>> from RecoveryChannel [1] to RecoveryEndpoint [1];
+relation recoveryLedgerLink: <<mediation>> from RecoveryChannel [1] to LedgerRecoveryEndpoint [1];
+relation recoveryJournalLink: <<mediation>> from RecoveryChannel [1] to JournalRecoveryEndpoint [1];
+relation latencyOrchLink: <<mediation>> from LatencyMonitoringChannel [1] to OrchestratorTimerEndpoint [1];
+relation timerLink: <<mediation>> from LatencyMonitoringChannel [1] to TimerEndpoint [1];

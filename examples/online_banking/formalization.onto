@@ -1,0 +1,336 @@
+schema "onto/0.1";
+namespace online_banking_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =====================================================================
+// Formalization: Online Banking Transaction Processor
+//
+// What the WORLD imposes on the system:
+//   - Regulatory / compliance anchors (PCI-DSS, GDPR Art.5, national
+//     payment-clearing rules) as documentary categories.
+//   - Physical / domain-logical invariants as member-quantified
+//     categories — Z3 proves S35 entailment for every bearer.
+//   - Active business rules (overdraft guard, notification ordering
+//     guard, latency expiry guard) as rejection events on a formalized
+//     subkind that ADDS to OnlineBankingSystem without overriding it.
+//   - Passive assumptions as a documentary kind with @assumption
+//     annotations.
+//
+// DO NOT re-declare anything from discovery.onto or requirements.onto.
+// =====================================================================
+
+// ─── Regulatory Anchor: PCI-DSS ──────────────────────────────────────────
+//
+// Payment Card Industry Data Security Standard (PCI-DSS v4.0).
+// Applies to any system that stores, processes, or transmits account
+// data. Imposes audit trail, access control, and encryption obligations.
+// These are PASSIVE — they govern the project and the deployment
+// environment, NOT individual runtime events.
+
+category PciDssCompliant {
+  property pciDssVersion: String;
+  property merchantLevel: Integer;
+  property lastAssessmentDate: String;
+  property qsaName: String;
+
+  invariants {
+    self.pciDssVersion <> null;
+    self.merchantLevel >= 1;
+    self.merchantLevel <= 4;
+    self.lastAssessmentDate <> null;
+  }
+}
+
+// ─── Regulatory Anchor: GDPR Article 5 ──────────────────────────────────
+//
+// EU General Data Protection Regulation, Article 5 — principles
+// relating to processing of personal data. Relevant because account
+// holders are natural persons and balance/transaction data is personal
+// financial data. Imposes data minimisation, purpose limitation, and
+// storage limitation obligations.
+// PASSIVE — governs data retention policy, not runtime event contracts.
+
+category GdprArticle5Compliant {
+  property dataProtectionOfficer: String;
+  property retentionPolicyYears: Integer;
+  property purposeLimitation: String;
+  property dataMinimisationConfirmed: Boolean;
+
+  invariants {
+    self.retentionPolicyYears > 0;
+    self.dataMinimisationConfirmed = true;
+    self.purposeLimitation <> null;
+  }
+}
+
+// ─── Regulatory Anchor: National Payment Clearing Rules ──────────────────
+//
+// Jurisdiction-specific clearing and settlement rules (e.g. Fedwire,
+// SEPA, CHAPS). Imposes same-day finality for completed transfers and
+// mandatory reversibility of pending transfers. Documentary only —
+// the runtime obligations are already expressed in FR-5 / FR-6.
+
+category NationalClearingCompliant {
+  property clearingRulesetId: String;
+  property jurisdiction: String;
+  property sameDayFinalityRequired: Boolean;
+  property mandatoryReversibilityWindow: Integer;
+
+  invariants {
+    self.clearingRulesetId <> null;
+    self.jurisdiction <> null;
+    self.mandatoryReversibilityWindow >= 0;
+  }
+}
+
+// ─── Physical / Domain-Logical Category: Financially Plausible Account ───
+//
+// A physically plausible account balance is always non-negative and
+// never exceeds an upper bound that the domain treats as credible
+// (anti-money-laundering sentinel: 10^12 currency units).
+// Bearer: Account (discovery kind).
+// The formalized subkind's invariants must entail these bounds (S35).
+
+category FinanciallyPlausibleAccount where bearer: Account {
+  invariants {
+    bearer.balance >= 0.0;
+    bearer.balance <= 1000000000000.0;
+  }
+}
+
+// ─── Physical / Domain-Logical Category: Financially Plausible Transfer ──
+//
+// A transfer amount must be strictly positive (no zero-value or
+// negative transfers) and must not exceed the anti-money-laundering
+// single-transaction cap (10,000 currency units by default; the cap is
+// a regulatory threshold, not a physical law, but it is world-imposed
+// on the system from outside the requirements boundary).
+// Bearer: Transfer (discovery kind).
+
+category FinanciallyPlausibleTransfer where bearer: Transfer {
+  invariants {
+    bearer.amount > 0.0;
+    bearer.amount <= 10000.0;
+  }
+}
+
+// ─── Physical / Domain-Logical Category: Immutable Journal Entry ─────────
+//
+// A journal entry, once created, must be immutable. The pre- and
+// post-balances recorded must be non-negative (domain logic: they
+// mirror real account balances). The post-source balance must be
+// strictly less than the pre-source balance (money moved out).
+// Bearer: JournalEntry (discovery kind).
+
+category ImmutableAndConsistentJournal where bearer: JournalEntry {
+  invariants {
+    bearer.immutable = true;
+    bearer.preSourceBalance >= 0.0;
+    bearer.postSourceBalance >= 0.0;
+    bearer.preDestinationBalance >= 0.0;
+    bearer.postDestinationBalance >= 0.0;
+    bearer.amount > 0.0;
+    bearer.postSourceBalance < bearer.preSourceBalance;
+    bearer.postDestinationBalance > bearer.preDestinationBalance;
+  }
+}
+
+// ─── Physical / Domain-Logical Category: Bounded Pending State ───────────
+//
+// A pending state record must have its resolution window capped at
+// 30 seconds — this is a world-imposed real-time constraint (GOAL-4)
+// not merely a system preference.
+// Bearer: PendingState (discovery kind).
+
+category BoundedPendingResolution where bearer: PendingState {
+  invariants {
+    bearer.maxResolutionSeconds > 0;
+    bearer.maxResolutionSeconds <= 30;
+  }
+}
+
+// ─── Passive Assumptions ─────────────────────────────────────────────────
+//
+// Documented assumptions about the deployment world that the system
+// relies on but does NOT enforce at runtime. These become constraints
+// on the operational context in the Design stage.
+
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property title: String;
+  property rationale: String;
+  property riskIfViolated: String;
+
+  invariants {
+    self.assumptionId <> null;
+    self.title <> null;
+    self.rationale <> null;
+  }
+}
+
+// @assumption ASSUME-1: The underlying database provides serialisable
+//   transaction isolation. Without this, the atomic debit+credit
+//   (FR-2 / executeTransfer) could interleave with a concurrent
+//   transfer on the same source account, breaking GOAL-2.
+//
+// @assumption ASSUME-2: The system clock is monotonically increasing
+//   and NTP-synchronised to within 1 second. The 30-second latency
+//   bound (GOAL-4) is meaningless if the clock can drift backwards.
+//
+// @assumption ASSUME-3: The journal storage medium is durable (survives
+//   a process crash). If journal writes are lost, GOAL-3 (audit trail)
+//   cannot be discharged by the recovery routine.
+//
+// @assumption ASSUME-4: The notification delivery channel (email / push)
+//   is best-effort. Notification failure does NOT roll back a
+//   COMPLETED transfer; the customer may query the system separately.
+//
+// @assumption ASSUME-5: Account identifiers are globally unique and
+//   pre-provisioned outside this system. The system never creates or
+//   deletes accounts — it only reads and updates balances.
+
+// ─── Formalized System Subkind ───────────────────────────────────────────
+//
+// OnlineBankingSystemFormalized ADDS active rejection / guard events
+// that enforce the world-imposed rules above at runtime.
+// It does NOT override any event inherited from OnlineBankingSystem.
+// Category specializations are expressed here so the member-quantified
+// invariants propagate to the system properties (O3 / S35 checks).
+
+subkind OnlineBankingSystemFormalized specializes OnlineBankingSystem {
+
+  // ── Regulatory documentary properties ──────────────────────────────
+  // These carry the PCI-DSS and GDPR anchor data on the system
+  // instance itself, making compliance state observable.
+  property pciDssVersion: String;
+  property merchantLevel: Integer;
+  property gdprRetentionPolicyYears: Integer;
+  property gdprDataMinimisationConfirmed: Boolean;
+
+  invariants {
+    // PCI-DSS: version must be declared and merchant level is 1-4
+    self.pciDssVersion <> null;
+    self.merchantLevel >= 1;
+    self.merchantLevel <= 4;
+    // GDPR: retention window and data-minimisation flag
+    self.gdprRetentionPolicyYears > 0;
+    self.gdprDataMinimisationConfirmed = true;
+    // AML single-transaction cap (FinanciallyPlausibleTransfer bearer rule)
+    self.currentAmount <= 10000.0;
+    // Latency cap re-asserted at formalization level (BoundedPendingResolution)
+    self.maxResolutionSeconds <= 30;
+    // Journal-before-notification (re-asserted from system invariant,
+    // making it explicit at this stage for the inter-stage verifier)
+    (self.customerNotified = true) implies (self.journalWritten = true);
+  }
+
+  // =================================================================
+  // ACTIVE RULE AR-1: Reject Overdraft Attempt
+  // =================================================================
+  // World rule: a transfer request whose amount exceeds the current
+  // source balance MUST be rejected before any state mutation occurs.
+  // This is the runtime enforcement of NoOverdraftConstraint and
+  // NoOverdraftCommitment. Pure rejection — no state is modified.
+  //
+  // Refines: online_banking_discovery::NoOverdraftCommitment
+  //          online_banking_requirements::OnlineBankingSystem.initiateTransfer
+  // =================================================================
+  event rejectOverdraftTransfer(amount: Real)
+    refines online_banking_discovery::NoOverdraftCommitment,
+            online_banking_requirements::OnlineBankingSystem.initiateTransfer {
+    pre: self.transferState = 'IDLE';
+    pre: amount > 0.0;
+    pre: self.sourceBalance < amount;
+    post: self.transferState = 'IDLE';
+  }
+
+  // =================================================================
+  // ACTIVE RULE AR-2: Reject Notification Before Journal
+  // =================================================================
+  // World rule: the system must never issue a customer notification
+  // when no journal entry has been written for the current transfer.
+  // Enforces GOAL-3 / AuditJournalCommitment at the guard layer.
+  // Pure rejection — no state is modified.
+  //
+  // Refines: online_banking_discovery::AuditJournalCommitment
+  //          online_banking_requirements::OnlineBankingSystem.notifyCustomer
+  // =================================================================
+  event rejectPrematureNotification()
+    refines online_banking_discovery::AuditJournalCommitment,
+            online_banking_requirements::OnlineBankingSystem.notifyCustomer {
+    pre: self.journalWritten = false;
+    pre: self.customerNotified = false;
+    post: self.customerNotified = false;
+  }
+
+  // =================================================================
+  // ACTIVE RULE AR-3: Reject AML Cap Violation
+  // =================================================================
+  // World rule: any single transfer whose amount exceeds the
+  // anti-money-laundering cap (10,000 currency units) must be
+  // rejected and reported. The cap is world-imposed (regulatory),
+  // not a system preference.
+  // Pure rejection — no state is modified.
+  //
+  // Refines: online_banking_discovery::AtomicTransferCommitment
+  // =================================================================
+  event rejectAmlCapViolation(amount: Real)
+    refines online_banking_discovery::AtomicTransferCommitment {
+    pre: self.transferState = 'IDLE';
+    pre: amount > 10000.0;
+    post: self.transferState = 'IDLE';
+  }
+
+  // =================================================================
+  // ACTIVE RULE AR-4: Force Rollback on Latency Expiry
+  // =================================================================
+  // World rule: a transfer that has remained PENDING for longer than
+  // maxResolutionSeconds MUST be rolled back. This is the runtime
+  // enforcement of BoundedLatencyCommitment and
+  // BoundedPendingResolution. The event drives the system to
+  // ROLLED_BACK and restores both balances from their pending
+  // snapshot — identical contract to FR-5 but triggered by the
+  // timeout condition rather than an explicit failure signal.
+  //
+  // Refines: online_banking_discovery::BoundedLatencyCommitment
+  //          online_banking_requirements::OnlineBankingSystem.rollbackTransfer
+  // =================================================================
+  event forceRollbackOnTimeout()
+    refines online_banking_discovery::BoundedLatencyCommitment,
+            online_banking_requirements::OnlineBankingSystem.rollbackTransfer {
+    pre: self.transferState = 'PENDING';
+    pre: self.pendingSourceBalance >= 0.0;
+    pre: self.pendingDestinationBalance >= 0.0;
+    post: self.sourceBalance = self.pendingSourceBalance;
+    post: self.destinationBalance = self.pendingDestinationBalance;
+    post: self.transferState = 'ROLLED_BACK';
+    post: self.sourceBalance >= 0.0;
+    post: self.destinationBalance >= 0.0;
+    modifies:
+      self.sourceBalance,
+      self.destinationBalance,
+      self.transferState;
+  }
+
+  // =================================================================
+  // ACTIVE RULE AR-5: Reject Zero or Negative Transfer Amount
+  // =================================================================
+  // Domain-logical rule (world-imposed): a transfer amount must be
+  // strictly positive. The system must reject any initiation attempt
+  // that presents a zero or negative amount — this is a financial
+  // domain invariant, not a system policy choice.
+  // Pure rejection — no state is modified.
+  //
+  // Refines: online_banking_discovery::AtomicTransferCommitment
+  //          online_banking_requirements::OnlineBankingSystem.initiateTransfer
+  // =================================================================
+  event rejectNonPositiveAmount(amount: Real)
+    refines online_banking_discovery::AtomicTransferCommitment,
+            online_banking_requirements::OnlineBankingSystem.initiateTransfer {
+    pre: self.transferState = 'IDLE';
+    pre: amount <= 0.0;
+    post: self.transferState = 'IDLE';
+  }
+}

@@ -1,0 +1,507 @@
+schema "onto/0.1";
+namespace patient_monitoring_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Design stage — bedside vital-signs monitor domain.
+//
+// Decomposes VitalSignsMonitorSystem into four sibling components,
+// each owning a cohesive slice of state. Components are KINDS, not
+// subkinds of the system — the relation is decomposition, not Liskov.
+//
+// Components:
+//   EcgSensorInterface    — raw signal ingestion, plausibility guard,
+//                           rejection counting, signal-absence tracking.
+//   DisplayController     — holds the currently displayed reading and
+//                           the threshold configuration.
+//   AlarmManager          — owns alarm-active / alarm-silenced state,
+//                           latency enforcement, auto-rearm timer.
+//   FaultLogger           — IEC 62304 audit trail for missed deadlines.
+//
+// Interface relators:
+//   ReadingChannel        — EcgSensorInterface ↔ DisplayController
+//   AlarmChannel          — DisplayController  ↔ AlarmManager
+//   FaultChannel          — AlarmManager       ↔ FaultLogger
+//
+// Cross-component happenings are given DESIGN-LOCAL names to avoid
+// colliding with the discovery-stage happenings imported via the
+// transitive import chain (e.g. ThresholdAlarmFlow is declared in
+// discovery.onto and must NOT be re-declared here).
+// =====================================================================
+
+
+// ─────────────────────────────────────────────────────────────────────
+// ROLES
+// ─────────────────────────────────────────────────────────────────────
+
+role SensorEndpoint mediated-by ReadingChannel of EcgSensorInterface {
+  property sensorId: String;
+}
+
+role DisplayEndpoint mediated-by ReadingChannel of DisplayController {
+  property displayId: String;
+}
+
+role DisplayAlarmSource mediated-by AlarmChannel of DisplayController {
+  property displayId: String;
+}
+
+role AlarmManagerEndpoint mediated-by AlarmChannel of AlarmManager {
+  property alarmManagerId: String;
+}
+
+role AlarmFaultSource mediated-by FaultChannel of AlarmManager {
+  property alarmManagerId: String;
+}
+
+role FaultLoggerEndpoint mediated-by FaultChannel of FaultLogger {
+  property loggerId: String;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// COMPONENT 1 — EcgSensorInterface
+// ─────────────────────────────────────────────────────────────────────
+
+kind EcgSensorInterface {
+  identity: sensorId;
+
+  property sensorId: String;
+  property lastRawBpm: Real;
+  property lastValidBpm: Real;
+  property sensorConnected: Boolean;
+  property signalAbsentSeconds: Real;
+  property plausibilityLowerBpm: Real;
+  property plausibilityUpperBpm: Real;
+  property rejectedReadingCount: Integer;
+
+  invariants {
+    self.sensorId <> null;
+    self.plausibilityLowerBpm = 20.0;
+    self.plausibilityUpperBpm = 250.0;
+    self.plausibilityLowerBpm > 0.0;
+    self.plausibilityUpperBpm > self.plausibilityLowerBpm;
+    self.rejectedReadingCount >= 0;
+    self.signalAbsentSeconds >= 0.0;
+    self.lastValidBpm >= 0.0;
+    self.lastRawBpm >= 0.0;
+  }
+
+  event acceptReading(valueBpm: Real)
+    refines patient_monitoring_requirements::VitalSignsMonitorSystem.acceptReading {
+    pre: valueBpm >= self.plausibilityLowerBpm;
+    pre: valueBpm <= self.plausibilityUpperBpm;
+    pre: self.sensorConnected = true;
+    post: self.lastRawBpm = valueBpm;
+    post: self.lastValidBpm = valueBpm;
+    post: self.signalAbsentSeconds = 0.0;
+    modifies: self.lastRawBpm,
+              self.lastValidBpm,
+              self.signalAbsentSeconds;
+  }
+
+  event rejectImplausibleReading(valueBpm: Real)
+    refines patient_monitoring_discovery::ImplausibleReadingRejectionCommitment,
+            patient_monitoring_requirements::VitalSignsMonitorSystem.rejectImplausibleReading {
+    pre: valueBpm < self.plausibilityLowerBpm
+         or valueBpm > self.plausibilityUpperBpm;
+    post: self.lastRawBpm = valueBpm;
+    post: self.lastValidBpm = self.lastValidBpm@pre;
+    post: self.rejectedReadingCount = self.rejectedReadingCount@pre + 1;
+    modifies: self.lastRawBpm,
+              self.rejectedReadingCount;
+  }
+
+  event recordSignalAbsence(absentSeconds: Real)
+    refines patient_monitoring_requirements::VitalSignsMonitorSystem.recordSignalAbsence {
+    pre: self.sensorConnected = true;
+    pre: absentSeconds >= 0.0;
+    pre: absentSeconds < 5.0;
+    post: self.signalAbsentSeconds = absentSeconds;
+    modifies: self.signalAbsentSeconds;
+  }
+
+  event declareSensorDisconnected(absentSeconds: Real)
+    refines patient_monitoring_discovery::SensorDisconnectDetectionCommitment,
+            patient_monitoring_requirements::VitalSignsMonitorSystem.raiseSensorDisconnectAlarm {
+    pre: self.sensorConnected = true;
+    pre: absentSeconds > 5.0;
+    post: self.sensorConnected = false;
+    post: self.signalAbsentSeconds = absentSeconds;
+    modifies: self.sensorConnected,
+              self.signalAbsentSeconds;
+  }
+
+  event restoreSensorConnection()
+    refines patient_monitoring_requirements::VitalSignsMonitorSystem.resumeAfterReconnect {
+    pre: self.sensorConnected = false;
+    post: self.sensorConnected = true;
+    post: self.signalAbsentSeconds = 0.0;
+    modifies: self.sensorConnected,
+              self.signalAbsentSeconds;
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// COMPONENT 2 — DisplayController
+// ─────────────────────────────────────────────────────────────────────
+
+kind DisplayController {
+  identity: displayId;
+
+  property displayId: String;
+  property currentHeartRateBpm: Real;
+  property isDisplayingReading: Boolean;
+  property alarmLowBpm: Real;
+  property alarmHighBpm: Real;
+  property plausibilityLowerBpm: Real;
+  property plausibilityUpperBpm: Real;
+
+  invariants {
+    self.displayId <> null;
+    self.plausibilityLowerBpm = 20.0;
+    self.plausibilityUpperBpm = 250.0;
+    self.alarmLowBpm >= self.plausibilityLowerBpm;
+    self.alarmHighBpm <= self.plausibilityUpperBpm;
+    self.alarmHighBpm > self.alarmLowBpm;
+    self.currentHeartRateBpm >= 0.0;
+  }
+
+  event updateDisplay(valueBpm: Real)
+    refines patient_monitoring_requirements::VitalSignsMonitorSystem.acceptReading {
+    pre: valueBpm >= self.plausibilityLowerBpm;
+    pre: valueBpm <= self.plausibilityUpperBpm;
+    post: self.currentHeartRateBpm = valueBpm;
+    post: self.isDisplayingReading = true;
+    modifies: self.currentHeartRateBpm,
+              self.isDisplayingReading;
+  }
+
+  event blankDisplay()
+    refines patient_monitoring_requirements::VitalSignsMonitorSystem.raiseSensorDisconnectAlarm {
+    pre: self.isDisplayingReading = true;
+    post: self.isDisplayingReading = false;
+    modifies: self.isDisplayingReading;
+  }
+
+  event restoreDisplay(valueBpm: Real)
+    refines patient_monitoring_requirements::VitalSignsMonitorSystem.resumeAfterReconnect {
+    pre: self.isDisplayingReading = false;
+    pre: valueBpm >= self.plausibilityLowerBpm;
+    pre: valueBpm <= self.plausibilityUpperBpm;
+    post: self.currentHeartRateBpm = valueBpm;
+    post: self.isDisplayingReading = true;
+    modifies: self.currentHeartRateBpm,
+              self.isDisplayingReading;
+  }
+
+  event configureThresholds(lowBpm: Real, highBpm: Real)
+    refines patient_monitoring_requirements::VitalSignsMonitorSystem.configureThresholds {
+    pre: lowBpm >= self.plausibilityLowerBpm;
+    pre: highBpm <= self.plausibilityUpperBpm;
+    pre: highBpm > lowBpm;
+    post: self.alarmLowBpm = lowBpm;
+    post: self.alarmHighBpm = highBpm;
+    modifies: self.alarmLowBpm,
+              self.alarmHighBpm;
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// COMPONENT 3 — AlarmManager
+// ─────────────────────────────────────────────────────────────────────
+
+kind AlarmManager {
+  identity: alarmManagerId;
+
+  property alarmManagerId: String;
+  property alarmActive: Boolean;
+  property alarmSilenced: Boolean;
+  property alarmSilenceElapsedSeconds: Real;
+  property sensorDisconnectAlarmActive: Boolean;
+  property maxAlarmLatencySeconds: Real;
+  property maxSilenceDurationSeconds: Real;
+
+  invariants {
+    self.alarmManagerId <> null;
+    self.maxAlarmLatencySeconds > 0.0;
+    self.maxAlarmLatencySeconds <= 2.0;
+    self.maxSilenceDurationSeconds > 0.0;
+    self.maxSilenceDurationSeconds <= 120.0;
+    self.alarmSilenceElapsedSeconds >= 0.0;
+    self.alarmSilenceElapsedSeconds <= self.maxSilenceDurationSeconds;
+    self.alarmSilenced = true implies self.alarmActive = true;
+  }
+
+  event raiseThresholdAlarm(latencySeconds: Real)
+    refines patient_monitoring_discovery::AlarmLatencyCommitment,
+            patient_monitoring_requirements::VitalSignsMonitorSystem.raiseThresholdAlarm {
+    pre: not self.alarmActive;
+    pre: latencySeconds >= 0.0;
+    pre: latencySeconds <= self.maxAlarmLatencySeconds;
+    post: self.alarmActive = true;
+    post: self.alarmSilenced = false;
+    post: self.alarmSilenceElapsedSeconds = 0.0;
+    modifies: self.alarmActive,
+              self.alarmSilenced,
+              self.alarmSilenceElapsedSeconds;
+  }
+
+  event raiseAlarmWithLatencyFault(latencySeconds: Real)
+    refines patient_monitoring_discovery::AlarmLatencyCommitment,
+            patient_monitoring_formalization::VitalSignsMonitorSystemFormalized.enforceAlarmLatencyCeiling {
+    pre: not self.alarmActive;
+    pre: latencySeconds > self.maxAlarmLatencySeconds;
+    post: self.alarmActive = true;
+    post: self.alarmSilenced = false;
+    post: self.alarmSilenceElapsedSeconds = 0.0;
+    modifies: self.alarmActive,
+              self.alarmSilenced,
+              self.alarmSilenceElapsedSeconds;
+  }
+
+  event silenceAlarm()
+    refines patient_monitoring_requirements::VitalSignsMonitorSystem.silenceAlarm {
+    pre: self.alarmActive = true;
+    pre: not self.alarmSilenced;
+    post: self.alarmSilenced = true;
+    post: self.alarmSilenceElapsedSeconds = 0.0;
+    modifies: self.alarmSilenced,
+              self.alarmSilenceElapsedSeconds;
+  }
+
+  event autoRearmAlarm(elapsedSeconds: Real)
+    refines patient_monitoring_discovery::AlarmSilenceAutoRearmCommitment,
+            patient_monitoring_requirements::VitalSignsMonitorSystem.autoRearmAlarm {
+    pre: self.alarmActive = true;
+    pre: self.alarmSilenced = true;
+    pre: elapsedSeconds >= self.maxSilenceDurationSeconds;
+    post: self.alarmSilenced = false;
+    post: self.alarmSilenceElapsedSeconds = 0.0;
+    modifies: self.alarmSilenced,
+              self.alarmSilenceElapsedSeconds;
+  }
+
+  event clearAlarm()
+    refines patient_monitoring_requirements::VitalSignsMonitorSystem.clearAlarm {
+    pre: self.alarmActive = true;
+    post: self.alarmActive = false;
+    post: self.alarmSilenced = false;
+    post: self.alarmSilenceElapsedSeconds = 0.0;
+    modifies: self.alarmActive,
+              self.alarmSilenced,
+              self.alarmSilenceElapsedSeconds;
+  }
+
+  event raiseSensorDisconnectAlarm()
+    refines patient_monitoring_discovery::SensorDisconnectDetectionCommitment,
+            patient_monitoring_requirements::VitalSignsMonitorSystem.raiseSensorDisconnectAlarm {
+    pre: not self.sensorDisconnectAlarmActive;
+    post: self.sensorDisconnectAlarmActive = true;
+    modifies: self.sensorDisconnectAlarmActive;
+  }
+
+  event clearSensorDisconnectAlarm()
+    refines patient_monitoring_requirements::VitalSignsMonitorSystem.resumeAfterReconnect {
+    pre: self.sensorDisconnectAlarmActive = true;
+    post: self.sensorDisconnectAlarmActive = false;
+    modifies: self.sensorDisconnectAlarmActive;
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// COMPONENT 4 — FaultLogger
+// ─────────────────────────────────────────────────────────────────────
+
+kind FaultLogger {
+  identity: loggerId;
+
+  property loggerId: String;
+  property faultCount: Integer;
+  property lastFaultDescription: String;
+  property lastFaultTimestampMs: Integer;
+
+  invariants {
+    self.loggerId <> null;
+    self.faultCount >= 0;
+    self.lastFaultTimestampMs >= 0;
+  }
+
+  event logLatencyFault(description: String, timestampMs: Integer)
+    refines patient_monitoring_formalization::VitalSignsMonitorSystemFormalized.enforceAlarmLatencyCeiling {
+    pre: description <> null;
+    pre: timestampMs >= 0;
+    post: self.faultCount = self.faultCount@pre + 1;
+    post: self.lastFaultDescription = description;
+    post: self.lastFaultTimestampMs = timestampMs;
+    modifies: self.faultCount,
+              self.lastFaultDescription,
+              self.lastFaultTimestampMs;
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// INTERFACE RELATORS
+// ─────────────────────────────────────────────────────────────────────
+
+relator ReadingChannel mediates (SensorEndpoint, DisplayEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property validatedBpm: Real;
+  property timestampMs: Integer;
+  property maxTransferLatencyMs: Integer;
+  invariants {
+    self.channelId <> null;
+    self.validatedBpm >= 20.0;
+    self.validatedBpm <= 250.0;
+    self.timestampMs >= 0;
+    self.maxTransferLatencyMs > 0;
+  }
+}
+
+relator AlarmChannel mediates (DisplayAlarmSource, AlarmManagerEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property crossingBpm: Real;
+  property latencySeconds: Real;
+  property maxPermittedLatencySeconds: Real;
+  invariants {
+    self.channelId <> null;
+    self.crossingBpm >= 0.0;
+    self.latencySeconds >= 0.0;
+    self.maxPermittedLatencySeconds > 0.0;
+    self.maxPermittedLatencySeconds <= 2.0;
+  }
+}
+
+relator FaultChannel mediates (AlarmFaultSource, FaultLoggerEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property faultDescription: String;
+  property faultTimestampMs: Integer;
+  invariants {
+    self.channelId <> null;
+    self.faultDescription <> null;
+    self.faultTimestampMs >= 0;
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// EXPLICIT RELATIONS
+// ─────────────────────────────────────────────────────────────────────
+
+relation readingChannelSensor: <<mediation>> from ReadingChannel [1] to SensorEndpoint [1];
+relation readingChannelDisplay: <<mediation>> from ReadingChannel [1] to DisplayEndpoint [1];
+relation alarmChannelSource: <<mediation>> from AlarmChannel [1] to DisplayAlarmSource [1];
+relation alarmChannelTarget: <<mediation>> from AlarmChannel [1] to AlarmManagerEndpoint [1];
+relation faultChannelSource: <<mediation>> from FaultChannel [1] to AlarmFaultSource [1];
+relation faultChannelTarget: <<mediation>> from FaultChannel [1] to FaultLoggerEndpoint [1];
+
+
+// ─────────────────────────────────────────────────────────────────────
+// CROSS-COMPONENT DATA FLOWS (happenings)
+//
+// Named with the 'Design' suffix to avoid colliding with the
+// discovery-stage happenings imported transitively:
+//   NormalMonitoringFlow, ThresholdAlarmFlow, AlarmSilenceRearmFlow,
+//   SensorDisconnectFlow are all declared in discovery.onto.
+// ─────────────────────────────────────────────────────────────────────
+
+// Happy-path reading: sensor → EcgSensorInterface.acceptReading →
+// ReadingChannel → DisplayController.updateDisplay.
+happening DesignNormalReadingFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property rawBpm: Real;
+  property timestampMs: Integer;
+  invariants {
+    self.flowId <> null;
+    self.rawBpm >= 20.0;
+    self.rawBpm <= 250.0;
+  }
+}
+
+// Implausible reading: raw BPM outside [20, 250] →
+// EcgSensorInterface.rejectImplausibleReading → counter increments →
+// no further propagation.
+happening DesignImplausibleReadingFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property rawBpm: Real;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+// Threshold alarm: DisplayController detects crossing →
+// AlarmChannel → AlarmManager.raiseThresholdAlarm within 2 seconds.
+happening DesignThresholdAlarmFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property crossingBpm: Real;
+  property thresholdCrossedTimestampMs: Integer;
+  property alarmRaisedTimestampMs: Integer;
+  invariants {
+    self.flowId <> null;
+    self.alarmRaisedTimestampMs >= self.thresholdCrossedTimestampMs;
+  }
+}
+
+// Silence and auto-rearm: clinician silences active alarm →
+// AlarmManager mutes for at most 120 s → auto-rearms.
+happening DesignSilenceRearmFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property silenceStartTimestampMs: Integer;
+  property rearmTimestampMs: Integer;
+  invariants {
+    self.flowId <> null;
+    self.rearmTimestampMs >= self.silenceStartTimestampMs;
+  }
+}
+
+// Sensor-disconnect: EcgSensorInterface detects >5 s absence →
+// declareSensorDisconnected → AlarmManager.raiseSensorDisconnectAlarm
+// → DisplayController.blankDisplay.
+happening DesignDisconnectAlarmFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property signalLostTimestampMs: Integer;
+  property alarmRaisedTimestampMs: Integer;
+  invariants {
+    self.flowId <> null;
+    self.alarmRaisedTimestampMs >= self.signalLostTimestampMs;
+  }
+}
+
+// Reconnect: signal restored → EcgSensorInterface.restoreSensorConnection
+// → AlarmManager.clearSensorDisconnectAlarm
+// → DisplayController.restoreDisplay.
+happening DesignReconnectFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property reconnectTimestampMs: Integer;
+  invariants {
+    self.flowId <> null;
+    self.reconnectTimestampMs >= 0;
+  }
+}

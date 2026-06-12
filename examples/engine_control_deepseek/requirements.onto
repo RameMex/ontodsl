@@ -1,0 +1,110 @@
+schema "onto/0.1";
+namespace engine_control_requirements;
+import "./discovery.onto";
+
+// ─── Constraint categories from Discovery ─────────────────────────────────
+// These as-is; they carry invariants that the system kind inherits.
+
+// ─── System Kind ──────────────────────────────────────────────────────────
+// Mirrors EVERY property that Discovery's commitments predicate references.
+// OverspeedPrevention: maxSafeSpeed
+// ThrustManagement:    onGround, reverserCommanded, reverserEnabled
+// SensorFaultTolerance: faultDetected, modelledValueAvailable
+kind EngineControlSystem {
+  identity: systemId;
+  property systemId: String;
+
+  // ── Commitments mirror ──
+  property maxSafeSpeed: Real;
+  property onGround: Boolean;
+  property reverserCommanded: Boolean;
+  property reverserEnabled: Boolean;
+  property faultDetected: Boolean;
+  property modelledValueAvailable: Boolean;
+
+  // ── Additional system properties ──
+  property currentSpeed: Real;
+  property fuelFlow: Real;
+  property overspeedProtectionFitted: Boolean;
+  property overspeedDetected: Boolean;
+  property continuousIgnitionCommanded: Boolean;
+  property continuousIgnitionEnabled: Boolean;
+  property thrustCommanded: Real;
+  property thrustHeld: Real;
+  property inFlight: Boolean;
+  property sensorFaultActive: Boolean;
+  property modelledValueInUse: Boolean;
+
+  invariants {
+    self.systemId <> null;
+    self.maxSafeSpeed > 0.0;
+    self.currentSpeed >= 0.0;
+    self.fuelFlow >= 0.0;
+    self.thrustCommanded >= 0.0;
+    self.thrustHeld >= 0.0;
+    // Non-functional: relationship between derived states
+    self.overspeedDetected = (self.currentSpeed > self.maxSafeSpeed);
+    self.inFlight = (not self.onGround);
+    self.modelledValueAvailable = self.modelledValueInUse;
+    // Reverser invariants
+    self.reverserEnabled implies (self.onGround and self.reverserCommanded);
+    // Sensor fault invariant
+    self.faultDetected implies self.modelledValueAvailable;
+  }
+
+  // ─── Events ────────────────────────────────────────────────────────────
+
+  // GOAL-1: Overspeed protection.
+  event detectOverspeed()
+    refines engine_control_discovery::OverspeedPrevention {
+    pre: self.currentSpeed > self.maxSafeSpeed;
+    post: self.overspeedDetected = true;
+    modifies: self.overspeedDetected;
+  }
+
+  event limitFuelOnOverspeed()
+    refines engine_control_discovery::OverspeedPrevention {
+    pre: self.overspeedDetected = true;
+    pre: self.overspeedProtectionFitted = true;
+    pre: self.fuelFlow > 0.0;
+    post: self.fuelFlow <= 0.0;
+    post: self.currentSpeed <= self.maxSafeSpeed;
+    modifies: self.fuelFlow;
+  }
+
+  // GOAL-2: Ignition management.
+  event commandContinuousIgnition()
+    refines engine_control_discovery::ThrustManagement {
+    pre: self.continuousIgnitionCommanded = true;
+    post: self.continuousIgnitionEnabled = true;
+    modifies: self.continuousIgnitionEnabled;
+  }
+
+  event holdThrustInFlight()
+    refines engine_control_discovery::ThrustManagement {
+    pre: self.inFlight = true;
+    pre: self.thrustCommanded > 0.0;
+    post: self.thrustHeld = self.thrustCommanded;
+    modifies: self.thrustHeld;
+  }
+
+  event deployReverserOnGround()
+    refines engine_control_discovery::ThrustManagement {
+    pre: self.onGround = true;
+    pre: self.reverserCommanded = true;
+    pre: not self.reverserEnabled;
+    post: self.reverserEnabled = true;
+    modifies: self.reverserEnabled;
+  }
+
+  // GOAL-3: Sensor fault tolerance.
+  event detectSensorFault()
+    refines engine_control_discovery::SensorFaultTolerance {
+    pre: not self.sensorFaultActive;
+    post: self.sensorFaultActive = true;
+    post: self.faultDetected = true;
+    post: self.modelledValueInUse = true;
+    post: self.modelledValueAvailable = true;
+    modifies: self.sensorFaultActive, self.faultDetected, self.modelledValueInUse, self.modelledValueAvailable;
+  }
+}

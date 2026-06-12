@@ -1,0 +1,492 @@
+schema "onto/0.1";
+namespace access_control_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Design Stage — Access Control Gateway Decomposition
+//
+// Components (kinds):
+//   1. TokenResolver       — resolves subject token to active role set
+//   2. PolicyEngine        — computes union of permissions from roles
+//   3. DecisionEngine      — evaluates permit/deny against permission set
+//   4. AuditLogger         — writes immutable audit entries
+//   5. RoleExpirationJob   — scheduled daily expiry of stale roles
+//   6. LatencyMonitor      — tracks p99 latency
+//
+// Interfaces (relators):
+//   TokenPolicyChannel       — mediates TokenResolver ↔ PolicyEngine
+//   PolicyDecisionChannel    — mediates PolicyEngine ↔ DecisionEngine
+//   DecisionAuditChannel     — mediates DecisionEngine ↔ AuditLogger
+//   ExpirationAuditChannel   — mediates RoleExpirationJob ↔ AuditLogger
+//   MonitorChannel           — mediates DecisionEngine ↔ LatencyMonitor
+//
+// Roles: one per component endpoint on each relator.
+// =====================================================================
+
+// ─── Component: TokenResolver ───────────────────────────────────────
+
+kind TokenResolver {
+  identity: resolverId;
+  property resolverId: String;
+  property token: String;
+  property resolvedRoles: Set<String>;
+  property lastResolutionTimestamp: Real;
+
+  property tolerance: Real;
+  property maxRoleExpiryDays: Real;
+
+  invariants {
+    self.resolverId <> null;
+    self.token <> null;
+    self.lastResolutionTimestamp >= 0.0;
+    self.tolerance >= 0.0;
+    self.maxRoleExpiryDays <= 90.0;
+  }
+
+  event resolveRoles(subjectToken: String): Set<String>
+    refines access_control_requirements::AccessControlGatewaySystem.resolvePermissions {
+    pre: subjectToken <> null and subjectToken <> '';
+    pre: self.tolerance >= 0.0;
+    post: result->notEmpty();
+    post: self.resolvedRoles = result;
+    post: self.lastResolutionTimestamp > self.lastResolutionTimestamp@pre;
+    modifies: self.resolvedRoles, self.lastResolutionTimestamp;
+  }
+}
+
+// ─── Component: PolicyEngine ────────────────────────────────────────
+
+kind PolicyEngine {
+  identity: engineId;
+  property engineId: String;
+  property computedPermissionUnion: Set<Permission>;
+  property rolePermissionMap: Set<String>;
+  property lastComputationTimestamp: Real;
+
+  property tolerance: Real;
+  property maxRoleExpiryDays: Real;
+
+  invariants {
+    self.engineId <> null;
+    self.lastComputationTimestamp >= 0.0;
+    self.tolerance >= 0.0;
+    self.maxRoleExpiryDays <= 90.0;
+    self.computedPermissionUnion->size() >= 0;
+  }
+
+  event computePermissionUnion(roleIds: Set<String>): Set<Permission>
+    refines access_control_requirements::AccessControlGatewaySystem.resolvePermissions {
+    pre: roleIds->notEmpty();
+    pre: self.tolerance >= 0.0;
+    post: result->notEmpty();
+    post: result->forAll(p | p <> null);
+    post: self.computedPermissionUnion = result;
+    post: self.lastComputationTimestamp > self.lastComputationTimestamp@pre;
+    modifies: self.computedPermissionUnion, self.lastComputationTimestamp;
+  }
+
+  event checkPermissionInUnion(permissionId: String): Boolean {
+    pre: permissionId <> null and permissionId <> '';
+    pre: self.computedPermissionUnion->notEmpty();
+    post: result = self.computedPermissionUnion->exists(p |
+      p.permissionId = permissionId
+    );
+  }
+}
+
+// ─── Component: DecisionEngine ──────────────────────────────────────
+
+kind DecisionEngine {
+  identity: decisionId;
+  property decisionId: String;
+  property lastDecisionOutcome: String;
+  property lastDecisionTimestamp: Real;
+  property requestedPermissionId: String;
+  property subjectToken: String;
+
+  property tolerance: Real;
+  property maxAuditLatencyMs: Real;
+  property maxP99LatencyMs: Real;
+  property maxRoleExpiryDays: Real;
+
+  invariants {
+    self.decisionId <> null;
+    self.lastDecisionTimestamp >= 0.0;
+    self.tolerance >= 0.0;
+    self.maxAuditLatencyMs <= 100.0;
+    self.maxP99LatencyMs <= 50.0;
+    self.maxRoleExpiryDays <= 90.0;
+    self.lastDecisionOutcome = 'allow' or self.lastDecisionOutcome = 'deny';
+  }
+
+  event evaluateRequest(subjectToken: String, permissionId: String): Boolean
+    refines access_control_requirements::AccessControlGatewaySystem.authorize {
+    pre: subjectToken <> null and subjectToken <> '';
+    pre: permissionId <> null and permissionId <> '';
+    pre: self.maxAuditLatencyMs <= 100.0;
+    pre: self.maxP99LatencyMs <= 50.0;
+    post: result = true or result = false;
+    post: self.lastDecisionOutcome = (if result then 'allow' else 'deny' endif);
+    post: self.lastDecisionTimestamp > self.lastDecisionTimestamp@pre;
+    post: self.subjectToken = subjectToken;
+    post: self.requestedPermissionId = permissionId;
+    modifies: self.lastDecisionOutcome, self.lastDecisionTimestamp,
+              self.subjectToken, self.requestedPermissionId;
+  }
+}
+
+// ─── Component: AuditLogger ─────────────────────────────────────────
+
+kind AuditLogger {
+  identity: loggerId;
+  property loggerId: String;
+  property auditLog: Set<AuditEntry>;
+  property lastWriteTimestamp: Real;
+
+  property maxAuditLatencyMs: Real;
+  property maxP99LatencyMs: Real;
+
+  invariants {
+    self.loggerId <> null;
+    self.lastWriteTimestamp >= 0.0;
+    self.maxAuditLatencyMs <= 100.0;
+    self.maxP99LatencyMs <= 50.0;
+    self.auditLog->size() >= 0;
+  }
+
+  event writeAuditEntry(subjectId: String, permissionId: String, outcome: String, currentTimestamp: Real)
+    refines access_control_requirements::AccessControlGatewaySystem.authorize {
+    pre: subjectId <> null and subjectId <> '';
+    pre: permissionId <> null and permissionId <> '';
+    pre: outcome = 'allow' or outcome = 'deny';
+    pre: currentTimestamp >= 0.0;
+    pre: self.maxAuditLatencyMs <= 100.0;
+    post: self.auditLog->exists(e |
+      e.subjectId = subjectId and
+      e.permissionId = permissionId and
+      e.outcome = outcome and
+      e.isImmutable = true and
+      e.timestamp >= currentTimestamp and
+      (e.timestamp - currentTimestamp) <= self.maxAuditLatencyMs
+    );
+    post: self.auditLog->size() = self.auditLog@pre->size() + 1;
+    post: self.lastWriteTimestamp = currentTimestamp;
+    modifies: self.auditLog, self.lastWriteTimestamp;
+  }
+
+  event appendMultipleEntries(entries: Set<AuditEntry>) {
+    pre: entries->notEmpty();
+    post: self.auditLog->size() = self.auditLog@pre->size() + entries->size();
+    post: entries->forAll(e |
+      self.auditLog->includes(e)
+    );
+    post: self.lastWriteTimestamp > self.lastWriteTimestamp@pre;
+    modifies: self.auditLog, self.lastWriteTimestamp;
+  }
+}
+
+// ─── Component: RoleExpirationJob ───────────────────────────────────
+
+kind RoleExpirationJob {
+  identity: jobId;
+  property jobId: String;
+  property lastRunTimestamp: Real;
+  property expiredRoleCount: Integer;
+  property roleLastUsed: Real;
+  property activeRoles: Set<String>;
+
+  property maxRoleExpiryDays: Real;
+  property maxP99LatencyMs: Real;
+
+  invariants {
+    self.jobId <> null;
+    self.lastRunTimestamp >= 0.0;
+    self.expiredRoleCount >= 0;
+    self.maxRoleExpiryDays <= 90.0;
+    self.maxP99LatencyMs <= 50.0;
+  }
+
+  event expireStaleRoles(currentTimestamp: Real, rolesWithLastUsed: Set<String>)
+    refines access_control_requirements::AccessControlGatewaySystem.expireStaleRoles {
+    pre: currentTimestamp >= 0.0;
+    pre: self.maxRoleExpiryDays <= 90.0;
+    pre: rolesWithLastUsed->notEmpty();
+    post: self.activeRoles->size() >= 0;
+    post: self.expiredRoleCount >= self.expiredRoleCount@pre;
+    post: self.lastRunTimestamp = currentTimestamp;
+    modifies: self.activeRoles, self.expiredRoleCount, self.lastRunTimestamp;
+  }
+
+  event renewRole(roleId: String)
+    refines access_control_requirements::AccessControlGatewaySystem.renewRole {
+    pre: roleId <> null and roleId <> '';
+    pre: self.activeRoles->includes(roleId);
+    post: self.activeRoles->includes(roleId);
+    post: self.roleLastUsed > self.roleLastUsed@pre;
+    modifies: self.activeRoles, self.roleLastUsed;
+  }
+}
+
+// ─── Component: LatencyMonitor ──────────────────────────────────────
+
+kind LatencyMonitor {
+  identity: monitorId;
+  property monitorId: String;
+  property p99Latency: Real;
+  property peakLatency: Real;
+  property observationCount: Integer;
+
+  property maxP99LatencyMs: Real;
+
+  invariants {
+    self.monitorId <> null;
+    self.p99Latency >= 0.0;
+    self.peakLatency >= 0.0;
+    self.observationCount >= 0;
+    self.maxP99LatencyMs <= 50.0;
+    self.p99Latency <= self.maxP99LatencyMs;
+  }
+
+  event recordLatencyObservation(latencyMs: Real) {
+    pre: latencyMs >= 0.0;
+    pre: self.maxP99LatencyMs <= 50.0;
+    post: self.p99Latency <= self.maxP99LatencyMs;
+    post: self.observationCount = self.observationCount@pre + 1;
+    post: self.peakLatency >= self.peakLatency@pre;
+    post: self.peakLatency >= latencyMs;
+    modifies: self.p99Latency, self.peakLatency, self.observationCount;
+  }
+
+  event resetMetrics() {
+    post: self.p99Latency = 0.0;
+    post: self.peakLatency = 0.0;
+    post: self.observationCount = 0;
+    modifies: self.p99Latency, self.peakLatency, self.observationCount;
+  }
+}
+
+// =====================================================================
+// INTERFACES (Relators + Roles)
+// =====================================================================
+
+role ResolverRole mediated-by TokenPolicyChannel of TokenResolver {
+  property resolverId: String;
+  property resolvedRoles: Set<String>;
+}
+
+role PolicyRole mediated-by TokenPolicyChannel of PolicyEngine {
+  property engineId: String;
+  property computedPermissionUnion: Set<Permission>;
+}
+
+relator TokenPolicyChannel mediates (ResolverRole, PolicyRole) {
+  identity: channelId;
+  property channelId: String;
+  property lastTransferTimestamp: Real;
+  property transferCount: Integer;
+
+  invariants {
+    self.channelId <> null;
+    self.lastTransferTimestamp >= 0.0;
+    self.transferCount >= 0;
+  }
+
+  event transferRoles(roleIds: Set<String>) {
+    pre: roleIds->notEmpty();
+    pre: self.transferCount >= 0;
+    post: self.transferCount = self.transferCount@pre + 1;
+    post: self.lastTransferTimestamp > self.lastTransferTimestamp@pre;
+    modifies: self.transferCount, self.lastTransferTimestamp;
+  }
+}
+
+// ─── Interface: Policy → Decision (PolicyDecisionChannel) ──────────
+
+role PolicySideRole mediated-by PolicyDecisionChannel of PolicyEngine {
+  property engineId: String;
+  property computedPermissionUnion: Set<Permission>;
+}
+
+role DecisionSideRole mediated-by PolicyDecisionChannel of DecisionEngine {
+  property decisionId: String;
+  property lastDecisionOutcome: String;
+}
+
+relator PolicyDecisionChannel mediates (PolicySideRole, DecisionSideRole) {
+  identity: channelId;
+  property channelId: String;
+  property lastDecisionTimestamp: Real;
+  property decisionsMade: Integer;
+
+  invariants {
+    self.channelId <> null;
+    self.lastDecisionTimestamp >= 0.0;
+    self.decisionsMade >= 0;
+  }
+
+  event transferDecision(permissionId: String, isAllowed: Boolean) {
+    pre: permissionId <> null and permissionId <> '';
+    pre: self.decisionsMade >= 0;
+    post: self.decisionsMade = self.decisionsMade@pre + 1;
+    post: self.lastDecisionTimestamp > self.lastDecisionTimestamp@pre;
+    modifies: self.decisionsMade, self.lastDecisionTimestamp;
+  }
+}
+
+// ─── Interface: Decision → Audit (DecisionAuditChannel) ────────────
+
+role DecisionAuditRole mediated-by DecisionAuditChannel of DecisionEngine {
+  property decisionId: String;
+  property lastDecisionOutcome: String;
+  property subjectToken: String;
+  property requestedPermissionId: String;
+}
+
+role AuditDecisionRole mediated-by DecisionAuditChannel of AuditLogger {
+  property loggerId: String;
+  property auditLog: Set<AuditEntry>;
+}
+
+relator DecisionAuditChannel mediates (DecisionAuditRole, AuditDecisionRole) {
+  identity: channelId;
+  property channelId: String;
+  property lastAuditWriteTimestamp: Real;
+  property auditWritesCount: Integer;
+
+  invariants {
+    self.channelId <> null;
+    self.lastAuditWriteTimestamp >= 0.0;
+    self.auditWritesCount >= 0;
+  }
+
+  event logDecision(subjectId: String, permissionId: String, outcome: String, timestamp: Real) {
+    pre: subjectId <> null and subjectId <> '';
+    pre: permissionId <> null and permissionId <> '';
+    pre: outcome = 'allow' or outcome = 'deny';
+    pre: timestamp >= 0.0;
+    post: self.auditWritesCount = self.auditWritesCount@pre + 1;
+    post: self.lastAuditWriteTimestamp = timestamp;
+    modifies: self.auditWritesCount, self.lastAuditWriteTimestamp;
+  }
+}
+
+// ─── Interface: Expiration → Audit (ExpirationAuditChannel) ────────
+
+role ExpirationSourceRole mediated-by ExpirationAuditChannel of RoleExpirationJob {
+  property jobId: String;
+  property expiredRoleCount: Integer;
+}
+
+role ExpirationAuditRole mediated-by ExpirationAuditChannel of AuditLogger {
+  property loggerId: String;
+  property auditLog: Set<AuditEntry>;
+}
+
+relator ExpirationAuditChannel mediates (ExpirationSourceRole, ExpirationAuditRole) {
+  identity: channelId;
+  property channelId: String;
+  property lastExpirationTimestamp: Real;
+  property expirationWritesCount: Integer;
+
+  invariants {
+    self.channelId <> null;
+    self.lastExpirationTimestamp >= 0.0;
+    self.expirationWritesCount >= 0;
+  }
+
+  event logExpirationAudit(entry: AuditEntry) {
+    pre: entry.isImmutable = true;
+    pre: entry.timestamp >= 0.0;
+    pre: entry.outcome = 'deny';
+    post: self.expirationWritesCount = self.expirationWritesCount@pre + 1;
+    post: self.lastExpirationTimestamp = entry.timestamp;
+    modifies: self.expirationWritesCount, self.lastExpirationTimestamp;
+  }
+}
+
+// ─── Interface: Decision → Latency (MonitorChannel) ────────────────
+
+role DecisionMonitorRole mediated-by MonitorChannel of DecisionEngine {
+  property decisionId: String;
+  property lastDecisionOutcome: String;
+  property lastDecisionTimestamp: Real;
+}
+
+role LatencyMonitorRole mediated-by MonitorChannel of LatencyMonitor {
+  property monitorId: String;
+  property p99Latency: Real;
+}
+
+relator MonitorChannel mediates (DecisionMonitorRole, LatencyMonitorRole) {
+  identity: channelId;
+  property channelId: String;
+  property lastReportedLatency: Real;
+  property latencyReportsCount: Integer;
+
+  invariants {
+    self.channelId <> null;
+    self.lastReportedLatency >= 0.0;
+    self.latencyReportsCount >= 0;
+  }
+
+  event reportLatency(latencyMs: Real) {
+    pre: latencyMs >= 0.0;
+    post: self.lastReportedLatency = latencyMs;
+    post: self.latencyReportsCount = self.latencyReportsCount@pre + 1;
+    modifies: self.lastReportedLatency, self.latencyReportsCount;
+  }
+}
+
+// =====================================================================
+// Domain Story — Data Flow Happening
+// =====================================================================
+
+happening AuthorizationFlowDecomposition {
+  identity: flowId;
+  property flowId: String;
+  property stepSequence: Set<String>;
+
+  invariants {
+    self.flowId <> null;
+    self.stepSequence->notEmpty();
+    self.stepSequence->size() = 10;
+  }
+}
+
+// =====================================================================
+// Relations (OntoUML Stereotypes)
+// =====================================================================
+
+relation resolverToPolicyMembership: <<memberOf>> from ResolverRole [1] to TokenResolver [1];
+relation policyToResolverMembership: <<memberOf>> from PolicyRole [1] to PolicyEngine [1];
+
+relation policySideToPolicy: <<memberOf>> from PolicySideRole [1] to PolicyEngine [1];
+relation decisionSideToDecision: <<memberOf>> from DecisionSideRole [1] to DecisionEngine [1];
+
+relation decisionAuditToDecision: <<memberOf>> from DecisionAuditRole [1] to DecisionEngine [1];
+relation auditDecisionToAudit: <<memberOf>> from AuditDecisionRole [1] to AuditLogger [1];
+
+relation expirationSourceToJob: <<memberOf>> from ExpirationSourceRole [1] to RoleExpirationJob [1];
+relation expirationAuditToLogger: <<memberOf>> from ExpirationAuditRole [1] to AuditLogger [1];
+
+relation decisionMonitorToDecision: <<memberOf>> from DecisionMonitorRole [1] to DecisionEngine [1];
+relation latencyMonitorToMonitor: <<memberOf>> from LatencyMonitorRole [1] to LatencyMonitor [1];
+
+// ─── Mediations (source MUST be relator; target MUST be role/kind) ──
+
+relation tokenPolicyMediation: <<mediation>> from TokenPolicyChannel [1] to ResolverRole [1];
+relation tokenPolicyMediation2: <<mediation>> from TokenPolicyChannel [1] to PolicyRole [1];
+
+relation policyDecisionMediation: <<mediation>> from PolicyDecisionChannel [1] to PolicySideRole [1];
+relation policyDecisionMediation2: <<mediation>> from PolicyDecisionChannel [1] to DecisionSideRole [1];
+
+relation decisionAuditMediation: <<mediation>> from DecisionAuditChannel [1] to DecisionAuditRole [1];
+relation decisionAuditMediation2: <<mediation>> from DecisionAuditChannel [1] to AuditDecisionRole [1];
+
+relation expirationAuditMediation: <<mediation>> from ExpirationAuditChannel [1] to ExpirationSourceRole [1];
+relation expirationAuditMediation2: <<mediation>> from ExpirationAuditChannel [1] to ExpirationAuditRole [1];
+
+relation monitorMediation: <<mediation>> from MonitorChannel [1] to DecisionMonitorRole [1];
+relation monitorMediation2: <<mediation>> from MonitorChannel [1] to LatencyMonitorRole [1];

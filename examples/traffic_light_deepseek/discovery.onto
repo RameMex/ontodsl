@@ -1,0 +1,212 @@
+schema "onto/0.1";
+namespace traffic_light_discovery;
+
+// ─── Stakeholders ────────────────────────────────────────────────────
+agent Driver {
+  identity: driverId;
+  property driverId: String;
+  property vehicleType: String;
+  invariants {
+    self.driverId <> null;
+  }
+}
+
+agent Pedestrian {
+  identity: pedestrianId;
+  property pedestrianId: String;
+  invariants {
+    self.pedestrianId <> null;
+  }
+}
+
+agent EmergencyVehicleOperator {
+  identity: operatorId;
+  property operatorId: String;
+  property vehicleCategory: String;
+  invariants {
+    self.operatorId <> null;
+  }
+}
+
+agent CityTrafficAuthority {
+  identity: authorityId;
+  property authorityId: String;
+  property jurisdictionCode: String;
+  invariants {
+    self.authorityId <> null;
+  }
+}
+
+// The vendor/dev team — debitor of every stakeholder commitment.
+agent TrafficLightVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+  }
+}
+
+// ─── Glossary Terms ──────────────────────────────────────────────────
+kind Approach {
+  identity: approachId;
+  property approachId: String;
+  property direction: String; // e.g. 'North-South', 'East-West'
+  invariants {
+    self.approachId <> null;
+    self.direction <> null;
+  }
+}
+
+kind Phase {
+  identity: phaseId;
+  property phaseId: String;
+  property name: String;
+  property greenApproaches: Set<Approach>;
+  invariants {
+    self.phaseId <> null;
+    self.name <> null;
+  }
+}
+
+kind YellowInterval {
+  identity: intervalId;
+  property intervalId: String;
+  property minimumDurationSeconds: Real;
+  invariants {
+    self.intervalId <> null;
+    self.minimumDurationSeconds >= 3.0;
+  }
+}
+
+kind Preemption {
+  identity: preemptionId;
+  property preemptionId: String;
+  property maxResponseTimeSeconds: Real;
+  invariants {
+    self.preemptionId <> null;
+    self.maxResponseTimeSeconds <= 1.0;
+  }
+}
+
+// ─── Hard Goals (Commitments) ────────────────────────────────────────
+// GOAL-1: Mutual exclusion of conflicting GREENs
+// The vendor commits to the drivers that no two crossing approaches
+// will be GREEN simultaneously. Predicate references system-kind
+// properties to be declared in Requirements.
+commitment MutualExclusionCommitment
+  debitor: TrafficLightVendor
+  creditor: Driver {
+    identity: commitmentId;
+    property commitmentId: String;
+    property greenApproaches: Set<Approach>;  // mirror of system property
+    predicate: self.greenApproaches->forAll(a1, a2 |
+                a1 <> a2 implies a1.direction <> a2.direction);
+  }
+
+// GOAL-2: Yellow interval before red
+// The vendor commits to drivers and pedestrians that every GREEN → RED
+// transition includes a YELLOW interval of at least 3 seconds.
+commitment YellowIntervalCommitment
+  debitor: TrafficLightVendor
+  creditor: Driver {
+    identity: commitmentId;
+    property commitmentId: String;
+    property yellowIntervalSeconds: Real;  // must appear on system kind
+    predicate: self.yellowIntervalSeconds >= 3.0;
+  }
+
+// GOAL-3: Emergency preemption within 1 second
+// The vendor commits to emergency vehicle operators that on detection
+// of preemption signal, ALL-RED state is achieved within 1 second.
+commitment EmergencyPreemptionCommitment
+  debitor: TrafficLightVendor
+  creditor: EmergencyVehicleOperator {
+    identity: commitmentId;
+    property commitmentId: String;
+    property preemptionResponseTimeSeconds: Real;  // must appear on system kind
+    predicate: self.preemptionResponseTimeSeconds <= 1.0;
+  }
+
+// GOAL-4: Honour pedestrian requests
+// The vendor commits to pedestrians that after a button press, WALK
+// will be granted in the next compatible phase.
+commitment PedestrianRequestCommitment
+  debitor: TrafficLightVendor
+  creditor: Pedestrian {
+    identity: commitmentId;
+    property commitmentId: String;
+    property pedestrianRequestPending: Boolean;  // must appear on system kind
+    property walkSignalActive: Boolean;          // must appear on system kind
+    predicate: self.pedestrianRequestPending implies self.walkSignalActive;
+  }
+
+// ─── Constraint Goals (Categories with Invariants) ──────────────────
+// PHASE-LEVEL constraint: No conflicting GREENs simultaneously
+// Note: OCL does not support ->forAll with two variables directly;
+// we use a single-variable form that's equivalent.
+category MutualExclusionConstraints where bearer: Phase {
+  invariants {
+    bearer.greenApproaches->size() = 2;
+    // Use ->forAll with a single binding and test that no two approaches
+    // have the same direction (since crossing = different direction)
+    bearer.greenApproaches->forAll(a | 
+      bearer.greenApproaches->forAll(b | 
+        a = b or a.direction <> b.direction));
+  }
+}
+
+// TIME-LEVEL constraint: yellow minimum
+category YellowTimingConstraints where bearer: YellowInterval {
+  invariants {
+    bearer.minimumDurationSeconds >= 3.0;
+  }
+}
+
+// EMERGENCY constraint: preemption response bound
+category EmergencyTimingConstraints where bearer: Preemption {
+  invariants {
+    bearer.maxResponseTimeSeconds <= 1.0;
+  }
+}
+
+// ─── Domain Stories (Happenings with identity) ──────────────────────
+happening NormalPhaseCycle {
+  identity: cycleId;
+  property cycleId: String;
+  property currentPhase: Phase;
+  property nextPhase: Phase;
+  property yellowInterval: YellowInterval;
+  property allRedDwellSeconds: Real;
+  invariants {
+    self.cycleId <> null;
+    self.currentPhase <> null;
+    self.nextPhase <> null;
+    self.yellowInterval <> null;
+    self.allRedDwellSeconds > 0.0;
+    self.yellowInterval.minimumDurationSeconds >= 3.0;
+  }
+}
+
+happening EmergencyPreemptionFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;  // e.g. 'PreemptionSensorEvent'
+  property outcome: String;      // 'ALL-RED achieved within 1 second'
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}
+
+happening PedestrianRequestFlow {
+  identity: flowId;
+  property flowId: String;
+  property buttonPressTimestamp: Real;
+  property walkGranted: Boolean;
+  invariants {
+    self.flowId <> null;
+    self.buttonPressTimestamp > 0.0;
+  }
+}

@@ -1,0 +1,282 @@
+schema "onto/0.1";
+namespace insulin_pump_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =====================================================================
+// Formalization stage — insulin pump control system
+//
+// What the WORLD imposes on the system:
+//
+//   1. Regulatory anchors — categories with documentary invariants
+//      (FdaCleared, Iec62304ClassC, Iso14971RiskManaged).
+//
+//   2. Physical invariant categories (PhysicallyPlausibleReadings,
+//      GlucosePhysiology).
+//
+//   3. Active business rules — declared as events on
+//      InsulinPumpSystemFormalized, a subkind of InsulinPumpSystem
+//      that adds the runtime enforcement layer:
+//        - rejectOverdose       : refuses dose > safeMaxDoseUnits
+//        - rejectNegativeDose   : refuses dose < 0
+//        - enforceFailSafe      : refuses delivery while faulted
+//        - rejectInvalidReading : refuses readings outside [0,1000]
+//
+//   4. Passive assumptions — documented as FormalAssumptionRecord kind.
+//
+// Commitment-to-rule traceability
+//   CorrectDoseCommitment     -> rejectOverdose, rejectNegativeDose,
+//                                rejectInvalidReading
+//   FailSafeCommitment        -> enforceFailSafe
+//   PatientAlertCommitment    -> passive; documented in FdaCleared
+//   ClinicianConfigCommitment -> fully discharged in requirements.onto
+// =====================================================================
+
+
+// ─── 1. Regulatory anchor: FDA 510(k) ────────────────────────────────
+//
+// Project-level label, not a runtime property. Invariants are
+// documentary; discharged during regulatory submission.
+// Z3 inter-stage obligation: any Design component touching patient data
+// must carry this label so it is conserved through decomposition.
+
+category FdaCleared {
+  // @assumption: the device has obtained FDA 510(k) clearance before
+  // being placed in service. Pre-market obligation on the vendor.
+  property fda510kNumber: String;
+  property indicationsForUse: String;
+  property deviceClass: String;
+  property clearanceDate: String;
+
+  invariants {
+    self.fda510kNumber <> null;
+    self.deviceClass = 'II';
+  }
+}
+
+
+// ─── 2. Regulatory anchor: IEC 62304 Class C ─────────────────────────
+//
+// IEC 62304 Class C applies to software whose failure could cause
+// death or serious injury. Process obligation — not a runtime event.
+
+category Iec62304ClassC {
+  // @assumption: all software units have been developed, unit-tested,
+  // integration-tested, and system-tested per IEC 62304:2015 Class C.
+  // Evidence held in the design history file, not enforced at runtime.
+  property standardVersion: String;
+  property softwareClass: String;
+  property designHistoryFileRef: String;
+
+  invariants {
+    self.standardVersion <> null;
+    self.softwareClass = 'C';
+    self.designHistoryFileRef <> null;
+  }
+}
+
+
+// ─── 3. Regulatory anchor: ISO 14971 risk management ─────────────────
+//
+// Primary hazards for the insulin pump:
+//   H-1 Overdose   (mitigated by rejectOverdose)
+//   H-2 Bad sensor (mitigated by rejectInvalidReading + enforceFailSafe)
+//   H-3 No alarm   (mitigated by alert invariant in Requirements)
+// Process obligation — not a runtime event.
+
+category Iso14971RiskManaged {
+  // @assumption: a risk management file (RMF) exists identifying all
+  // hazards, assigning risk levels, and documenting mitigations.
+  property riskManagementFileRef: String;
+  property residualRiskAcceptable: Boolean;
+
+  invariants {
+    self.riskManagementFileRef <> null;
+    self.residualRiskAcceptable = true;
+  }
+}
+
+
+// ─── 4. Physical invariant category: plausible glucose readings ───────
+//
+// Physical law: blood glucose cannot be negative. Readings above
+// 1000 mg/dL are physiologically impossible and indicate sensor failure.
+// These are facts about the world, not policy decisions.
+
+category PhysicallyPlausibleReadings {
+  property minPlausibleMgDl: Real;
+  property maxPlausibleMgDl: Real;
+
+  invariants {
+    self.minPlausibleMgDl = 0.0;
+    self.maxPlausibleMgDl = 1000.0;
+    self.maxPlausibleMgDl > self.minPlausibleMgDl;
+  }
+}
+
+
+// ─── 5. Physical invariant category: insulin dose physics ────────────
+//
+// Physical law: an insulin dose cannot be negative (mass conservation).
+// Captured here so the inter-stage verifier can trace the constraint
+// to rejectNegativeDose on InsulinPumpSystemFormalized.
+
+category GlucosePhysiology {
+  // @assumption: insulin used is a standard short-acting analogue
+  // (e.g. lispro / aspart). Pharmacokinetic profile is outside the
+  // scope of the control system but assumed to match clinician config.
+  property insulinType: String;
+
+  invariants {
+    self.insulinType <> null;
+  }
+}
+
+
+// ─── 6. Formalized system subkind — active business rules ────────────
+//
+// InsulinPumpSystemFormalized specializes InsulinPumpSystem and adds
+// the defense-in-depth enforcement events mandated by the regulatory
+// and physical constraints above.
+//
+// LSP obligation (Liskov-Wing):
+//   Every event here must have pre weaker-or-equal AND post
+//   stronger-or-equal relative to any event it overrides in the parent.
+//   The new events below have no parent counterpart — they are
+//   purely additive rejection guards.
+
+subkind InsulinPumpSystemFormalized specializes InsulinPumpSystem {
+
+  invariants {
+    // Inherits all parent invariants. No additional structural
+    // invariants are needed — the business rules are enforced via
+    // the events below.
+    self.systemId <> null;
+  }
+
+  // -----------------------------------------------------------------
+  // Active rule R-1: Reject overdose
+  // -----------------------------------------------------------------
+  // Any dose request exceeding safeMaxDoseUnits is refused at the
+  // system boundary — defense-in-depth complementing AC-1b.
+  // No dose is delivered; reservoir and lastDoseDelivered unchanged.
+  //
+  // Refines:  invariant lastDoseDelivered <= safeMaxDoseUnits
+  // Discharges: hazard H-1 (overdose) from Iso14971RiskManaged.
+  //
+  // LSP note for Design: any component-level deliver event must carry
+  // a pre-condition implying requestedDose <= safeMaxDoseUnits.
+  // -----------------------------------------------------------------
+  event rejectOverdose(requestedDose: Real) {
+    pre: self.isOperating = true;
+    pre: not self.faultDetected;
+    pre: requestedDose > self.safeMaxDoseUnits;
+
+    post: self.lastDoseDelivered = self.lastDoseDelivered@pre;
+    post: self.reservoirUnits = self.reservoirUnits@pre;
+
+    modifies: self.lastDoseDelivered, self.reservoirUnits;
+  }
+
+  // -----------------------------------------------------------------
+  // Active rule R-2: Reject non-positive dose request
+  // -----------------------------------------------------------------
+  // A dose below zero is physically meaningless and indicates a
+  // caller error. Refused at the boundary without state change.
+  //
+  // Discharges: GlucosePhysiology mass-conservation invariant.
+  // Supports: hazard H-2 mitigation.
+  // -----------------------------------------------------------------
+  event rejectNegativeDose(requestedDose: Real) {
+    pre: self.isOperating = true;
+    pre: not self.faultDetected;
+    pre: requestedDose < 0.0;
+
+    post: self.lastDoseDelivered = self.lastDoseDelivered@pre;
+    post: self.reservoirUnits = self.reservoirUnits@pre;
+
+    modifies: self.lastDoseDelivered, self.reservoirUnits;
+  }
+
+  // -----------------------------------------------------------------
+  // Active rule R-3: Enforce fail-safe delivery gate
+  // -----------------------------------------------------------------
+  // While a fault is detected, any attempt to deliver insulin is
+  // refused regardless of other system state. Explicit and traceable
+  // to FailSafeCommitment (discovery) and FR-3 haltOnFault (req.).
+  //
+  // Discharges: insulin_pump_discovery::FailSafeCommitment
+  //             (delivery-halt side).
+  // Discharges: hazard H-2 (uncontrolled delivery during fault).
+  // -----------------------------------------------------------------
+  event enforceFailSafe(requestedDose: Real) {
+    pre: self.faultDetected = true;
+    pre: requestedDose > 0.0;
+
+    post: self.isOperating = false;
+    post: self.lastDoseDelivered = self.lastDoseDelivered@pre;
+    post: self.reservoirUnits = self.reservoirUnits@pre;
+
+    modifies: self.isOperating, self.lastDoseDelivered, self.reservoirUnits;
+  }
+
+  // -----------------------------------------------------------------
+  // Active rule R-4: Reject implausible sensor reading
+  // -----------------------------------------------------------------
+  // A glucose reading outside [0, 1000] mg/dL is physically impossible.
+  // The system refuses to act on it and treats the reading as sensor
+  // malfunction: sets faultDetected, halts delivery, raises alarm.
+  //
+  // Refines: PhysicallyPlausibleReadings category.
+  // Discharges: hazard H-2 (sensor failure -> unchecked delivery).
+  // -----------------------------------------------------------------
+  event rejectInvalidReading(readingMgDl: Real) {
+    pre: self.isOperating = true;
+    pre: readingMgDl < 0.0 or readingMgDl > 1000.0;
+
+    post: self.faultDetected = true;
+    post: self.isOperating = false;
+    post: self.alarmActive = true;
+    post: self.alarmReason = 'MALFUNCTION';
+
+    modifies: self.faultDetected, self.isOperating,
+              self.alarmActive, self.alarmReason;
+  }
+}
+
+
+// ─── Passive assumptions (documentary kind, NOT events) ───────────────
+//
+// World-facts that constrain the project but cannot be observed or
+// changed at runtime. Stored here for traceability to the RMF.
+//
+// @assumption ASSUME-1: The patient has type-1 or insulin-requiring
+//   type-2 diabetes. (Documented in discovery::Patient.hasDiabetes.)
+//
+// @assumption ASSUME-2: The clinician has set safeMaxDoseUnits to a
+//   patient-appropriate value before the device enters OPERATING state.
+//   Enforced procedurally; not verifiable at runtime.
+//
+// @assumption ASSUME-3: The physical environment (temperature, RF
+//   interference) is within the device's operating specification.
+//   Out-of-spec environments may produce sensor errors caught by
+//   rejectInvalidReading but are not otherwise modeled.
+//
+// @assumption ASSUME-4: The reservoir has been filled with the correct
+//   insulin type and concentration by a trained clinician. The system
+//   trusts reservoir content; it cannot verify insulin type at runtime.
+
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property assumptionCode: String;
+  property description: String;
+  property mitigationRef: String;
+
+  invariants {
+    self.assumptionId <> null;
+    self.assumptionCode <> null;
+    self.description <> null;
+    self.mitigationRef <> null;
+  }
+}

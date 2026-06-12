@@ -1,0 +1,219 @@
+schema "onto/0.1";
+namespace smart_thermostat_discovery;
+
+// ─── Glossary Kinds ──────────────────────────────────────────────────────
+
+kind Setpoint {
+  identity: setpointId;
+  property setpointId: String;
+  property requestedTempF: Real;
+  property clampedTempF: Real;
+
+  invariants {
+    self.setpointId <> null;
+    self.clampedTempF >= 40.0;
+    self.clampedTempF <= 90.0;
+    self.requestedTempF <> null;
+  }
+}
+
+kind SensorReading {
+  identity: readingId;
+  property readingId: String;
+  property valueFahrenheit: Real;
+  property isPlausible: Boolean;
+
+  invariants {
+    self.readingId <> null;
+    self.isPlausible = (self.valueFahrenheit >= -40.0 and self.valueFahrenheit <= 150.0);
+  }
+}
+
+kind ActuatorCommand {
+  identity: commandId;
+  property commandId: String;
+  property signal: String;
+  property issuedAtMinute: Real;
+
+  invariants {
+    self.commandId <> null;
+    self.signal <> null;
+  }
+}
+
+kind SafeHaltEvent {
+  identity: haltId;
+  property haltId: String;
+  property triggeringReadingId: String;
+  property alertRaised: Boolean;
+
+  invariants {
+    self.haltId <> null;
+    self.triggeringReadingId <> null;
+    self.alertRaised = true;
+  }
+}
+
+kind CompressorCycleRecord {
+  identity: cycleId;
+  property cycleId: String;
+  property lastTransitionMinute: Real;
+  property minimumIntervalMinutes: Real;
+
+  invariants {
+    self.cycleId <> null;
+    self.minimumIntervalMinutes = 5.0;
+    self.lastTransitionMinute >= 0.0;
+  }
+}
+
+// ─── Stakeholders ────────────────────────────────────────────────────────
+
+agent HomeOwner {
+  identity: ownerId;
+  property ownerId: String;
+  property name: String;
+  property contactInfo: String;
+
+  invariants {
+    self.ownerId <> null;
+    self.name <> null;
+  }
+}
+
+agent HVACTechnician {
+  identity: technicianId;
+  property technicianId: String;
+  property name: String;
+  property certificationCode: String;
+
+  invariants {
+    self.technicianId <> null;
+    self.name <> null;
+  }
+}
+
+// The dev / vendor team — debitor of all stakeholder commitments.
+// The system kind does not exist yet at Discovery.
+agent ThermostatVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  property supportEmail: String;
+
+  invariants {
+    self.vendorId <> null;
+    self.name <> null;
+  }
+}
+
+// ─── Constraint Categories ───────────────────────────────────────────────
+
+category SetpointSafetyConstraints where bearer: Setpoint {
+  invariants {
+    bearer.clampedTempF >= 40.0;
+    bearer.clampedTempF <= 90.0;
+  }
+}
+
+category SensorPlausibilityConstraints where bearer: SensorReading {
+  invariants {
+    bearer.isPlausible = (bearer.valueFahrenheit >= -40.0 and bearer.valueFahrenheit <= 150.0);
+  }
+}
+
+category CompressorCyclingConstraints where bearer: CompressorCycleRecord {
+  invariants {
+    bearer.minimumIntervalMinutes >= 5.0;
+  }
+}
+
+// ─── Hard-Goal Commitments ───────────────────────────────────────────────
+
+commitment SetpointRangeCommitment
+  debitor: ThermostatVendor
+  creditor: HomeOwner {
+    identity: commitmentId;
+    property commitmentId: String;
+    property safeMinTempF: Real;
+    property safeMaxTempF: Real;
+    predicate: self.safeMinTempF >= 0.0 and self.safeMaxTempF > self.safeMinTempF;
+  }
+
+commitment SafeHaltCommitment
+  debitor: ThermostatVendor
+  creditor: HomeOwner {
+    identity: commitmentId;
+    property commitmentId: String;
+    property plausibleMinF: Real;
+    property plausibleMaxF: Real;
+    predicate: self.plausibleMaxF > self.plausibleMinF;
+  }
+
+commitment CompressorProtectionCommitment
+  debitor: ThermostatVendor
+  creditor: HVACTechnician {
+    identity: commitmentId;
+    property commitmentId: String;
+    property minCycleIntervalMinutes: Real;
+    predicate: self.minCycleIntervalMinutes >= 5.0;
+  }
+
+commitment DisplayVisibilityCommitment
+  debitor: ThermostatVendor
+  creditor: HomeOwner {
+    identity: commitmentId;
+    property commitmentId: String;
+    property displayRefreshSeconds: Real;
+    predicate: self.displayRefreshSeconds > 0.0;
+  }
+
+commitment ThermostatVisionCommitment
+  debitor: ThermostatVendor
+  creditor: HomeOwner {
+    identity: commitmentId;
+    property commitmentId: String;
+    property visionStatement: String;
+    predicate: self.commitmentId <> null;
+  }
+
+// ─── Domain Stories (Happenings) ─────────────────────────────────────────
+
+happening NormalControlCycleFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}
+
+happening SensorFaultHaltFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}
+
+happening UserSetpointAdjustmentFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}

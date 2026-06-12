@@ -1,0 +1,325 @@
+schema "onto/0.1";
+namespace meeting_scheduler_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =====================================================================
+// Formalization — Meeting Scheduler
+//
+// This stage captures what the WORLD imposes on the system — regulatory
+// anchors, active business rules that must be enforced at runtime as
+// guard/rejection events, and passive assumptions that are documentary
+// only.
+//
+// Structure:
+//   1. Regulatory / compliance categories (documentary invariants)
+//   2. Domain-logical categories (passive physical/logical laws)
+//   3. Passive assumptions (FormalAssumptionRecord kind)
+//   4. MeetingSchedulerSystemFormalized — subkind of MeetingSchedulerSystem
+//      that ADDS active business-rule rejection events WITHOUT
+//      overriding any parent events.
+//
+// Fix notes (v2):
+//   - [S24] <<memberOf>> target must be a sortal: categories are NOT
+//     sortals.  Membership relations to categories are expressed via
+//     the 'specializes' clause on the kind/subkind declaration, not
+//     via explicit <<memberOf>> relations.  Removed all six offending
+//     relation declarations; category membership is already captured
+//     by MeetingSchedulerSystem specializing ExclusionRespected and
+//     InitiatorAlwaysInformed, and the formalized subkind inherits
+//     those memberships.  The remaining compliance categories are
+//     documented as commentary anchors — their invariants are enforced
+//     by the guard events, not by structural relations.
+//   - [S28] operator '<' expects numeric operands: ISO-8601 date
+//     strings cannot be compared with '<'.  rejectInvertedRange now
+//     takes an explicit Boolean flag (callerAssertedInverted) that the
+//     calling layer sets after its own date-comparison; the guard
+//     fires when the flag is true.  This keeps the formalization
+//     honest about what the OCL dialect can verify.
+// =====================================================================
+
+// ─── 1. Regulatory / Compliance Categories ───────────────────────────
+
+// GDPR Article 5(1)(b) — purpose limitation: personal availability
+// data (exclusion sets, preference sets) may only be processed for the
+// purpose of scheduling the specific meeting request to which they were
+// submitted.  They must not be retained or reused once the request is
+// closed.
+//
+// GDPR Article 5(1)(c) — data minimisation: the system shall collect
+// only what is strictly necessary (exclusion set is required;
+// preference set is optional).
+//
+// GDPR Article 5(1)(e) — storage limitation: constraint data must be
+// purged when the request reaches a terminal state (CONFIRMED or
+// CONFLICT).
+//
+// Membership: MeetingSchedulerSystemFormalized inherits this anchor
+// via the guard event rejectStaleConstraintRetention (AR-5).
+// No structural <<memberOf>> relation is used because categories are
+// not sortals in this dialect.
+category GdprArticle5Compliant {
+  property gdprControllerName: String;
+  property dataRetentionPolicyRef: String;
+  property purposeLimitationStatement: String;
+  invariants {
+    self.gdprControllerName <> null;
+    self.dataRetentionPolicyRef <> null;
+    self.purposeLimitationStatement <> null;
+  }
+}
+
+// ISO/IEC 25010 — Reliability / Availability: a scheduling system
+// exposed to multiple concurrent users must ensure that no request is
+// silently dropped and that every terminal transition (CONFIRMED,
+// CONFLICT) is observable by the initiator.
+//
+// This is the regulatory anchor for CONSTRAINT-2 (InitiatorAlwaysInformed).
+category Iso25010ReliabilityCompliant {
+  property availabilityTargetPercent: Real;
+  property incidentResponseRef: String;
+  invariants {
+    self.availabilityTargetPercent > 0.0;
+    self.availabilityTargetPercent <= 100.0;
+  }
+}
+
+// RFC 5545 (iCalendar) — date strings used in scheduling requests,
+// exclusion sets, and preference sets must be valid ISO-8601 calendar
+// dates.  The system shall reject non-conformant date strings.
+// This is a compliance anchor: interoperability with calendar clients
+// depends on strict date-format adherence.
+category RfcICalendarCompliant {
+  property iCalendarVersionRef: String;
+  property dateFormatPattern: String;
+  invariants {
+    self.iCalendarVersionRef <> null;
+    self.dateFormatPattern <> null;
+  }
+}
+
+// ─── 2. Domain-Logical Categories (passive physical/logical laws) ─────
+
+// Temporal Validity: the earliest date of a range must precede or
+// equal the latest date.  This is a logical law — not a policy choice.
+// Runtime enforcement is delegated to the rejectInvertedRange guard
+// event on MeetingSchedulerSystemFormalized.
+category TemporallyValid {
+  invariants {
+    true;
+  }
+}
+
+// Monotone Exclusion Growth: once a date has been added to the
+// aggregate exclusion set for an OPEN request, it cannot be removed.
+// Enforced transitionally by FR-2 and FR-6 post-conditions in
+// Requirements.
+category MonotoneExclusionGrowth {
+  invariants {
+    true;
+  }
+}
+
+// Single Active Request Per Initiator: an initiator cannot open a
+// second scheduling request while a previous one is still OPEN.
+// Runtime enforcement is delegated to the rejectDuplicateRequest guard
+// event on MeetingSchedulerSystemFormalized.
+category SingleActiveRequestPerInitiator {
+  invariants {
+    true;
+  }
+}
+
+// ─── 3. Passive Assumptions (documentary only — NOT events) ───────────
+
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property tag: String;
+  property statement: String;
+  property rationale: String;
+  property riskIfViolated: String;
+  invariants {
+    self.assumptionId <> null;
+    self.tag <> null;
+    self.statement <> null;
+  }
+}
+
+// @assumption ASSUME-1:
+// All date strings supplied by external actors (initiators and
+// participants) are syntactically valid ISO-8601 calendar dates.
+// Rationale: the system model operates at the scheduling logic level;
+// date-format validation is delegated to the API / UI layer.
+// Risk if violated: rejectExcludedDate guard may pass a malformed
+// date into allExcludedDates, corrupting constraint matching.
+
+// @assumption ASSUME-2:
+// The invitedParticipantCount value supplied in requestMeeting
+// accurately reflects the number of participants who will submit
+// constraints.  No participant is added or removed after the request
+// is opened.
+// Rationale: the Requirements model treats invitedParticipantCount
+// as a fixed bound; dynamic participant lists are out of scope.
+// Risk if violated: allConstraintsCollected may never become true,
+// leaving the request permanently OPEN.
+
+// @assumption ASSUME-3:
+// Network delivery of notifications to participants (confirmMeeting)
+// and of the conflict report to the initiator (reportConflict) is
+// handled by an external messaging infrastructure.  The scheduling
+// system only records the flag (participantsNotified,
+// initiatorInformed); it does not guarantee delivery.
+// Rationale: the ontodls model cannot express distributed delivery
+// guarantees; those belong to the messaging layer SLA.
+// Risk if violated: CONSTRAINT-2 (InitiatorAlwaysInformed) is
+// satisfied in the model but not end-to-end in deployment.
+
+// @assumption ASSUME-4:
+// Preference sets are purely advisory.  The system favours preferred
+// dates but is not obligated to select one.  A confirmed date that is
+// not in any preference set is still a valid outcome.
+// Rationale: GOAL-1 requires only that the proposed date is inside
+// the range and outside all exclusion sets; preference satisfaction
+// is a quality attribute, not a hard constraint.
+// Risk if violated: none for correctness; user satisfaction may degrade.
+
+// @assumption ASSUME-5:
+// Date-range ordering (earliest precedes latest) is validated by the
+// calling layer before invoking requestMeeting.  The formalization
+// guard rejectInvertedRange accepts a Boolean flag
+// (callerAssertedInverted) set by that layer, because the OCL dialect
+// does not support lexicographic String comparison.
+// Rationale: [S28] prohibits '<' on String operands.
+// Risk if violated: requestMeeting may open a request with an empty
+// candidate window, causing proposeDate to always fail.
+
+// ─── 4. Active Business Rules ─────────────────────────────────────────
+// MeetingSchedulerSystemFormalized ADDS guard/rejection events that
+// the world imposes and that must fire before (or instead of) the
+// parent events under certain conditions.
+//
+// This subkind does NOT override any parent event — it only adds new
+// rejection guards.  LSP is trivially satisfied because the parent
+// events are untouched.
+
+subkind MeetingSchedulerSystemFormalized specializes MeetingSchedulerSystem {
+
+  // ================================================================
+  // ACTIVE RULE AR-1 — Reject Excluded Date
+  //
+  // World imposition (CONSTRAINT-1 / ExclusionRespected):
+  //   If the candidate date supplied to proposeDate is already in
+  //   allExcludedDates, the system must reject it immediately rather
+  //   than allowing it to reach the post-condition check.
+  //
+  // Regulatory anchor: GdprArticle5Compliant (purpose limitation),
+  //   ExclusionRespected (discovery category).
+  // ================================================================
+  event rejectExcludedDate(candidate: String) {
+    pre: self.requestStatus = 'OPEN';
+    pre: candidate <> null;
+    pre: candidate <> '';
+    pre: self.allExcludedDates->includes(candidate);
+    post: self.proposedDate = '';
+    modifies: self.proposedDate;
+  }
+
+  // ================================================================
+  // ACTIVE RULE AR-2 — Reject Premature Confirmation
+  //
+  // World imposition (TemporallyValid / domain logic):
+  //   The system must not allow confirmMeeting to proceed unless all
+  //   invited participants have submitted their constraints AND a
+  //   proposed date has been selected.
+  //
+  // Regulatory anchor: TemporallyValid, SingleActiveRequestPerInitiator.
+  // ================================================================
+  event rejectPrematureConfirm() {
+    pre: self.requestStatus = 'OPEN';
+    pre: self.allConstraintsCollected = false or self.proposedDate = '';
+    post: self.initiatorInformed = false;
+    modifies: self.initiatorInformed;
+  }
+
+  // ================================================================
+  // ACTIVE RULE AR-3 — Reject Duplicate Request
+  //
+  // World imposition (SingleActiveRequestPerInitiator):
+  //   While a request is OPEN, the system must reject any attempt to
+  //   open another request.
+  //
+  // Regulatory anchor: SingleActiveRequestPerInitiator,
+  //   Iso25010ReliabilityCompliant (no silent state loss).
+  // ================================================================
+  event rejectDuplicateRequest(newReqId: String) {
+    pre: self.requestStatus = 'OPEN';
+    pre: newReqId <> null;
+    pre: newReqId <> self.currentRequestId;
+    post: self.requestStatus = 'OPEN';
+    modifies: self.requestStatus;
+  }
+
+  // ================================================================
+  // ACTIVE RULE AR-4 — Reject Inverted Date Range
+  //
+  // World imposition (TemporallyValid):
+  //   The date range supplied to requestMeeting must have earliest
+  //   preceding or equal to latest.  Because the OCL dialect does not
+  //   support lexicographic String comparison ([S28]: '<' requires
+  //   numeric operands), the calling layer is responsible for
+  //   evaluating the ordering and passes the result as the Boolean
+  //   parameter callerAssertedInverted.  The guard fires — and the
+  //   request is kept IDLE — when that flag is true.
+  //
+  // See ASSUME-5 for the assumption that makes this delegation safe.
+  // ================================================================
+  event rejectInvertedRange(
+    earliest: String,
+    latest: String,
+    callerAssertedInverted: Boolean
+  ) {
+    pre: self.requestStatus = 'IDLE';
+    pre: earliest <> null;
+    pre: latest <> null;
+    pre: callerAssertedInverted = true;
+    post: self.requestStatus = 'IDLE';
+    modifies: self.requestStatus;
+  }
+
+  // ================================================================
+  // ACTIVE RULE AR-5 — Reject Stale Constraint Retention
+  //
+  // World imposition (GdprArticle5Compliant — storage limitation):
+  //   Once the request reaches a terminal state (CONFIRMED or
+  //   CONFLICT), any attempt to submit or update constraints must be
+  //   rejected.  This prevents personal availability data from being
+  //   processed beyond the stated purpose.
+  //
+  // Regulatory anchor: GDPR Article 5(1)(b) purpose limitation,
+  //   Article 5(1)(e) storage limitation.
+  // ================================================================
+  event rejectStaleConstraintRetention(participantId: String) {
+    pre: self.requestStatus = 'CONFIRMED' or self.requestStatus = 'CONFLICT';
+    pre: participantId <> null;
+    post: self.participantsNotified = self.participantsNotified@pre;
+    modifies: self.participantsNotified;
+  }
+
+  // ================================================================
+  // ACTIVE RULE AR-6 — Reject Constraint Submission After Quota
+  //
+  // World imposition (SingleActiveRequestPerInitiator / domain logic):
+  //   If all invited participants have already submitted constraints,
+  //   a further submitConstraints call is a protocol violation.
+  //   Constraint updates after full collection must go through
+  //   updateConstraints (FR-6) instead.
+  // ================================================================
+  event rejectOverQuotaSubmission(participantId: String) {
+    pre: self.requestStatus = 'OPEN';
+    pre: participantId <> null;
+    pre: self.constraintSubmissionCount >= self.invitedParticipantCount;
+    post: self.constraintSubmissionCount = self.constraintSubmissionCount@pre;
+    modifies: self.constraintSubmissionCount;
+  }
+}

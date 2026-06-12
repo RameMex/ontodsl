@@ -1,0 +1,199 @@
+schema "onto/0.1";
+namespace online_banking_requirements;
+import "./discovery.onto";
+
+// =====================================================================
+// Requirements stage — online banking transaction processor as black box
+//
+// System kind that specializes constraint categories from Discovery
+// and declares events that discharge each commitment.
+//
+// FIXES:
+//   - Removed all ->asSequence() calls (unsupported OCL operator)
+//   - Replaced with ->select() + ->forAll() patterns
+//   - Used ->notEmpty() before referencing first element
+//   - For completeTransfer: used paired selects to identify the transfer
+//     and its source/destination accounts, then forAll to assert balance changes
+// =====================================================================
+
+kind BankingTransactionSystem specializes AuditableConstraint, AtomicityConstraints, BoundedLatencyConstraint, NoOverdraftConstraint {
+  identity: systemId;
+  property systemId: String;
+
+  // ─── Account management ───────────────────────────────────────────
+  property knownAccounts: Set<Account>;
+
+  // ─── Transfer lifecycle ───────────────────────────────────────────
+  property activeTransfers: Set<Transfer>;
+  property journalEntries: Set<JournalEntry>;
+
+  // ─── Non-functional: latency budget ───────────────────────────────
+  property maxPendingLatencySecs: Real;
+  property transactionCount: Integer;
+
+  // ─── Invariants (system-wide truths) ──────────────────────────────
+  invariants {
+    self.systemId <> null;
+    self.maxPendingLatencySecs = 30.0;
+    self.transactionCount >= 0;
+    self.knownAccounts->forAll(a | a.balance >= 0.0);
+    self.activeTransfers->forAll(t |
+      t.source <> t.destination and
+      t.amount > 0.0 and
+      (t.status = 'PENDING' or t.status = 'COMMITTED' or t.status = 'ROLLED_BACK')
+    );
+    self.journalEntries->forAll(e |
+      self.activeTransfers->exists(t | t.transferId = e.transferId)
+    );
+  }
+
+  // ==================================================================
+  // FR-1: Initiate a transfer (GOAL-1, GOAL-2, GOAL-4)
+  // ==================================================================
+  event initiateTransfer(sourceId: String, destId: String, amount: Real): String
+    refines online_banking_discovery::NoOverdraftCommitment {
+    pre: sourceId <> null and destId <> null;
+    pre: sourceId <> destId;
+    pre: amount > 0.0;
+    pre: self.knownAccounts->exists(a1 | a1.accountId = sourceId);
+    pre: self.knownAccounts->exists(a2 | a2.accountId = destId);
+    pre: self.knownAccounts->select(a | a.accountId = sourceId)->forAll(a | a.balance >= amount);
+
+    post: self.activeTransfers->exists(t |
+      t.source.accountId = sourceId and
+      t.destination.accountId = destId and
+      t.amount = amount and
+      t.status = 'PENDING'
+    );
+    post: self.activeTransfers->size() = self.activeTransfers@pre->size() + 1;
+
+    modifies: self.activeTransfers, self.transactionCount;
+  }
+
+  // ==================================================================
+  // FR-2: Complete a transfer (GOAL-1, GOAL-2, GOAL-3)
+  //
+  // FIX: replaced ->asSequence()->first() pattern with:
+  //   - select the transfer by transferId
+  //   - forAll over the selected set to assert its status
+  //   - nest select-forAll for source/dest accounts
+  // ==================================================================
+  event completeTransfer(transferId: String): Boolean
+    refines online_banking_discovery::AtomicTransferCommitment,
+            online_banking_discovery::NoOverdraftCommitment,
+            online_banking_discovery::AuditableJournalCommitment {
+    pre: transferId <> null;
+    pre: self.activeTransfers->exists(t | t.transferId = transferId);
+    pre: self.activeTransfers->select(t | t.transferId = transferId)->forAll(t | t.status = 'PENDING');
+
+    post: (
+      // Transfer is now COMMITTED
+      self.activeTransfers->select(t | t.transferId = transferId)->forAll(t | t.status = 'COMMITTED') and
+
+      // Debit source, credit destination — using nested selects to isolate accounts
+      self.activeTransfers->select(t | t.transferId = transferId)->forAll(t |
+        (
+          self.knownAccounts->select(a | a.accountId = t.source.accountId)->forAll(a |
+            a.balance = a.balance@pre - t.amount
+          ) and
+          self.knownAccounts->select(a | a.accountId = t.destination.accountId)->forAll(a |
+            a.balance = a.balance@pre + t.amount
+          )
+        )
+      ) and
+
+      // No overdraft: source balance >= 0 after debit
+      self.activeTransfers->select(t | t.transferId = transferId)->forAll(t |
+        self.knownAccounts->select(a | a.accountId = t.source.accountId)->forAll(a |
+          a.balance >= 0.0
+        )
+      ) and
+
+      // Journal entry created
+      self.journalEntries->exists(e |
+        e.transferId = transferId and
+        e.postSourceBalance >= 0.0 and
+        e.postDestBalance >= 0.0
+      ) and
+      self.journalEntries->size() = self.journalEntries@pre->size() + 1 and
+
+      // Only the two affected accounts changed
+      self.knownAccounts->forAll(a |
+        (self.activeTransfers->select(t | t.transferId = transferId)->exists(t |
+          t.source.accountId = a.accountId or t.destination.accountId = a.accountId
+        )) or
+        (a.balance = a.balance@pre)
+      )
+    );
+
+    modifies: self.knownAccounts, self.activeTransfers, self.journalEntries, self.transactionCount;
+  }
+
+  // ==================================================================
+  // FR-3: Roll back a transfer (GOAL-1 recovery)
+  // ==================================================================
+  event rollbackTransfer(transferId: String): Boolean
+    refines online_banking_discovery::AtomicTransferCommitment {
+    pre: transferId <> null;
+    pre: self.activeTransfers->exists(t | t.transferId = transferId);
+    pre: self.activeTransfers->select(t | t.transferId = transferId)->forAll(t | t.status = 'PENDING');
+
+    post: (
+      self.activeTransfers->select(t | t.transferId = transferId)->forAll(t | t.status = 'ROLLED_BACK') and
+      self.knownAccounts->forAll(a | a.balance = a.balance@pre) and
+      not self.journalEntries->exists(e | e.transferId = transferId) and
+      self.journalEntries->size() = self.journalEntries@pre->size()
+    );
+
+    modifies: self.activeTransfers;
+  }
+
+  // ==================================================================
+  // FR-4: Recover pending transfers on startup (GOAL-1, GOAL-4)
+  // ==================================================================
+  event recoverPendingTransfers() {
+    pre: true;
+
+    post: (
+      self.activeTransfers@pre->forAll(t |
+        (t.status = 'PENDING') implies
+        (self.activeTransfers->select(t2 | t2.transferId = t.transferId)->forAll(t2 |
+          t2.status = 'COMMITTED' or t2.status = 'ROLLED_BACK'
+        ))
+      ) and
+      self.knownAccounts->forAll(a | a.balance >= 0.0)
+    );
+
+    modifies: self.knownAccounts, self.activeTransfers, self.journalEntries, self.transactionCount;
+  }
+
+  // ==================================================================
+  // FR-5: Notify customer after success (GOAL-3 ordering)
+  // ==================================================================
+  event notifyCustomer(transferId: String) {
+    pre: transferId <> null;
+    pre: self.activeTransfers->exists(t | t.transferId = transferId and t.status = 'COMMITTED');
+    pre: self.journalEntries->exists(e | e.transferId = transferId);
+
+    post: true;
+  }
+
+  // ==================================================================
+  // FR-6: Query account balance (supporting FR)
+  //
+  // FIX: replaced ->asSequence()->first().balance pattern with:
+  //   - if ->notEmpty() then
+  //   - forAll over the selected account asserting balance = result
+  //   - The implication in the else-branch (if empty -> result = -1.0)
+  // ==================================================================
+  event queryBalance(accountId: String): Real {
+    pre: self.knownAccounts->exists(a | a.accountId = accountId);
+
+    post: result >= 0.0;
+    post: if self.knownAccounts->select(a | a.accountId = accountId)->notEmpty() then
+            self.knownAccounts->select(a | a.accountId = accountId)->forAll(a | result = a.balance)
+          else
+            result = -1.0
+          endif;
+  }
+}

@@ -1,0 +1,198 @@
+schema "onto/0.1";
+namespace insulin_pump_discovery;
+
+// ─── Stakeholders ───────────────────────────────────────────────────
+agent Patient {
+  identity: patientId;
+  property patientId: String;
+  property hasDiabetes: Boolean;
+  invariants {
+    self.patientId <> null;
+  }
+}
+
+agent Clinician {
+  identity: clinicianId;
+  property clinicianId: String;
+  property certification: String;
+  invariants {
+    self.clinicianId <> null;
+  }
+}
+
+// The dev team / vendor — debitor of every stakeholder commitment.
+agent PumpVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+  }
+}
+
+// ─── Vocabulary (glossary terms) ────────────────────────────────────
+kind BloodSugarReading {
+  identity: readingId;
+  property readingId: String;
+  property valueMgDl: Real;
+  property timestamp: Real;
+  invariants {
+    self.readingId <> null;
+    self.valueMgDl >= 0.0;
+  }
+}
+
+kind InsulinReservoir {
+  identity: reservoirId;
+  property reservoirId: String;
+  property capacityUnits: Real;
+  property currentLevelUnits: Real;
+  property isLow: Boolean;
+  invariants {
+    self.reservoirId <> null;
+    self.capacityUnits > 0.0;
+    self.currentLevelUnits >= 0.0;
+    self.currentLevelUnits <= self.capacityUnits;
+  }
+}
+
+kind SelfTestResult {
+  identity: resultId;
+  property resultId: String;
+  property sensorOk: Boolean;
+  property pumpOk: Boolean;
+  property needleOk: Boolean;
+  property allOk: Boolean;
+  invariants {
+    self.resultId <> null;
+    self.allOk = (self.sensorOk and self.pumpOk and self.needleOk);
+  }
+}
+
+kind AlarmCondition {
+  identity: alarmId;
+  property alarmId: String;
+  property alarmType: String;  // 'LOW_RESERVOIR', 'HARDWARE_FAULT'
+  property isActive: Boolean;
+  invariants {
+    self.alarmId <> null;
+  }
+}
+
+// ─── Placeholder system kind for predicate resolution ───────────────
+// At Discovery, the system kind does not exist yet. However, the
+// verifier resolves commitment predicates against the system kind
+// that Requirements will eventually declare. To avoid [S27] and [S36]
+// errors, we declare a minimal kind here that carries the properties
+// referenced by commitment predicates. It will be specialized/merged
+// in Requirements.
+kind InsulinPumpSystem {
+  identity: systemId;
+  property systemId: String;
+  property safeMaxDoseUnits: Real;
+  property alarmActive: Boolean;
+  property deliveryStopped: Boolean;
+  property lowReservoirAlarmActive: Boolean;
+  property malfunctionAlarmActive: Boolean;
+  invariants {
+    self.systemId <> null;
+    self.safeMaxDoseUnits > 0.0;
+  }
+}
+
+// ─── Hard goals → commitments ───────────────────────────────────────
+// GOAL-1: Deliver correct dose — never exceed safe maximum.
+// The predicate references 'safeMaxDoseUnits' which now exists on
+// InsulinPumpSystem.
+commitment CorrectDoseCommitment
+  debitor: PumpVendor
+  creditor: Patient {
+    identity: commitmentId;
+    property commitmentId: String;
+    property safeMaxDoseUnits: Real;
+    predicate: self.safeMaxDoseUnits > 0.0;
+  }
+
+// GOAL-2: Fail safe on any hardware fault.
+commitment FailSafeCommitment
+  debitor: PumpVendor
+  creditor: Patient {
+    identity: commitmentId;
+    property commitmentId: String;
+    property alarmActive: Boolean;
+    property deliveryStopped: Boolean;
+    predicate: self.alarmActive and self.deliveryStopped;
+  }
+
+// GOAL-3: Alert patient to conditions needing attention.
+commitment AlertPatientCommitment
+  debitor: PumpVendor
+  creditor: Patient {
+    identity: commitmentId;
+    property commitmentId: String;
+    property lowReservoirAlarmActive: Boolean;
+    property malfunctionAlarmActive: Boolean;
+    predicate: self.lowReservoirAlarmActive or self.malfunctionAlarmActive;
+  }
+
+// ─── Constraint goal → category (member-quantified form) ────────────
+// Captures the safety constraint that a single dose never exceeds the
+// safe maximum. The 'bearer' binding references the future system kind.
+category DoseSafetyConstraints where bearer: InsulinPumpSystem {
+  invariants {
+    bearer.safeMaxDoseUnits > 0.0;
+  }
+}
+
+// ─── Domain story (main flow) ───────────────────────────────────────
+happening DoseDeliveryFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;  // event name that starts the flow
+  property outcome: String;      // OCL predicate describing end state
+  property sensorReading: BloodSugarReading;
+  property insulinReservoir: InsulinReservoir;
+  property hasAlarm: Boolean;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+  }
+}
+
+happening HardwareFaultFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property selfTestResult: SelfTestResult;
+  property alarmRaised: AlarmCondition;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.selfTestResult <> null;
+    self.selfTestResult.allOk = false;
+    self.alarmRaised <> null;
+    self.alarmRaised.isActive = true;
+    self.alarmRaised.alarmType = 'HARDWARE_FAULT';
+    self.outcome = 'delivery_stopped';
+  }
+}
+
+happening LowReservoirAlertFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property insulinReservoir: InsulinReservoir;
+  property alarmRaised: AlarmCondition;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.insulinReservoir <> null;
+    self.insulinReservoir.isLow = true;
+    self.alarmRaised <> null;
+    self.alarmRaised.isActive = true;
+    self.alarmRaised.alarmType = 'LOW_RESERVOIR';
+    self.outcome = 'patient_alerted';
+  }
+}

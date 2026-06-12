@@ -1,0 +1,547 @@
+schema "onto/0.1";
+namespace online_banking_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Design: Online Banking Transaction Processor
+//
+// Decomposes OnlineBankingSystem into four cohesive components:
+//
+//   AccountLedger       — owns account state (balances, status)
+//   TransferCoordinator — owns transfer lifecycle state
+//   JournalStore        — owns the immutable audit log
+//   NotificationService — owns customer notification state
+//
+// Components are SIBLINGS (not subkinds of OnlineBankingSystem).
+// Each component event refines the Requirements parent event it
+// implements and modifies ONLY its own properties (encapsulation).
+//
+// Interfaces between components are relators mediating role pairs.
+// End-to-end data flows across component boundaries are happenings.
+// =====================================================================
+
+// ─── Local proxy agents for ADR creditors ────────────────────────────────
+// These represent the upstream stakeholders at the design boundary.
+// Distinct names avoid re-declaration errors (E2).
+
+agent DesignTeam {
+  identity: teamId;
+  property teamId: String;
+  property name: String;
+
+  invariants {
+    self.teamId <> null;
+    self.name <> null;
+  }
+}
+
+agent DesignCustomerProxy {
+  identity: proxyId;
+  property proxyId: String;
+  property name: String;
+
+  invariants {
+    self.proxyId <> null;
+    self.name <> null;
+  }
+}
+
+agent DesignRegulatorProxy {
+  identity: proxyId;
+  property proxyId: String;
+  property name: String;
+
+  invariants {
+    self.proxyId <> null;
+    self.name <> null;
+  }
+}
+
+agent DesignOperatorProxy {
+  identity: proxyId;
+  property proxyId: String;
+  property name: String;
+
+  invariants {
+    self.proxyId <> null;
+    self.name <> null;
+  }
+}
+
+// ─── Roles ────────────────────────────────────────────────────────────────
+
+role LedgerEndpoint mediated-by LedgerCoordinatorChannel of AccountLedger {
+  property ledgerId: String;
+}
+
+role CoordinatorEndpoint mediated-by LedgerCoordinatorChannel of TransferCoordinator {
+  property coordinatorId: String;
+}
+
+role CoordinatorJournalEndpoint mediated-by CoordinatorJournalChannel of TransferCoordinator {
+  property coordinatorId: String;
+}
+
+role JournalEndpoint mediated-by CoordinatorJournalChannel of JournalStore {
+  property storeId: String;
+}
+
+role CoordinatorNotifyEndpoint mediated-by CoordinatorNotificationChannel of TransferCoordinator {
+  property coordinatorId: String;
+}
+
+role NotificationEndpoint mediated-by CoordinatorNotificationChannel of NotificationService {
+  property serviceId: String;
+}
+
+// ─── Component 1: AccountLedger ──────────────────────────────────────────
+//
+// Owns the running balance for every account involved in a transfer.
+// Responsible for: balance check, debit, credit, rollback-restore.
+
+kind AccountLedger {
+  identity: ledgerId;
+
+  property ledgerId: String;
+  property sourceAccountId: String;
+  property destinationAccountId: String;
+  property sourceBalance: Real;
+  property destinationBalance: Real;
+  property pendingSourceBalance: Real;
+  property pendingDestinationBalance: Real;
+
+  invariants {
+    self.ledgerId <> null;
+    self.sourceAccountId <> null;
+    self.destinationAccountId <> null;
+    self.sourceAccountId <> self.destinationAccountId;
+    self.sourceBalance >= 0.0;
+    self.destinationBalance >= 0.0;
+    self.pendingSourceBalance >= 0.0;
+    self.pendingDestinationBalance >= 0.0;
+  }
+
+  // Captures current balances as the pending snapshot so rollback
+  // can restore them atomically. Implements the snapshot-capture
+  // slice of FR-1 (initiateTransfer).
+  event captureSnapshot(amount: Real)
+    refines online_banking_requirements::OnlineBankingSystem.initiateTransfer {
+    pre: amount > 0.0;
+    pre: self.sourceBalance >= amount;
+    post: self.pendingSourceBalance = self.sourceBalance;
+    post: self.pendingDestinationBalance = self.destinationBalance;
+    modifies: self.pendingSourceBalance, self.pendingDestinationBalance;
+  }
+
+  // Applies debit to source and credit to destination atomically.
+  // Implements FR-2 (executeTransfer).
+  event applyDebitCredit(amount: Real)
+    refines online_banking_requirements::OnlineBankingSystem.executeTransfer {
+    pre: amount > 0.0;
+    pre: self.sourceBalance >= amount;
+    post: self.sourceBalance = self.sourceBalance@pre - amount;
+    post: self.destinationBalance = self.destinationBalance@pre + amount;
+    post: self.sourceBalance >= 0.0;
+    modifies: self.sourceBalance, self.destinationBalance;
+  }
+
+  // Restores both balances from the pending snapshot atomically.
+  // Implements the balance-restoration slice of FR-5 (rollbackTransfer).
+  event restoreSnapshot()
+    refines online_banking_requirements::OnlineBankingSystem.rollbackTransfer {
+    pre: self.pendingSourceBalance >= 0.0;
+    pre: self.pendingDestinationBalance >= 0.0;
+    post: self.sourceBalance = self.pendingSourceBalance;
+    post: self.destinationBalance = self.pendingDestinationBalance;
+    post: self.sourceBalance >= 0.0;
+    post: self.destinationBalance >= 0.0;
+    modifies: self.sourceBalance, self.destinationBalance;
+  }
+
+  // Zeroes out the pending snapshot when the system resets to IDLE.
+  // Implements the snapshot-clearing slice of FR-7 (resetToIdle).
+  event clearSnapshot()
+    refines online_banking_requirements::OnlineBankingSystem.resetToIdle {
+    post: self.pendingSourceBalance = 0.0;
+    post: self.pendingDestinationBalance = 0.0;
+    modifies: self.pendingSourceBalance, self.pendingDestinationBalance;
+  }
+}
+
+// ─── Component 2: TransferCoordinator ────────────────────────────────────
+//
+// Owns the transfer lifecycle state machine.
+// Responsible for: state transitions, transfer identity, amount, and
+// the maxResolutionSeconds latency cap.
+
+kind TransferCoordinator {
+  identity: coordinatorId;
+
+  property coordinatorId: String;
+  property currentTransferId: String;
+  property currentAmount: Real;
+  property transferState: String;
+  property maxResolutionSeconds: Integer;
+
+  invariants {
+    self.coordinatorId <> null;
+    self.currentAmount >= 0.0;
+    self.transferState = 'IDLE'
+      or self.transferState = 'PENDING'
+      or self.transferState = 'COMPLETED'
+      or self.transferState = 'ROLLED_BACK';
+    self.maxResolutionSeconds <= 30;
+  }
+
+  // Moves state machine IDLE -> PENDING and records transfer identity
+  // and amount. Implements the state-machine slice of FR-1.
+  event beginTransfer(transferId: String, amount: Real)
+    refines online_banking_requirements::OnlineBankingSystem.initiateTransfer {
+    pre: self.transferState = 'IDLE';
+    pre: transferId <> null;
+    pre: amount > 0.0;
+    post: self.transferState = 'PENDING';
+    post: self.currentTransferId = transferId;
+    post: self.currentAmount = amount;
+    modifies: self.transferState, self.currentTransferId, self.currentAmount;
+  }
+
+  // Advances state PENDING -> COMPLETED once the journal has been
+  // written. Implements the state-machine slice of FR-3.
+  event completeTransfer()
+    refines online_banking_requirements::OnlineBankingSystem.writeJournalEntry {
+    pre: self.transferState = 'PENDING';
+    post: self.transferState = 'COMPLETED';
+    modifies: self.transferState;
+  }
+
+  // Moves state PENDING -> ROLLED_BACK on failure or timeout.
+  // Implements the state-machine slice of FR-5 (rollbackTransfer).
+  event markRolledBack()
+    refines online_banking_requirements::OnlineBankingSystem.rollbackTransfer {
+    pre: self.transferState = 'PENDING';
+    post: self.transferState = 'ROLLED_BACK';
+    modifies: self.transferState;
+  }
+
+  // Clears per-transfer state, returning the coordinator to IDLE.
+  // Implements the coordinator slice of FR-7 (resetToIdle).
+  event resetCoordinator()
+    refines online_banking_requirements::OnlineBankingSystem.resetToIdle {
+    pre: self.transferState = 'COMPLETED' or self.transferState = 'ROLLED_BACK';
+    post: self.transferState = 'IDLE';
+    post: self.currentAmount = 0.0;
+    modifies: self.transferState, self.currentAmount;
+  }
+}
+
+// ─── Component 3: JournalStore ───────────────────────────────────────────
+//
+// Owns the immutable audit log. Each call to writeEntry creates one
+// record capturing pre/post balances before any notification fires.
+
+kind JournalStore {
+  identity: storeId;
+
+  property storeId: String;
+  property journalWritten: Boolean;
+  property entryTransferId: String;
+  property preSourceBalance: Real;
+  property postSourceBalance: Real;
+  property preDestinationBalance: Real;
+  property postDestinationBalance: Real;
+  property entryAmount: Real;
+  property entryCreatedAt: Integer;
+
+  invariants {
+    self.storeId <> null;
+    self.preSourceBalance >= 0.0;
+    self.postSourceBalance >= 0.0;
+    self.preDestinationBalance >= 0.0;
+    self.postDestinationBalance >= 0.0;
+    self.journalWritten implies self.entryAmount > 0.0;
+  }
+
+  // Creates the immutable audit record capturing pre/post balances.
+  // Implements FR-3 (writeJournalEntry).
+  event writeEntry(
+    transferId: String,
+    preSrc: Real,
+    postSrc: Real,
+    preDst: Real,
+    postDst: Real,
+    amount: Real,
+    createdAt: Integer
+  )
+    refines online_banking_requirements::OnlineBankingSystem.writeJournalEntry {
+    pre: self.journalWritten = false;
+    pre: transferId <> null;
+    pre: amount > 0.0;
+    pre: preSrc >= 0.0;
+    pre: postSrc >= 0.0;
+    pre: preDst >= 0.0;
+    pre: postDst >= 0.0;
+    pre: postSrc < preSrc;
+    pre: postDst > preDst;
+    post: self.journalWritten = true;
+    post: self.entryTransferId = transferId;
+    post: self.preSourceBalance = preSrc;
+    post: self.postSourceBalance = postSrc;
+    post: self.preDestinationBalance = preDst;
+    post: self.postDestinationBalance = postDst;
+    post: self.entryAmount = amount;
+    post: self.entryCreatedAt = createdAt;
+    modifies:
+      self.journalWritten,
+      self.entryTransferId,
+      self.preSourceBalance,
+      self.postSourceBalance,
+      self.preDestinationBalance,
+      self.postDestinationBalance,
+      self.entryAmount,
+      self.entryCreatedAt;
+  }
+
+  // Resets the journal-written flag when the system resets to IDLE.
+  // Implements the journalWritten-clearing slice of FR-7 (resetToIdle).
+  event clearJournal()
+    refines online_banking_requirements::OnlineBankingSystem.resetToIdle {
+    pre: self.journalWritten = true;
+    post: self.journalWritten = false;
+    modifies: self.journalWritten;
+  }
+}
+
+// ─── Component 4: NotificationService ────────────────────────────────────
+//
+// Owns customer notification state. Sends outcome notification ONLY
+// after the journal has been confirmed written (GOAL-3 ordering).
+
+kind NotificationService {
+  identity: serviceId;
+
+  property serviceId: String;
+  property customerNotified: Boolean;
+  property lastNotifiedTransferId: String;
+
+  invariants {
+    self.serviceId <> null;
+  }
+
+  // Notifies the customer of a successful transfer. The caller MUST
+  // supply journalConfirmed = true — structural enforcement of GOAL-3.
+  // Implements FR-4 (notifyCustomer).
+  event sendSuccessNotification(transferId: String, journalConfirmed: Boolean)
+    refines online_banking_requirements::OnlineBankingSystem.notifyCustomer {
+    pre: journalConfirmed = true;
+    pre: transferId <> null;
+    pre: self.customerNotified = false;
+    post: self.customerNotified = true;
+    post: self.lastNotifiedTransferId = transferId;
+    modifies: self.customerNotified, self.lastNotifiedTransferId;
+  }
+
+  // Notifies the customer that the transfer was rolled back.
+  // Implements the notification slice of FR-5/FR-6 failure paths.
+  event sendFailureNotification(transferId: String)
+    refines online_banking_requirements::OnlineBankingSystem.rollbackTransfer {
+    pre: transferId <> null;
+    pre: self.customerNotified = false;
+    post: self.customerNotified = true;
+    post: self.lastNotifiedTransferId = transferId;
+    modifies: self.customerNotified, self.lastNotifiedTransferId;
+  }
+
+  // Clears the notification flag when the system resets to IDLE.
+  // Implements the customerNotified-clearing slice of FR-7 (resetToIdle).
+  event resetNotification()
+    refines online_banking_requirements::OnlineBankingSystem.resetToIdle {
+    post: self.customerNotified = false;
+    modifies: self.customerNotified;
+  }
+}
+
+// ─── Interface Relators ───────────────────────────────────────────────────
+
+relator LedgerCoordinatorChannel mediates (LedgerEndpoint, CoordinatorEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property maxLatencyMs: Integer;
+
+  invariants {
+    self.channelId <> null;
+    self.maxLatencyMs > 0;
+    self.maxLatencyMs <= 5000;
+  }
+}
+
+relator CoordinatorJournalChannel mediates (CoordinatorJournalEndpoint, JournalEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property maxLatencyMs: Integer;
+  property journalMustPrecedeCompletion: Boolean;
+
+  invariants {
+    self.channelId <> null;
+    self.maxLatencyMs > 0;
+    self.maxLatencyMs <= 5000;
+    self.journalMustPrecedeCompletion = true;
+  }
+}
+
+relator CoordinatorNotificationChannel mediates (CoordinatorNotifyEndpoint, NotificationEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property maxLatencyMs: Integer;
+  property journalConfirmedBeforeNotify: Boolean;
+
+  invariants {
+    self.channelId <> null;
+    self.maxLatencyMs > 0;
+    self.maxLatencyMs <= 5000;
+    self.journalConfirmedBeforeNotify = true;
+  }
+}
+
+// ─── Explicit Mediation Relations ────────────────────────────────────────
+
+relation ledgerCoordMedLedger: <<mediation>>
+  from LedgerCoordinatorChannel [1] to LedgerEndpoint [1];
+relation ledgerCoordMedCoord: <<mediation>>
+  from LedgerCoordinatorChannel [1] to CoordinatorEndpoint [1];
+
+relation coordJournalMedCoord: <<mediation>>
+  from CoordinatorJournalChannel [1] to CoordinatorJournalEndpoint [1];
+relation coordJournalMedStore: <<mediation>>
+  from CoordinatorJournalChannel [1] to JournalEndpoint [1];
+
+relation coordNotifyMedCoord: <<mediation>>
+  from CoordinatorNotificationChannel [1] to CoordinatorNotifyEndpoint [1];
+relation coordNotifyMedService: <<mediation>>
+  from CoordinatorNotificationChannel [1] to NotificationEndpoint [1];
+
+// ─── End-to-End Happenings ────────────────────────────────────────────────
+
+happening SuccessfulTransferFlow {
+  identity: flowId;
+  property flowId: String;
+  property transferId: String;
+  property triggeredBy: String;
+  property ledgerSnapshotStep: String;
+  property debitCreditStep: String;
+  property journalWriteStep: String;
+  property completionStep: String;
+  property notificationStep: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.transferId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}
+
+happening RollbackTransferFlow {
+  identity: flowId;
+  property flowId: String;
+  property transferId: String;
+  property triggeredBy: String;
+  property ledgerRestoreStep: String;
+  property coordinatorRollbackStep: String;
+  property notificationStep: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.transferId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}
+
+happening RecoveryTransferFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property pendingTransferId: String;
+  property recoveryDecision: String;
+  property ledgerActionStep: String;
+  property journalActionStep: String;
+  property notificationStep: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.pendingTransferId <> null;
+    self.recoveryDecision = 'COMPLETE' or self.recoveryDecision = 'ROLLBACK';
+    self.outcome <> null;
+  }
+}
+
+happening TimeoutRollbackFlow {
+  identity: flowId;
+  property flowId: String;
+  property transferId: String;
+  property triggeredBy: String;
+  property elapsedSeconds: Integer;
+  property ledgerRestoreStep: String;
+  property coordinatorRollbackStep: String;
+  property notificationStep: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.transferId <> null;
+    self.triggeredBy <> null;
+    self.elapsedSeconds > 0;
+    self.elapsedSeconds <= 30;
+    self.outcome <> null;
+  }
+}
+
+// ─── Architectural Decision Records ──────────────────────────────────────
+//
+// Design-stage commitments capturing key architectural choices.
+// debitor and creditor must be simple identifiers visible in this
+// namespace — local proxy agents are used for upstream stakeholders.
+
+// ADR-1: Four-component decomposition boundary.
+// The design team commits to the operator proxy that each component
+// owns exactly one concern and no component directly accesses
+// another component's state.
+commitment AdrComponentBoundary
+  debitor: DesignTeam
+  creditor: DesignOperatorProxy {
+    identity: adrId;
+    property adrId: String;
+    property rationale: String;
+    predicate: self.adrId <> null;
+  }
+
+// ADR-2: Journal-before-notification ordering is structurally enforced
+// via the CoordinatorNotificationChannel invariant and the
+// journalConfirmed parameter on sendSuccessNotification.
+commitment AdrJournalOrderingEnforcement
+  debitor: DesignTeam
+  creditor: DesignRegulatorProxy {
+    identity: adrId;
+    property adrId: String;
+    property rationale: String;
+    predicate: self.adrId <> null;
+  }
+
+// ADR-3: Rollback atomicity is guaranteed by AccountLedger
+// restoreSnapshot, which restores both balances in a single
+// post-condition conjunction — never one side at a time.
+commitment AdrRollbackAtomicity
+  debitor: DesignTeam
+  creditor: DesignCustomerProxy {
+    identity: adrId;
+    property adrId: String;
+    property rationale: String;
+    predicate: self.adrId <> null;
+  }

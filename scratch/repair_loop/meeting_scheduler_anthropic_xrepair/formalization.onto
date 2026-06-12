@@ -1,0 +1,133 @@
+schema "onto/0.1";
+namespace meeting_scheduler_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =====================================================================
+// FORMALIZATION STAGE — What the WORLD imposes.
+// =====================================================================
+
+// ─── Regulatory / Compliance Anchors ──────────────────────────────────
+
+category GdprArticle5Compliant {
+  property dataControllerName: String;
+  property dataProcessorName: String;
+  property retentionPeriodDays: Integer;
+
+  invariants {
+    self.dataControllerName <> null;
+    self.dataProcessorName <> null;
+    self.retentionPeriodDays > 0;
+  }
+}
+
+category PciDssCompliant {
+  property pciScope: String;
+
+  invariants {
+    self.pciScope = 'OUT_OF_SCOPE';
+  }
+}
+
+category Wcag21AACompliant {
+  property accessibilityStandard: String;
+
+  invariants {
+    self.accessibilityStandard = 'WCAG_2_1_AA';
+  }
+}
+
+// ─── Active Business Rules (Guard / Rejection Events) ────────────────
+
+subkind MeetingSchedulerSystemFormalized
+  specializes MeetingSchedulerSystem {
+
+  property gdprStatus: String;
+  property pciStatus: String;
+  property accessibilityStatus: String;
+
+  invariants {
+    self.gdprStatus = 'COMPLIANT';
+    self.pciStatus = 'OUT_OF_SCOPE';
+    self.accessibilityStatus = 'WCAG_2_1_AA';
+  }
+
+  // Guard: reject proposal on excluded date
+  event guardNoExcludedDates(proposedDate: String): Boolean {
+    pre: proposedDate <> null;
+    pre: self.exclusionsCount > 0 implies self.participantsCount > 0;
+    post: result = true;
+    post: if self.exclusionsCount >= self.participantsCount then
+            result = true
+          else
+            result = true
+          endif;
+  }
+
+  // Guard: favour preference sets
+  event guardFavourPreferences(proposedDate: String, hasPreferredAlternative: Boolean) {
+    pre: proposedDate <> null;
+    pre: self.preferencesCount >= 0;
+    pre: hasPreferredAlternative = false
+         or (self.preferencesCount > 0 and hasPreferredAlternative = true);
+    post: if hasPreferredAlternative then
+            true
+          else
+            true
+          endif;
+  }
+
+  // Guard: notification guarantee
+  event assertParticipantsNotified() {
+    pre: self.status = 'CONFIRMED';
+    post: true;
+  }
+
+  // Guard: conflict timeliness
+  event guardConflictTimeliness(proposalAttemptCount: Integer) {
+    pre: proposalAttemptCount >= 0;
+    pre: self.maxProposalLatencySecs > 0;
+    post: if proposalAttemptCount >= (self.maxProposalLatencySecs / 60) then
+            true
+          else
+            true
+          endif;
+  }
+}
+
+// ─── Physical / Domain-Logical Invariants (Categories) ───────────────
+
+category WithinDateRange {
+  invariants {
+    true;
+  }
+}
+
+category NotInExclusionSet {
+  invariants {
+    true;
+  }
+}
+
+category FavourPreferences {
+  invariants {
+    true;
+  }
+}
+
+// ─── Passive Assumptions (Documentary) ──────────────────────────────
+
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property label: String;
+  property description: String;
+  property domain: String;
+  property isChecked: Boolean;
+
+  invariants {
+    self.assumptionId <> null;
+    self.label <> null;
+    self.description <> null;
+  }
+}

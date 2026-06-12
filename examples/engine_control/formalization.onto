@@ -1,0 +1,347 @@
+schema "onto/0.1";
+namespace engine_control_formalization;
+
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =====================================================================
+// Formalization — Engine Control System
+//
+// This stage captures what the WORLD imposes on the engine controller:
+//   1. Regulatory / compliance anchors as 'category' kinds with
+//      documentary invariants (DO-178C, DO-254, CS-E / FAR-33,
+//      ARP4761 safety assessment).
+//   2. Active business rules as new events on the formalized subkind
+//      EngineControlSystemFormalized specializes EngineControlSystem.
+//      These add rejection / guard events without overriding parent events.
+//   3. Passive world assumptions as a 'kind' (FormalAssumptionRecord)
+//      with documentary properties — NOT as events.
+//   4. Physical / domain-logical invariants as 'category' kinds.
+//
+// Regulatory anchors referenced:
+//   DO-178C  — Software Considerations in Airborne Systems (DAL A)
+//   DO-254   — Design Assurance Guidance for Airborne Electronic Hardware
+//   CS-E / FAR Part 33  — Airworthiness Standards: Aircraft Engines
+//   ARP4761  — Guidelines and Methods for Conducting Safety Assessment
+//   ARP4754A — Guidelines for Development of Civil Aircraft and Systems
+// =====================================================================
+
+// ─────────────────────────────────────────────────────────────────────
+// SECTION 1 — Regulatory / Compliance Anchor Categories
+//
+// These are PASSIVE world-level anchors.  They impose documentary
+// invariants the system kind must satisfy.  The Formalized subkind
+// inherits them via the base kind's category specializations (declared
+// in requirements.onto) or via its own specializations below.
+// ─────────────────────────────────────────────────────────────────────
+
+// DO-178C Design Assurance Level A — software for catastrophic failure
+// conditions.  DAL-A requires MC/DC coverage and independence review.
+category Do178cDalACompliant {
+  property dalLevel: String;
+  property mcDcCoverageRequired: Boolean;
+  property independentReviewRequired: Boolean;
+  invariants {
+    // Passive / documentary — governs the development process, not
+    // runtime behaviour.  The system's software artefacts must be
+    // developed under DAL-A discipline.
+    self.dalLevel <> null;
+    self.mcDcCoverageRequired = true;
+    self.independentReviewRequired = true;
+  }
+}
+
+// DO-254 Design Assurance Level A — complex airborne electronic hardware.
+// Applies to FADEC hardware (ASICs, FPGAs, custom circuits).
+category Do254DalACompliant {
+  property hardwareDalLevel: String;
+  property elementalAnalysisRequired: Boolean;
+  invariants {
+    self.hardwareDalLevel <> null;
+    self.elementalAnalysisRequired = true;
+  }
+}
+
+// CS-E / FAR Part 33 — Engine airworthiness certification.
+// The engine control system must be within the scope of a certified
+// engine type design.  overspeedProtectionFitted variants must comply
+// with CS-E 1015 (overspeed protection) requirements.
+category CseFar33Compliant {
+  property typeCertificateNumber: String;
+  property csE1015OverspeedApplicable: Boolean;
+  // CS-E 535 continuous ignition must be demonstrated safe.
+  property csE535ContinuousIgnitionDemonstrated: Boolean;
+  invariants {
+    self.typeCertificateNumber <> null;
+  }
+}
+
+// ARP4761 — System safety assessment (FHA / FMEA / FTA).
+// All hazardous / catastrophic failure conditions must be assessed.
+// Overspeed with loss of fuel-limiting protection is catastrophic.
+category Arp4761SafetyAssessed {
+  property functionalHazardAssessmentRef: String;
+  property faultTreeAnalysisRef: String;
+  property failureModeEffectsAnalysisRef: String;
+  property catastrophicFailureConditionsCovered: Boolean;
+  invariants {
+    self.functionalHazardAssessmentRef <> null;
+    self.faultTreeAnalysisRef <> null;
+    self.catastrophicFailureConditionsCovered = true;
+  }
+}
+
+// ARP4754A — System development process assurance.
+// Captures the system-level development assurance level (DAL A for the
+// engine control function given catastrophic failure category).
+category Arp4754aAssured {
+  property systemDalLevel: String;
+  property requirementsValidationEvidenceRef: String;
+  property verificationEvidenceRef: String;
+  invariants {
+    self.systemDalLevel <> null;
+    self.requirementsValidationEvidenceRef <> null;
+    self.verificationEvidenceRef <> null;
+  }
+}
+
+// Physical / domain-logical invariant category:
+// Engine rotational speed and fuel flow obey physical laws —
+// non-negative, bounded by type-certified maximum.
+category PhysicallyPlausibleEngineState {
+  invariants {
+    // Captured documentarily; the concrete bounds are on the system kind.
+    // A speed or fuel flow below zero is physically impossible.
+    true;
+  }
+}
+
+// Variant-conditional behaviour category:
+// Not all variants carry every protection function; the presence of a
+// protection function is declared on the variant and must remain
+// consistent throughout operation.
+category VariantConditionalProtection {
+  invariants {
+    // The protection-fitted flag is immutable once the system is
+    // configured for a variant — it is a design-time constant.
+    true;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SECTION 2 — Passive World Assumptions
+//
+// These are things the world GUARANTEES to the system that the system
+// cannot enforce at runtime but must document.  Modelled as a kind with
+// documentary properties and '@assumption' annotations.
+// ─────────────────────────────────────────────────────────────────────
+
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property assumptionTag: String;   // e.g. 'ASSUME-1'
+  property statement: String;
+  property rationale: String;
+  property derivedFrom: String;     // requirement or hazard ID
+
+  invariants {
+    self.assumptionId <> null;
+    self.assumptionTag <> null;
+    self.statement <> null;
+  }
+}
+
+// @assumption ASSUME-1: The weight-on-wheels (WoW) discrete signal
+//   correctly reflects aircraft ground / flight state.  The system
+//   trusts this signal without independent cross-check.  If WoW is
+//   erroneous the ground-only reverser guard may be bypassed.
+//   Source: CS-E / FAR-33 environmental conditions + ARP4761 FHA.
+
+// @assumption ASSUME-2: The certified maximum engine speed (maxSafeSpeed)
+//   is loaded into the system as a configuration constant at build time
+//   and cannot be altered at runtime.  Its correctness is a type-cert
+//   obligation, not a runtime obligation of the controller.
+
+// @assumption ASSUME-3: The modelled-value generator (sensor fusion /
+//   observer) produces estimates that, under a single-sensor fault,
+//   remain within a bounded error of the true value sufficient for
+//   safe control law operation.  This bound is validated offline via
+//   simulation (DO-178C verification activity), not enforced here.
+
+// @assumption ASSUME-4: Hardware watchdog circuits independent of the
+//   software control law will de-energise the fuel metering valve if
+//   the software fails to execute within its schedule period.  The
+//   software model here does not model the watchdog.
+
+// ─────────────────────────────────────────────────────────────────────
+// SECTION 3 — Active Business Rules
+//
+// Formalized subkind adds rejection / guard events.
+// It DOES NOT override any parent event (Liskov-Wing safety).
+//
+// Subkind rule (S21): a subkind can only specialize a kind or another
+// subkind — NOT a category.  The regulatory categories are expressed
+// via the BASE KIND's specializes clause in requirements.onto (they
+// inherit downward) so we do NOT re-specialize them here.
+// ─────────────────────────────────────────────────────────────────────
+
+subkind EngineControlSystemFormalized specializes EngineControlSystem {
+
+  // ── Additional formalization properties ──────────────────────────
+  // Tracks whether a reverser-in-flight attempt was rejected (audit log
+  // signal, required by ARP4761 for catastrophic-condition evidence).
+  property reverserInFlightAttemptRejected: Boolean;
+
+  // Tracks whether an overspeed command was received on an unprotected
+  // variant (documentary / maintenance alert).
+  property unprotectedOverspeedAlertIssued: Boolean;
+
+  // ══════════════════════════════════════════════════════════════════
+  // BR-1  Reject Thrust Reverser Deployment While Airborne
+  //
+  // Regulatory anchor: CS-E / ARP4761 — in-flight reverser deployment
+  // is classified as a catastrophic failure condition.  This active
+  // business rule makes the rejection explicit and auditable.
+  //
+  // This is a PURE REJECTION event: it changes only the audit flag;
+  // no reverser state changes occur.
+  // ══════════════════════════════════════════════════════════════════
+  event rejectReverserIfAirborne() {
+    pre: self.aircraftInFlight = true;
+    pre: self.reverserDeploymentEnabled = false;
+    post: self.reverserInFlightAttemptRejected = true;
+    modifies: self.reverserInFlightAttemptRejected;
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // BR-2  Reject Overspeed Fuel-Limit Request on Unprotected Variant
+  //
+  // Regulatory anchor: CS-E 1015 — overspeed protection is a
+  // variant-specific fitment.  Attempting to invoke the fuel-limit
+  // function on a variant without the protection fitted must be
+  // explicitly rejected and flagged (maintenance alert path).
+  //
+  // Note: the parent event limitFuelOnOverspeed already pre-requires
+  // overspeedProtectionFitted = true, so this event handles the
+  // complementary case and raises the alert.
+  // ══════════════════════════════════════════════════════════════════
+  event rejectOverspeedLimitOnUnprotectedVariant(detectedSpeed: Real) {
+    pre: self.overspeedProtectionFitted = false;
+    pre: detectedSpeed >= self.maxSafeSpeed;
+    post: self.unprotectedOverspeedAlertIssued = true;
+    modifies: self.unprotectedOverspeedAlertIssued;
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // BR-3  Reject Continuous Ignition Deactivation During Hazardous
+  //       Flight Phases
+  //
+  // Regulatory anchor: CS-E 535 — continuous ignition must remain
+  // active during take-off, approach, and icing conditions.  The
+  // system must block deactivation if the flight phase requires it.
+  //
+  // 'hazardousPhaseRequiresContinuousIgnition' is a runtime signal
+  // provided by the flight management interface.
+  // ══════════════════════════════════════════════════════════════════
+  event rejectIgnitionDeactivationInHazardousPhase() {
+    pre: self.continuousIgnitionActive = true;
+    pre: self.aircraftInFlight = true;
+    // Pre-condition stands in for the hazardous-phase signal: if the
+    // system is in flight AND continuous ignition is commanded active,
+    // deactivation is rejected by this guard.
+    post: self.continuousIgnitionActive = true;
+    modifies: self.continuousIgnitionActive;
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // BR-4  Enforce Fuel Flow Zero When Engine Speed Violates Maximum
+  //       (Invariant Enforcement Guard)
+  //
+  // Regulatory anchor: CS-E 1015 / ARP4761 catastrophic-condition
+  // mitigation.  Even if limitFuelOnOverspeed has not been explicitly
+  // called, any state where engineSpeed > maxSafeSpeed is physically
+  // inadmissible.  This guard event actively brings fuelFlow to zero
+  // if a transient violation is detected (defence-in-depth).
+  //
+  // Applies ONLY on variants with protection fitted.
+  // ══════════════════════════════════════════════════════════════════
+  event enforceFuelCutOnSpeedViolation() {
+    pre: self.engineSpeed > self.maxSafeSpeed;
+    pre: self.overspeedProtectionFitted = true;
+    post: self.fuelFlow = 0.0;
+    modifies: self.fuelFlow;
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // BR-5  Reject Thrust Command When Sensor Fault Active and Modelled
+  //       Value Not Yet Substituted
+  //
+  // Regulatory anchor: ARP4761 / DO-178C — the control law must not
+  // act on a known-faulty sensor reading.  If sensorFaultDetected is
+  // true but usingModelledValue is still false (the substitution event
+  // has not yet fired), any new thrust command must be held / rejected
+  // until substitution is confirmed.
+  // ══════════════════════════════════════════════════════════════════
+  event rejectThrustCommandPendingSubstitution(commanded: Real) {
+    pre: self.sensorFaultDetected = true;
+    pre: self.usingModelledValue = false;
+    pre: commanded >= 0.0;
+    // Pure rejection — commanded thrust is NOT updated; no state change.
+    post: self.usingModelledValue = false;
+    modifies: self.usingModelledValue;
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // BR-6  Force Reverser Disable on Transition to Flight
+  //       (Explicit Formalization Guard)
+  //
+  // Regulatory anchor: CS-E / ARP4761 — the transition-to-flight event
+  // in requirements already posts reverserDeploymentEnabled = false.
+  // This formalization guard makes the obligation EXPLICIT as a named
+  // rule so that the ARP4761 FTA trace can reference it directly.
+  //
+  // It fires when the system is about to become airborne and the
+  // reverser is still enabled — an error state that must be resolved
+  // before completing the transition.
+  // ══════════════════════════════════════════════════════════════════
+  event forceReverserDisableBeforeFlight() {
+    pre: self.aircraftInFlight = false;
+    pre: self.reverserDeploymentEnabled = true;
+    post: self.reverserDeploymentEnabled = false;
+    modifies: self.reverserDeploymentEnabled;
+  }
+
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// SECTION 4 — Explicit Relations
+// ─────────────────────────────────────────────────────────────────────
+
+// Mediation: EngineControlSystem (via relator) to Engine glossary kind.
+// A relator is required between two kinds; we introduce a thin
+// EngineBinding relator for this structural link.
+relator EngineBinding mediates (EngineControlSystemFormalized, Engine) {
+  identity: bindingId;
+  property bindingId: String;
+  property assignedVariant: String;
+  invariants {
+    self.bindingId <> null;
+    self.assignedVariant <> null;
+  }
+}
+
+// Mediation: EngineControlSystem to Sensor (for each monitored sensor).
+relator SensorBinding mediates (EngineControlSystemFormalized, Sensor) {
+  identity: sensorBindingId;
+  property sensorBindingId: String;
+  property sensorRole: String;   // e.g. 'SPEED_PRIMARY', 'SPEED_BACKUP'
+  invariants {
+    self.sensorBindingId <> null;
+    self.sensorRole <> null;
+  }
+}
+
+relation engineBindingMed1: <<mediation>> from EngineBinding [1] to EngineControlSystemFormalized [1];
+relation engineBindingMed2: <<mediation>> from EngineBinding [1] to Engine [1];
+relation sensorBindingMed1: <<mediation>> from SensorBinding [1] to EngineControlSystemFormalized [1];
+relation sensorBindingMed2: <<mediation>> from SensorBinding [1] to Sensor [1..*];

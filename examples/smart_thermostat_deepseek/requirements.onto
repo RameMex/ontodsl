@@ -1,0 +1,138 @@
+schema "onto/0.1";
+namespace smart_thermostat_requirements;
+import "./discovery.onto";
+
+kind ThermostatSystem specializes TemperatureSafetyConstraints,
+                            SensorPlausibilityConstraints,
+                            CyclingProtectionConstraints {
+  identity: systemId;
+  property systemId: String;
+  property safeMinSetpoint: Real;
+  property safeMaxSetpoint: Real;
+  property sensorPlausibilityMin: Real;
+  property sensorPlausibilityMax: Real;
+  property faultAlertActive: Boolean;
+  property minCycleIntervalSecs: Real;
+  property currentTemperature: Real;
+  property currentSetpoint: Real;
+  property currentActuatorCommand: String;
+  property lastCommandTimestamp: Real;
+  property halted: Boolean;
+
+  invariants {
+    self.systemId <> null;
+    self.safeMinSetpoint >= 40.0;
+    self.safeMaxSetpoint <= 90.0;
+    self.sensorPlausibilityMin <= -40.0;
+    self.sensorPlausibilityMax >= 150.0;
+    self.minCycleIntervalSecs >= 300.0;
+    self.currentTemperature <> null;
+    self.currentSetpoint <> null;
+    self.currentActuatorCommand <> null;
+    self.lastCommandTimestamp >= 0.0;
+  }
+
+  event setUserSetpoint(requestedSetpoint: Real)
+    refines smart_thermostat_discovery::SafeSetpointCommitment,
+            smart_thermostat_discovery::DisplayStateCommitment {
+    pre: not self.halted;
+    pre: requestedSetpoint >= -100.0;
+    post: self.currentSetpoint = if requestedSetpoint < self.safeMinSetpoint then self.safeMinSetpoint
+                                 else if requestedSetpoint > self.safeMaxSetpoint then self.safeMaxSetpoint
+                                 else requestedSetpoint endif endif;
+    post: self.currentTemperature = self.currentTemperature@pre;
+    post: self.currentActuatorCommand = self.currentActuatorCommand@pre;
+    post: self.lastCommandTimestamp = self.lastCommandTimestamp@pre;
+    modifies: self.currentSetpoint;
+  }
+
+  event processSensorReading(reading: Real, timestamp: Real)
+    refines smart_thermostat_discovery::PlausibleSensorCommitment {
+    pre: reading >= -200.0;
+    pre: reading <= 200.0;
+    pre: timestamp >= 0.0;
+
+    post: if reading >= self.sensorPlausibilityMin and reading <= self.sensorPlausibilityMax and not self.halted then
+            self.currentTemperature = reading
+            and
+            self.currentActuatorCommand =
+              if reading < self.currentSetpoint - 1.0 then 'HEAT'
+              else if reading > self.currentSetpoint + 1.0 then 'COOL'
+              else 'OFF' endif endif
+          else if reading >= self.sensorPlausibilityMin and reading <= self.sensorPlausibilityMax and self.halted then
+            self.currentTemperature = reading
+            and
+            self.currentActuatorCommand = 'OFF'
+            and
+            self.halted = true
+            and
+            self.faultAlertActive = true
+          else
+            self.halted = true
+            and
+            self.faultAlertActive = true
+            and
+            self.currentActuatorCommand = 'OFF'
+            and
+            self.currentTemperature = self.currentTemperature@pre
+          endif endif;
+
+    post: if (reading >= self.sensorPlausibilityMin and reading <= self.sensorPlausibilityMax and not self.halted@pre) then
+            self.lastCommandTimestamp = timestamp
+          else
+            self.lastCommandTimestamp = self.lastCommandTimestamp@pre
+          endif;
+
+    modifies: self.currentTemperature, self.currentActuatorCommand,
+              self.halted, self.faultAlertActive, self.lastCommandTimestamp;
+  }
+
+  event requestCommandTransition(newCommand: String, timestamp: Real)
+    refines smart_thermostat_discovery::CyclingLimitCommitment {
+    pre: newCommand = 'HEAT' or newCommand = 'COOL' or newCommand = 'OFF';
+    pre: timestamp >= 0.0;
+    pre: not self.halted;
+
+    post: if newCommand <> self.currentActuatorCommand@pre then
+            if timestamp - self.lastCommandTimestamp@pre >= self.minCycleIntervalSecs then
+              self.currentActuatorCommand = newCommand
+              and
+              self.lastCommandTimestamp = timestamp
+            else
+              self.currentActuatorCommand = self.currentActuatorCommand@pre
+              and
+              self.lastCommandTimestamp = self.lastCommandTimestamp@pre
+            endif
+          else
+            self.currentActuatorCommand = self.currentActuatorCommand@pre
+            and
+            self.lastCommandTimestamp = timestamp
+          endif;
+
+    post: self.currentTemperature = self.currentTemperature@pre;
+    post: self.currentSetpoint = self.currentSetpoint@pre;
+    post: self.halted = self.halted@pre;
+    post: self.faultAlertActive = self.faultAlertActive@pre;
+
+    modifies: self.currentActuatorCommand, self.lastCommandTimestamp;
+  }
+
+  event displayCurrentState(): Real {
+    pre: true;
+    post: result = self.currentTemperature;
+  }
+
+  event initialize()
+    refines smart_thermostat_discovery::FaultNotificationCommitment {
+    pre: self.systemId <> null;
+    post: self.halted = false;
+    post: self.faultAlertActive = false;
+    post: self.currentSetpoint = 72.0;
+    post: self.currentTemperature = 72.0;
+    post: self.currentActuatorCommand = 'OFF';
+    post: self.lastCommandTimestamp = 0.0;
+    modifies: self.halted, self.faultAlertActive, self.currentSetpoint,
+              self.currentTemperature, self.currentActuatorCommand,
+              self.lastCommandTimestamp;
+  }
+}

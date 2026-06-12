@@ -1,0 +1,337 @@
+schema "onto/0.1";
+namespace appointment_clinic_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// DESIGN — Decomposition into cohesive components.
+//
+// Fix: CancellationFlow and AppointmentBookingFlow are already declared
+// in discovery.onto. We do NOT redeclare them. We only declare new
+// Design-stage happenings that reference Design-stage component types.
+// =====================================================================
+
+// ─────────────────────────────────────────────────────────────────────
+// COMPONENT: AppointmentBooker
+// Responsibility: Validate booking constraints and write the booking
+//   iff all checks pass. Owns the appointment data model.
+// Implements: FR-1 (bookAppointment) from Requirements.
+// ─────────────────────────────────────────────────────────────────────
+kind AppointmentBooker {
+  identity: bookerId;
+  property bookerId: String;
+
+  property appointmentClinicianIds: Set<String>;
+  property appointmentPatientIds: Set<String>;
+  property appointmentStartTimes: Set<Real>;
+  property appointmentEndTimes: Set<Real>;
+  property appointments: Set<AppointmentSlot>;
+
+  invariants {
+    self.bookerId <> null;
+  }
+
+  event bookAppointment(patientId: String,
+                        clinicianId: String,
+                        serviceName: String,
+                        window: AvailabilityWindow,
+                        slotStart: Real,
+                        slotEnd: Real): Boolean
+    refines appointment_clinic_requirements::AppointmentSchedulerSystem.bookAppointment {
+    pre: patientId <> null;
+    pre: clinicianId <> null;
+    pre: serviceName <> null;
+    pre: slotStart >= 0.0;
+    pre: slotEnd > slotStart;
+    pre: window <> null;
+    pre: slotStart >= window.windowStartEpoch;
+    pre: slotEnd <= window.windowEndEpoch;
+    post: if result then
+            self.appointmentClinicianIds->includes(clinicianId) and
+            self.appointmentPatientIds->includes(patientId)
+          else
+            true
+          endif;
+    modifies: self.appointmentClinicianIds,
+              self.appointmentPatientIds,
+              self.appointmentStartTimes,
+              self.appointmentEndTimes,
+              self.appointments;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// COMPONENT: AvailabilityManager
+// Responsibility: Manage and query clinician availability windows.
+// Implements: FR-3 (updateAvailability) from Requirements.
+// ─────────────────────────────────────────────────────────────────────
+kind AvailabilityManager {
+  identity: managerId;
+  property managerId: String;
+
+  property clinicianIds: Set<String>;
+  property windowStarts: Set<Real>;
+  property windowEnds: Set<Real>;
+
+  invariants {
+    self.managerId <> null;
+    true;
+  }
+
+  event updateAvailability(clinicianId: String, newWindow: AvailabilityWindow)
+    refines appointment_clinic_requirements::AppointmentSchedulerSystem.updateAvailability {
+    pre: clinicianId <> null;
+    pre: newWindow <> null;
+    pre: newWindow.windowStartEpoch >= 0.0;
+    pre: newWindow.windowEndEpoch > newWindow.windowStartEpoch;
+    post: self.clinicianIds->includes(clinicianId);
+    modifies: self.clinicianIds,
+              self.windowStarts,
+              self.windowEnds;
+  }
+
+  event checkSlotWithinWindow(slot: AppointmentSlot,
+                              window: AvailabilityWindow): Boolean
+    refines appointment_clinic_formalization::AppointmentSchedulerSystemFormalized.rejectOutsideAvailabilityWindow {
+    pre: slot <> null;
+    pre: window <> null;
+    pre: slot.startTimeEpoch >= 0.0;
+    pre: slot.endTimeEpoch > slot.startTimeEpoch;
+    pre: window.windowStartEpoch >= 0.0;
+    pre: window.windowEndEpoch > window.windowStartEpoch;
+    post: result = (slot.startTimeEpoch >= window.windowStartEpoch and
+                    slot.endTimeEpoch <= window.windowEndEpoch);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// COMPONENT: CancellationHandler
+// Responsibility: Handle appointment cancellations and enforce late-fee
+//   recording when the cancellation is within 24 hours.
+// Implements: FR-2 (cancelAppointment) from Requirements.
+// ─────────────────────────────────────────────────────────────────────
+kind CancellationHandler {
+  identity: cancelId;
+  property cancelId: String;
+
+  property lateFeeEvents: Set<LateFeeEvent>;
+  property appointmentIds: Set<String>;
+  property cancellationTimestamps: Set<Real>;
+
+  invariants {
+    self.cancelId <> null;
+  }
+
+  event cancelAppointment(slot: AppointmentSlot,
+                          cancellationTimeEpoch: Real): Boolean
+    refines appointment_clinic_requirements::AppointmentSchedulerSystem.cancelAppointment {
+    pre: slot <> null;
+    pre: cancellationTimeEpoch >= 0.0;
+    post: self.appointmentIds->includes(slot.slotId);
+    post: if (slot.startTimeEpoch - cancellationTimeEpoch < 86400.0)
+          then
+            self.lateFeeEvents->size() = self.lateFeeEvents@pre->size() + 1
+          else
+            true
+          endif;
+    modifies: self.appointmentIds,
+              self.cancellationTimestamps,
+              self.lateFeeEvents;
+  }
+
+  event isLateCancellation(slot: AppointmentSlot,
+                           cancellationTimeEpoch: Real): Boolean {
+    pre: slot <> null;
+    pre: cancellationTimeEpoch >= 0.0;
+    pre: slot.startTimeEpoch >= 0.0;
+    post: result = (slot.startTimeEpoch - cancellationTimeEpoch < 86400.0);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// COMPONENT: LateFeeRecorder
+// Responsibility: Record and manage late-fee events tied to patient
+//   billing records.
+// Implements: FR-4 (recordLateFeePayment) from Requirements.
+// ─────────────────────────────────────────────────────────────────────
+kind LateFeeRecorder {
+  identity: recorderId;
+  property recorderId: String;
+
+  property feeEvents: Set<LateFeeEvent>;
+  property patientBillingIds: Set<String>;
+  property feeAmounts: Set<Real>;
+
+  invariants {
+    self.recorderId <> null;
+  }
+
+  event recordLateFeePayment(feeEvent: LateFeeEvent,
+                              patientBillingId: String)
+    refines appointment_clinic_requirements::AppointmentSchedulerSystem.recordLateFeePayment {
+    pre: feeEvent <> null;
+    pre: patientBillingId <> null;
+    pre: feeEvent.amount > 0.0;
+    post: self.feeEvents->includes(feeEvent);
+    post: self.patientBillingIds->includes(patientBillingId);
+    modifies: self.feeEvents,
+              self.patientBillingIds,
+              self.feeAmounts;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// INTERFACE: BookingValidation
+// ─────────────────────────────────────────────────────────────────────
+role AvailabilityValidator mediated-by BookingValidation of AvailabilityManager {
+  property managerId: String;
+}
+
+role BookingRequester mediated-by BookingValidation of AppointmentBooker {
+  property bookerId: String;
+}
+
+relator BookingValidation mediates (BookingRequester, AvailabilityValidator) {
+  identity: validationId;
+  property validationId: String;
+  property bookerId: String;
+  property managerId: String;
+  property lastCheckedSlotId: String;
+  property lastCheckPassed: Boolean;
+
+  invariants {
+    self.validationId <> null;
+    self.bookerId <> null;
+    self.managerId <> null;
+    self.lastCheckedSlotId <> null;
+  }
+
+  event validateSlotAgainstWindow(slot: AppointmentSlot,
+                                   window: AvailabilityWindow): Boolean {
+    pre: slot <> null;
+    pre: window <> null;
+    post: result = (slot.startTimeEpoch >= window.windowStartEpoch and
+                    slot.endTimeEpoch <= window.windowEndEpoch);
+    post: self.lastCheckedSlotId = slot.slotId;
+    post: self.lastCheckPassed = result;
+    modifies: self.lastCheckedSlotId, self.lastCheckPassed;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// INTERFACE: FeeInterface
+// ─────────────────────────────────────────────────────────────────────
+role CancellationDetector mediated-by FeeInterface of CancellationHandler {
+  property cancelHandlerId: String;
+}
+
+role FeeRecorderEndpoint mediated-by FeeInterface of LateFeeRecorder {
+  property recorderId: String;
+}
+
+relator FeeInterface mediates (CancellationDetector, FeeRecorderEndpoint) {
+  identity: feeInterfaceId;
+  property feeInterfaceId: String;
+  property cancelHandlerId: String;
+  property recorderId: String;
+  property lastFeeEventId: String;
+  property lastFeeAmount: Real;
+
+  invariants {
+    self.feeInterfaceId <> null;
+    self.cancelHandlerId <> null;
+    self.recorderId <> null;
+    self.lastFeeEventId <> null;
+    self.lastFeeAmount >= 0.0;
+  }
+
+  event requestFeeRecording(feeEvent: LateFeeEvent) {
+    pre: feeEvent <> null;
+    pre: feeEvent.amount > 0.0;
+    post: self.lastFeeEventId = feeEvent.feeEventId;
+    post: self.lastFeeAmount = feeEvent.amount;
+    modifies: self.lastFeeEventId, self.lastFeeAmount;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// HAPPENINGS — only NEW Design-stage flows that reference Design types.
+// CancellationFlow and AppointmentBookingFlow from discovery.onto
+// are NOT redeclared here.
+// ─────────────────────────────────────────────────────────────────────
+
+// Design-level booking flow with component references.
+happening BookingFlow {
+  identity: flowId;
+  property flowId: String;
+  property patientId: String;
+  property clinicianId: String;
+  property serviceName: String;
+  property slot: AppointmentSlot;
+  property window: AvailabilityWindow;
+  property bookerRef: AppointmentBooker;
+  property managerRef: AvailabilityManager;
+  property outcome: String;
+  property rejectionReason: String;
+
+  invariants {
+    self.flowId <> null;
+    self.patientId <> null;
+    self.clinicianId <> null;
+    self.slot <> null;
+    self.window <> null;
+    self.bookerRef <> null;
+    self.managerRef <> null;
+    self.outcome <> null;
+  }
+}
+
+// Design-level cancellation flow with component references.
+happening DesignCancellationFlow {
+  identity: flowId;
+  property flowId: String;
+  property appointmentId: String;
+  property cancellationTimeEpoch: Real;
+  property isLate: Boolean;
+  property cancelHandlerRef: CancellationHandler;
+  property feeRecorderRef: LateFeeRecorder;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.appointmentId <> null;
+    self.cancellationTimeEpoch >= 0.0;
+    self.cancelHandlerRef <> null;
+    self.outcome <> null;
+  }
+}
+
+// Availability update flow with component references.
+happening AvailabilityUpdateFlow {
+  identity: flowId;
+  property flowId: String;
+  property clinicianId: String;
+  property oldWindow: AvailabilityWindow;
+  property newWindow: AvailabilityWindow;
+  property managerRef: AvailabilityManager;
+  property bookerRef: AppointmentBooker;
+  property flaggingOutcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.clinicianId <> null;
+    self.oldWindow <> null;
+    self.newWindow <> null;
+    self.managerRef <> null;
+    self.flaggingOutcome <> null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// EXPLICIT RELATIONS (OntoUML stereotypes)
+// ─────────────────────────────────────────────────────────────────────
+relation bookerAvailabilityMed: <<mediation>> from BookingValidation [1] to BookingRequester [1];
+relation availabilityValidatorMed: <<mediation>> from BookingValidation [1] to AvailabilityValidator [1];
+relation cancelFeeMed: <<mediation>> from FeeInterface [1] to CancellationDetector [1];
+relation feeRecorderMed: <<mediation>> from FeeInterface [1] to FeeRecorderEndpoint [1];

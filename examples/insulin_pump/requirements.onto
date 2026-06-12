@@ -1,0 +1,264 @@
+schema "onto/0.1";
+namespace insulin_pump_requirements;
+import "./discovery.onto";
+
+// =====================================================================
+// Requirements stage — insulin pump control system
+//
+// The system as a black box. InsulinPumpSystem is the single kind
+// whose events are the functional requirements. Non-functional
+// concerns are modeled as quality properties with invariants.
+//
+// Refinement obligations:
+//   - Every commitment from discovery must be discharged by an event's
+//     post-condition in this file.
+//   - Each event's post must imply the corresponding commitment
+//     predicate (inter-stage verifier will prove this with Z3).
+//
+// Commitment-to-event traceability:
+//   CorrectDoseCommitment     -> deliverInsulin
+//   FailSafeCommitment        -> runSelfTest, haltOnFault
+//   PatientAlertCommitment    -> raiseAlarm, checkReservoir
+//   ClinicianConfigCommitment -> configureSafeMax
+// =====================================================================
+
+// ─── System kind ──────────────────────────────────────────────────────
+
+kind InsulinPumpSystem {
+  identity: systemId;
+
+  // --- Core operational state ---
+  property systemId: String;
+  property isOperating: Boolean;
+  property faultDetected: Boolean;
+
+  // --- Dose safety (GOAL-1) ---
+  // refines: insulin_pump_discovery::CorrectDoseCommitment
+  property safeMaxDoseUnits: Real;
+  property lastDoseDelivered: Real;
+  property currentBloodSugarMgDl: Real;
+  property bloodSugarRateMgDlPerMin: Real;
+
+  // --- Reservoir (GOAL-1, GOAL-3) ---
+  property reservoirUnits: Real;
+  property reservoirCapacityUnits: Real;
+  property lowReservoirThresholdUnits: Real;
+  property reservoirIsLow: Boolean;
+
+  // --- Fault / alarm (GOAL-2, GOAL-3) ---
+  property alarmActive: Boolean;
+  property alarmReason: String;
+
+  // --- Quality properties (non-functional requirements) ---
+  // NFR-1: sensor polled every 10 minutes (hard bound from user story).
+  property sensorReadingIntervalMin: Real;
+  // NFR-2: self-test must complete at least once per minute.
+  property selfTestPeriodMin: Real;
+  // NFR-3: fault response must occur within one self-test period.
+  property maxFaultResponseMin: Real;
+  // NFR-4: alarm raised within a bounded latency after condition.
+  property maxAlertLatencyMin: Real;
+
+  invariants {
+    self.systemId <> null;
+
+    // Dose safety — discharges DoseSafetyConstraints
+    self.safeMaxDoseUnits > 0.0;
+    self.lastDoseDelivered >= 0.0;
+    self.lastDoseDelivered <= self.safeMaxDoseUnits;
+
+    // Reservoir
+    self.reservoirCapacityUnits > 0.0;
+    self.reservoirUnits >= 0.0;
+    self.reservoirUnits <= self.reservoirCapacityUnits;
+    self.lowReservoirThresholdUnits > 0.0;
+    self.reservoirIsLow = (self.reservoirUnits < self.lowReservoirThresholdUnits);
+
+    // Fail-safe — discharges FailSafeConstraints
+    self.faultDetected = true implies self.isOperating = false;
+
+    // Alert — discharges AlertConstraints
+    (self.reservoirIsLow or self.faultDetected) implies self.alarmActive = true;
+
+    // Quality bounds
+    // refines: insulin_pump_discovery::CorrectDoseCommitment
+    self.sensorReadingIntervalMin > 0.0;
+    self.sensorReadingIntervalMin <= 10.0;
+    // refines: insulin_pump_discovery::FailSafeCommitment
+    self.selfTestPeriodMin > 0.0;
+    self.selfTestPeriodMin <= 1.0;
+    self.maxFaultResponseMin > 0.0;
+    self.maxFaultResponseMin <= 1.0;
+    // refines: insulin_pump_discovery::PatientAlertCommitment
+    self.maxAlertLatencyMin > 0.0;
+  }
+
+  // -------------------------------------------------------------------
+  // FR-1  deliverInsulin
+  // -------------------------------------------------------------------
+  // WHEN the sensor reads a blood-sugar value above the safe zone and
+  // rising, the system delivers an insulin dose proportional to the
+  // rate of rise, bounded by safeMaxDoseUnits.
+  //
+  // Refines: insulin_pump_discovery::CorrectDoseCommitment
+  //   discharge: result <= self.safeMaxDoseUnits
+  //              and self.sensorReadingIntervalMin <= 10.0
+  //
+  // AC-1a: dose is non-negative.
+  // AC-1b: dose does not exceed the configured safe maximum.
+  // AC-1c: reservoir is reduced by exactly the dose delivered.
+  // AC-1d: if blood sugar is inside the safe zone, dose is zero.
+  // -------------------------------------------------------------------
+  event deliverInsulin(
+    sugarMgDl: Real,
+    safeZoneLower: Real,
+    safeZoneUpper: Real,
+    riseRateMgDlPerMin: Real
+  ): Real {
+    pre: self.isOperating = true;
+    pre: not self.faultDetected;
+    pre: sugarMgDl >= 0.0;
+    pre: riseRateMgDlPerMin >= 0.0;
+    pre: safeZoneLower >= 0.0;
+    pre: safeZoneUpper > safeZoneLower;
+    pre: self.reservoirUnits > 0.0;
+
+    // AC-1b — discharges CorrectDoseCommitment predicate core
+    post: result <= self.safeMaxDoseUnits;
+    // AC-1a
+    post: result >= 0.0;
+    // AC-1d — no delivery when sugar is in the safe zone
+    post: (sugarMgDl >= safeZoneLower and sugarMgDl <= safeZoneUpper)
+            implies result = 0.0;
+    // AC-1c — reservoir decremented by the dose
+    post: self.reservoirUnits = self.reservoirUnits@pre - result;
+    // sensor interval quality bound preserved
+    post: self.sensorReadingIntervalMin <= 10.0;
+
+    modifies: self.reservoirUnits, self.lastDoseDelivered,
+              self.currentBloodSugarMgDl, self.bloodSugarRateMgDlPerMin;
+  }
+
+  // -------------------------------------------------------------------
+  // FR-2  runSelfTest
+  // -------------------------------------------------------------------
+  // The device runs a self-test at least once per selfTestPeriodMin.
+  // If the test detects a hardware fault faultDetected is set to true
+  // (haltOnFault must be called immediately afterwards by the caller).
+  //
+  // Refines: insulin_pump_discovery::FailSafeCommitment (detection side)
+  //
+  // AC-2a: after a successful test, faultDetected is unchanged.
+  // AC-2b: after a failing test, faultDetected is set to true.
+  // -------------------------------------------------------------------
+  event runSelfTest(passed: Boolean) {
+    pre: self.isOperating = true;
+
+    post: if passed then
+            self.faultDetected = self.faultDetected@pre
+          else
+            self.faultDetected = true
+          endif;
+    post: self.selfTestPeriodMin <= 1.0;
+
+    modifies: self.faultDetected;
+  }
+
+  // -------------------------------------------------------------------
+  // FR-3  haltOnFault
+  // -------------------------------------------------------------------
+  // On a detected fault the system immediately stops insulin delivery
+  // and activates the alarm.
+  //
+  // Refines: insulin_pump_discovery::FailSafeCommitment
+  //   discharge: self.maxFaultResponseMin > 0.0
+  //              and self.maxFaultResponseMin <= 1.0
+  //
+  // AC-3a: isOperating becomes false.
+  // AC-3b: alarmActive becomes true.
+  // AC-3c: alarmReason is set to 'FAULT'.
+  // -------------------------------------------------------------------
+  event haltOnFault(reason: String) {
+    pre: self.faultDetected = true;
+    pre: reason <> null;
+
+    post: self.isOperating = false;
+    post: self.alarmActive = true;
+    post: self.alarmReason = 'FAULT';
+    post: self.maxFaultResponseMin > 0.0;
+    post: self.maxFaultResponseMin <= 1.0;
+
+    modifies: self.isOperating, self.alarmActive, self.alarmReason;
+  }
+
+  // -------------------------------------------------------------------
+  // FR-4  raiseAlarm
+  // -------------------------------------------------------------------
+  // Surfaces a condition (low reservoir or malfunction) to the patient
+  // by activating the alarm with a coded reason.
+  //
+  // Refines: insulin_pump_discovery::PatientAlertCommitment
+  //   discharge: self.lowReservoirThresholdUnits > 0.0
+  //              and self.maxAlertLatencyMin > 0.0
+  //
+  // AC-4a: alarmActive is set to true.
+  // AC-4b: alarmReason is set to the provided reason code.
+  // AC-4c: reason is either 'LOW_RESERVOIR' or 'MALFUNCTION'.
+  // -------------------------------------------------------------------
+  event raiseAlarm(reason: String) {
+    pre: self.isOperating = true or self.faultDetected = true;
+    pre: reason = 'LOW_RESERVOIR' or reason = 'MALFUNCTION';
+
+    post: self.alarmActive = true;
+    post: self.alarmReason = reason;
+    post: self.lowReservoirThresholdUnits > 0.0;
+    post: self.maxAlertLatencyMin > 0.0;
+
+    modifies: self.alarmActive, self.alarmReason;
+  }
+
+  // -------------------------------------------------------------------
+  // FR-5  configureSafeMax
+  // -------------------------------------------------------------------
+  // Allows an authorised clinician to set the per-patient safe-maximum
+  // dose. The device must not be operating when reconfigured.
+  //
+  // Refines: insulin_pump_discovery::ClinicianConfigCommitment
+  //   discharge: safeMaxDoseUnits is configurable and remains positive
+  //
+  // AC-5a: new safe maximum is positive.
+  // AC-5b: system is not delivering when reconfigured.
+  // -------------------------------------------------------------------
+  event configureSafeMax(newMaxUnits: Real) {
+    pre: self.isOperating = false;
+    pre: newMaxUnits > 0.0;
+
+    post: self.safeMaxDoseUnits = newMaxUnits;
+    post: self.safeMaxDoseUnits > 0.0;
+
+    modifies: self.safeMaxDoseUnits;
+  }
+
+  // -------------------------------------------------------------------
+  // FR-6  checkReservoir
+  // -------------------------------------------------------------------
+  // Periodic check that updates the reservoirIsLow flag and triggers
+  // a low-reservoir alarm when the threshold is crossed.
+  //
+  // Refines: insulin_pump_discovery::PatientAlertCommitment
+  //   (low reservoir branch)
+  //
+  // AC-6a: reservoirIsLow reflects whether reservoirUnits < threshold.
+  // AC-6b: if low, alarmActive is set and reason is 'LOW_RESERVOIR'.
+  // -------------------------------------------------------------------
+  event checkReservoir() {
+    pre: self.isOperating = true;
+
+    post: self.reservoirIsLow =
+            (self.reservoirUnits < self.lowReservoirThresholdUnits);
+    post: self.reservoirIsLow implies self.alarmActive = true;
+    post: self.reservoirIsLow implies self.alarmReason = 'LOW_RESERVOIR';
+
+    modifies: self.reservoirIsLow, self.alarmActive, self.alarmReason;
+  }
+}

@@ -1,0 +1,70 @@
+schema "onto/0.1";
+namespace notification_system_requirements;
+import "./discovery.onto";
+
+kind NotificationDispatcherSystem specializes DeliveryGovernance, RetryPolicy {
+  identity: systemId;
+  property systemId: String;
+  property maxDeliveredPerChannel: Integer;
+  property allowedRetries: Integer;
+  property backoffBaseSeconds: Integer;
+  property alertThreshold: Integer;
+  property deliveryCount: Integer;
+  property retryCount: Integer;
+  property alertsRaisedCount: Integer;
+  property currentRetrySeconds: Integer;
+
+  invariants {
+    self.systemId <> null;
+    self.maxDeliveredPerChannel = 1;
+    self.allowedRetries <= 5;
+    self.backoffBaseSeconds >= 1;
+    self.alertThreshold = 5;
+    self.retryCount <= self.allowedRetries;
+    not (self.deliveryCount > 0 and self.alertsRaisedCount > 0);
+  }
+
+  event dispatchNotification(requestId: String, recipient: String, channels: String)
+    refines notification_system_discovery::ExactlyOnceDelivery,
+            notification_system_discovery::BoundedRetries {
+    pre: requestId <> null;
+    pre: recipient <> null;
+    pre: channels <> null;
+    pre: self.deliveryCount = 0;
+
+    post: self.deliveryCount >= self.deliveryCount@pre;
+    post: self.retryCount = 0;
+
+    modifies: self.deliveryCount, self.retryCount;
+  }
+
+  event attemptDelivery(requestId: String, channelId: String): Boolean
+    refines notification_system_discovery::ExponentialBackoff,
+            notification_system_discovery::ExactlyOnceDelivery {
+    pre: requestId <> null;
+    pre: channelId <> null;
+    pre: self.retryCount <= self.allowedRetries;
+
+    post: if result then
+            self.deliveryCount = self.deliveryCount@pre + 1
+          else
+            if self.retryCount@pre < self.allowedRetries then
+              self.retryCount = self.retryCount@pre + 1
+            else
+              self.alertsRaisedCount = self.alertsRaisedCount@pre + 1
+            endif
+          endif;
+
+    post: self.retryCount <= self.allowedRetries;
+
+    modifies: self.deliveryCount, self.retryCount, self.alertsRaisedCount;
+  }
+
+  event escalateFailure(requestId: String, channelId: String)
+    refines notification_system_discovery::FailureEscalation {
+    pre: requestId <> null;
+    pre: channelId <> null;
+    pre: self.alertsRaisedCount > 0;
+    pre: not (self.deliveryCount > 0);
+  }
+}

@@ -1,0 +1,27 @@
+schema "onto/0.1";
+namespace rxocl_banking_negative;
+
+// Negative test for Phase 24: a trace clause that the verifier MUST
+// reject because some event violates it.
+
+kind Account {
+  identity: accountId;
+  property accountId: String;
+  property balance: Real;
+
+  invariants {
+    self.balance >= 0.0;
+  }
+
+  trace {
+    // BOGUS: claims balance is bounded above by 100, but deposit can
+    // increase it past 100. Z3 should find a counterexample and emit S40.
+    always self.balance <= 100.0;
+  }
+
+  event deposit(amount: Real) {
+    pre: amount > 0.0;
+    post: self.balance = self.balance@pre + amount;
+    modifies: self.balance;
+  }
+}

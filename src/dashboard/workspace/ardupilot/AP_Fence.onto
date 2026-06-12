@@ -1,0 +1,108 @@
+schema "onto/0.1";
+namespace ardupilot_fence;
+
+// =====================================================================
+// UFO-A model of ArduPilot libraries/AC_Fence/AC_Fence.{h,cpp}.
+//
+// AC_Fence is the geofencing guard — enforces altitude ceiling /
+// floor, circle radius, and polygon-boundary inclusion. It runs on
+// every control loop and reports breaches to the failsafe layer.
+//
+// Modeled contract surface:
+//   * enable/disable_floor - toggle the floor check.
+//   * check() - returns a breach bitmask (0 = no breach).
+//   * pre_arm_check() - gate at takeoff time.
+//   * get_breach_count() - monotonic counter, never decreases.
+//   * The altitude/radius bounds are tunable parameters; we pin
+//     their non-negativity with class invariants.
+//
+// Out of scope here: the polygon-points ring buffer (variable-size,
+// would need Set<Point> + per-point invariants; deferred until OCL
+// has user-defined records).
+//
+// Generate with --rust-f32.
+// =====================================================================
+
+kind AC_Fence {
+  identity: fenceId;
+
+  property fenceId: String;
+
+  // Tunable bounds.
+  property altMaxM: Real default 100.0;
+  property altMinM: Real default 0.0;
+  property circleRadiusM: Real default 300.0;
+  property marginM: Real default 2.0;
+
+  // Runtime state.
+  property enabled: Boolean internal default false;
+  property floorEnabled: Boolean internal default true;
+  // Bitmask of currently breached fences (0 = none). Models the
+  // C++ `_breached_fences` uint8_t.
+  property breachedMask: Integer internal default 0;
+  // Monotonic count of total breaches since boot.
+  property breachCount: Integer internal default 0;
+
+  invariants {
+    self.fenceId <> null;
+    self.altMinM >= 0.0;
+    self.altMaxM >= self.altMinM;
+    self.circleRadiusM > 0.0;
+    self.marginM >= 0.0;
+    self.breachedMask >= 0;
+    self.breachCount >= 0;
+  }
+
+  // enable() — flips the bitmask. We model as a single boolean
+  // toggle for simplicity.
+  event enable() {
+    post: self.enabled = true;
+    modifies: self.enabled;
+  }
+
+  event disable() {
+    post: self.enabled = false;
+    post: self.breachedMask = 0;
+    modifies: self.enabled, self.breachedMask;
+  }
+
+  event enable_floor() {
+    post: self.floorEnabled = true;
+    modifies: self.floorEnabled;
+  }
+
+  event disable_floor() {
+    post: self.floorEnabled = false;
+    modifies: self.floorEnabled;
+  }
+
+  // Mirrors `check()` — runs all enabled fence checks and returns
+  // the new breach bitmask. Side effect: increments _breach_count
+  // if the new mask is non-zero (HardwareRead for altimeter / GPS).
+  event check(currentAltM: Real, currentRadiusM: Real): Integer {
+    pre: currentAltM.isFinite();
+    pre: currentRadiusM.isFinite();
+    pre: currentRadiusM >= 0.0;
+    effects: HardwareRead, Telemetry;
+    writes:  breachedMask, breachCount;
+    post: result >= 0;
+    post: self.breachedMask = result;
+    // Monotonic counter — never decreases.
+    post: self.breachCount >= self.breachCount@pre;
+    modifies: self.breachedMask, self.breachCount;
+  }
+
+  // pre_arm_check() — gate at takeoff. Returns true iff all enabled
+  // fences pass their startup sanity checks (params loaded, no
+  // initial breach, etc.).
+  event pre_arm_check(): Boolean {
+    effects: HardwareRead;
+    reads:   enabled, floorEnabled, altMaxM, altMinM, circleRadiusM;
+  }
+
+  // get_breach_count() — read-only accessor. Returns the field;
+  // post just pins the non-negative invariant on the result.
+  event get_breach_count(): Integer {
+    post: result >= 0;
+  }
+}

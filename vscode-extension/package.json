@@ -1,0 +1,52 @@
+{
+  "name": "ontodsl-vscode",
+  "displayName": "Onto DSL",
+  "description": "Language support for Onto DSL — ontology-contract-OCL DSL with diagnostics, hover, go-to-definition, completion, find references.",
+  "version": "0.4.0",
+  "publisher": "ontodsl",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onLanguage:onto"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "onto",
+        "aliases": [
+          "Onto DSL",
+          "onto"
+        ],
+        "extensions": [
+          ".onto"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "onto",
+        "scopeName": "source.onto",
+        "path": "./syntaxes/onto.tmLanguage.json"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3",
+    "@vscode/vsce": "^2.24.0"
+  }
+}

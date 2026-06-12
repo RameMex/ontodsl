@@ -1,0 +1,202 @@
+schema "onto/0.1";
+namespace online_banking_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =====================================================================
+// Formalization stage — online banking transaction processor
+//
+// What the WORLD imposes on the system:
+//   - Regulatory/compliance anchors as categories
+//   - Active business rules as new events (rejection/guard events)
+//   - Passive assumptions as documented properties
+//   - Physical/domain-logical invariants as member-quantified categories
+//
+// We extend the system kind via subkind BankingTransactionSystemFormalized
+// that specializes ONLY the BankingTransactionSystem kind (not categories).
+// Category membership is expressed via the parent kind's specializes clause
+// or by adding the system kind under the categories in the requirements file.
+// =====================================================================
+
+// ─── Regulatory/Compliance Anchors ──────────────────────────────────
+
+// PCI DSS (Payment Card Industry Data Security Standard) compliance anchor.
+// Even though this is a banking transaction processor, the system may
+// interact with card-based payments. The invariants here are documentary
+// (passive) — they annotate the system but are not enforced at runtime
+// by generated code.
+category PciDssCompliant where bearer: BankingTransactionSystem {
+  invariants {
+    bearer.systemId <> null;  // Placeholder — actual PCI DSS requirements are documentary
+  }
+}
+
+// SOX (Sarbanes-Oxley) compliance anchor — audit trail requirements.
+// SOX Section 404 requires that all financial transactions have an
+// audit trail that is protected against alteration.
+category SoxAuditCompliant where bearer: BankingTransactionSystem {
+  invariants {
+    bearer.journalEntries->forAll(e |
+      e.preSourceBalance >= 0.0 and
+      e.postSourceBalance >= 0.0 and
+      e.preDestBalance >= 0.0 and
+      e.postDestBalance >= 0.0
+    );
+  }
+}
+
+// GDPR (General Data Protection Regulation) compliance anchor.
+// The system processes personal data (customer names, account ownership).
+// This category adds documentary invariants about data minimization.
+category GdprCompliant where bearer: BankingTransactionSystem {
+  invariants {
+    true;  // Placeholder — documentary; actual GDPR compliance requires
+           // data protection impact assessment, not runtime enforcement.
+  }
+}
+
+// ─── Physical/Domain-Logical Invariants ─────────────────────────────
+
+// Monotonic timestamp invariant: journal entry timestamps must be
+// monotonically increasing within a transfer lifecycle.
+category MonotonicTimestampInvariant where bearer: JournalEntry {
+  invariants {
+    bearer.timestamp > 0.0;
+    // A more precise invariant would require sequencing across entries,
+    // but we capture the domain-logical minimum here.
+  }
+}
+
+// Zero-sum invariant: for any committed transfer, the sum of balance
+// changes across source and destination must be zero (conservation of funds).
+category ZeroSumTransferInvariant where bearer: Transfer {
+  invariants {
+    bearer.amount > 0.0;
+    // The actual zero-sum property is enforced at Requirements stage
+    // via event post-conditions; this category documents the domain rule.
+  }
+}
+
+// ─── Active Business Rules (Rejection Events) ───────────────────────
+
+// The formalized system subkind adds rejection/guard events.
+// These events implement the active business rules from regulation/policy.
+// NOTE: identity is NOT declared here — it is inherited from the parent
+// BankingTransactionSystem.
+// NOTE: The parent BankingTransactionSystem already specializes
+// AuditableConstraint, AtomicityConstraints, BoundedLatencyConstraint,
+// and NoOverdraftConstraint. The formalization categories are separate
+// categories that we document here but do NOT specialize — they are
+// documentary anchors whose invariants we intend the system to respect.
+subkind BankingTransactionSystemFormalized specializes BankingTransactionSystem {
+  // Inherits all properties and identity from BankingTransactionSystem.
+  // No new properties needed — the system kind already has everything.
+
+  invariants {
+    true;  // Placeholder — all actual invariants are inherited.
+  }
+
+  // ─── Active Business Rule: International sanctions screening ────
+  // If the source or destination account is flagged as a sanctioned
+  // entity, the transfer MUST be rejected before any balance check.
+  // This is an active regulatory requirement.
+  event rejectSanctionedTransfer(sourceId: String, destId: String, amount: Real): Boolean
+    refines online_banking_requirements::BankingTransactionSystem.initiateTransfer {
+    pre: sourceId <> null and destId <> null;
+    pre: amount > 0.0;
+    // @assumption ASSUME-1: Sanctions list is maintained externally and
+    // checked via blacklist API. The system trusts the external service.
+    post: true;  // Pure rejection — no state change, no audit trail.
+    // modifies clause omitted — pure rejection.
+  }
+
+  // ─── Active Business Rule: Anti-money laundering (AML) limit ────
+  // If the transfer amount exceeds a regulatory threshold (e.g., $10,000),
+  // the system MUST flag the transfer for manual review and NOT complete
+  // it automatically. This rule overrides the normal completion flow.
+  event rejectAmlThresholdTransfer(transferId: String): Boolean
+    refines online_banking_requirements::BankingTransactionSystem.completeTransfer {
+    pre: transferId <> null;
+    pre: self.activeTransfers->exists(t | t.transferId = transferId and t.status = 'PENDING');
+    pre: self.activeTransfers->select(t | t.transferId = transferId)->forAll(t | t.amount > 10000.0);
+    // @assumption ASSUME-2: The $10,000 threshold is defined by
+    // regulatory jurisdiction and may be configurable per region.
+    post: self.activeTransfers->select(t | t.transferId = transferId)->forAll(t | t.status = 'PENDING');
+    // The transfer stays pending — it will NOT be auto-completed.
+    // A manual review event (out of scope here) would transition it.
+    // modifies clause omitted — no state change, pure guard.
+  }
+
+  // ─── Active Business Rule: Maximum daily transaction limit ────────
+  // A single account may not be debited more than $50,000 in a 24-hour
+  // window. If the cumulative debit exceeds this, the transfer is rejected.
+  event rejectDailyLimitExceeded(sourceId: String, amount: Real): Boolean
+    refines online_banking_requirements::BankingTransactionSystem.initiateTransfer {
+    pre: sourceId <> null;
+    pre: amount > 0.0;
+    // @assumption ASSUME-3: Daily limit tracking requires a sliding
+    // window; for this model we assume a simple day-based accumulator.
+    post: true;
+    // modifies clause omitted — pure rejection.
+  }
+
+  // ─── Active Business Rule: Duplicate transfer detection ──────────
+  // If a transfer with identical source, destination, and amount already
+  // exists in PENDING state (within a 60-second window), the duplicate
+  // must be rejected to prevent accidental double-spending.
+  event rejectDuplicateTransfer(sourceId: String, destId: String, amount: Real): Boolean
+    refines online_banking_requirements::BankingTransactionSystem.initiateTransfer {
+    pre: sourceId <> null and destId <> null;
+    pre: amount > 0.0;
+    pre: self.activeTransfers->exists(t |
+      t.source.accountId = sourceId and
+      t.destination.accountId = destId and
+      t.amount = amount and
+      t.status = 'PENDING'
+    );
+    // @assumption ASSUME-4: Duplicate detection window is 60 seconds;
+    // implemented via timestamp comparison on the transfer's creation time.
+    post: true;
+    // modifies clause omitted — pure rejection.
+  }
+
+  // ─── Domain-Logical Event: Journal verification ──────────────────
+  // This event formalizes the business rule that journal entries must be
+  // verified for completeness before a transfer is considered committed.
+  event verifyJournalEntry(entryId: String): Boolean {
+    pre: entryId <> null;
+    pre: self.journalEntries->exists(e | e.entryId = entryId);
+    pre: self.journalEntries->select(e | e.entryId = entryId)->forAll(e |
+      e.preSourceBalance >= 0.0 and
+      e.postSourceBalance >= 0.0 and
+      e.preDestBalance >= 0.0 and
+      e.postDestBalance >= 0.0
+    );
+    // The journal entry must satisfy the zero-sum property:
+    // (preSourceBalance - postSourceBalance) = (postDestBalance - preDestBalance)
+    post: self.journalEntries->select(e | e.entryId = entryId)->forAll(e |
+      (e.preSourceBalance - e.postSourceBalance) = (e.postDestBalance - e.preDestBalance)
+    );
+    // modifies clause omitted — verification is read-only, no state change.
+  }
+}
+
+// ─── Passive Assumptions (documented for traceability) ──────────────
+
+// KIND for passive assumptions — NOT events, just documentary properties
+// that capture what the world imposes on the system but cannot be
+// enforced at runtime by generated guards.
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property statement: String;
+  property origin: String;  // e.g., 'regulatory', 'domain-logical', 'physical-law'
+  property riskLevel: String;
+  
+  invariants {
+    self.assumptionId <> null;
+    self.statement <> null;
+    self.origin <> null;
+    self.riskLevel = 'LOW' or self.riskLevel = 'MEDIUM' or self.riskLevel = 'HIGH';
+  }
+}

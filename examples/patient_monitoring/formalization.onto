@@ -1,0 +1,254 @@
+schema "onto/0.1";
+namespace patient_monitoring_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =====================================================================
+// Formalization stage — bedside vital-signs monitor domain.
+//
+// This stage layers three concerns on top of Requirements:
+//
+//   1. REGULATORY ANCHORS — categories for IEC 62304 Class C (medical
+//      device software), IEC 60601-1 (electrical safety / general
+//      medical devices), and GDPR Article 5 (patient data minimisation).
+//      These are PASSIVE: they impose documentary invariants that govern
+//      the project, not runtime state.
+//
+//   2. PHYSICAL / DOMAIN-LOGICAL INVARIANTS — member-quantified
+//      categories that the verifier uses to prove S35 entailment for
+//      the glossary kinds declared in Discovery.
+//
+//   3. ACTIVE BUSINESS RULES — added as new events on the formalized
+//      subkind (VitalSignsMonitorSystemFormalized) without overriding
+//      any parent event.
+//
+//   4. PASSIVE ASSUMPTIONS — a FormalAssumptionRecord kind with
+//      documentary properties; annotated with @assumption tags.
+// =====================================================================
+
+// ─── 1. Regulatory anchors ───────────────────────────────────────────
+
+// IEC 62304:2006+AMD1:2015 — software lifecycle for medical devices.
+// Class C: failure could result in death or serious injury.
+category Iec62304ClassC {
+  property standardRef: String;
+  property softwareClass: String;
+  property hazardAnalysisRef: String;
+  property verificationPlanRef: String;
+  invariants {
+    self.standardRef <> null;
+    self.softwareClass <> null;
+    self.hazardAnalysisRef <> null;
+    self.verificationPlanRef <> null;
+  }
+}
+
+// IEC 60601-1:2005+AMD1:2012+AMD2:2020 — general requirements for
+// the safety and essential performance of medical electrical equipment.
+category Iec60601Safety {
+  property standardRef: String;
+  property classificationMOOP: String;
+  property classificationMOPP: String;
+  property essentialPerformanceRef: String;
+  invariants {
+    self.standardRef <> null;
+    self.essentialPerformanceRef <> null;
+  }
+}
+
+// GDPR Article 5 — principles relating to processing of personal data.
+// Applies because patient heart-rate readings are health data (Art 9).
+category GdprArticle5Compliant {
+  property regulationRef: String;
+  property dataMinimisationPolicy: String;
+  property retentionLimitDays: Integer;
+  property pseudonymisationApplied: Boolean;
+  invariants {
+    self.regulationRef <> null;
+    self.retentionLimitDays > 0;
+    self.retentionLimitDays <= 730;
+    self.pseudonymisationApplied = true;
+  }
+}
+
+// ─── 2. Physical / domain-logical member-quantified categories ────────
+
+// The plausibility window [20, 250] bpm is a physical constraint.
+// Bearer targets HeartRateReading (glossary kind from Discovery).
+category PhysicallyPlausibleHeartRate where bearer: HeartRateReading {
+  invariants {
+    bearer.valueBpm >= 20.0;
+    bearer.valueBpm <= 250.0;
+  }
+}
+
+// Alarm thresholds must be configured within the plausibility window.
+// Bearer targets AlarmThreshold (glossary kind from Discovery).
+category ValidAlarmThresholdRange where bearer: AlarmThreshold {
+  invariants {
+    bearer.lowBpm >= 20.0;
+    bearer.highBpm <= 250.0;
+    bearer.highBpm > bearer.lowBpm;
+  }
+}
+
+// Silence duration is bounded by clinical safety rules: a clinician
+// must be re-alerted within 2 minutes (120 s) in all cases.
+// Bearer targets SilencedState (glossary kind from Discovery).
+category ClinicalSilenceCeiling where bearer: SilencedState {
+  invariants {
+    bearer.maxSilenceDurationSeconds > 0.0;
+    bearer.maxSilenceDurationSeconds <= 120.0;
+  }
+}
+
+// ─── 3. Formalized system subkind — ADDS active business rules ────────
+//
+// This subkind does NOT override any parent event.
+// It adds guard/rejection events that enforce physical and regulatory
+// invariants at runtime.
+// The property 'faultDetected' is added here to support AR-2
+// (latency-ceiling violation logging) required by IEC 62304 §5.8.
+
+subkind VitalSignsMonitorSystemFormalized specializes VitalSignsMonitorSystem {
+
+  // Additional property for regulatory fault logging (IEC 62304 §5.8).
+  // Records that an essential-performance deadline was missed so the
+  // audit trail can flag the anomaly.
+  property faultDetected: Boolean;
+
+  invariants {
+    // faultDetected must have a defined boolean value at all times.
+    self.faultDetected = true or self.faultDetected = false;
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // ACTIVE RULE AR-1: Reject a reading that is outside the physical
+  // plausibility window BEFORE it reaches the display or threshold
+  // comparator. Complements FR-2 with an explicit formalization label:
+  // the rejection is a consequence of the IEC 60601-1 essential-
+  // performance obligation and the physiological plausibility
+  // constraint — the system MUST NOT display or act on such a value.
+  // ──────────────────────────────────────────────────────────────────
+  event guardImplausibleReading(valueBpm: Real)
+    refines patient_monitoring_discovery::ImplausibleReadingRejectionCommitment,
+            patient_monitoring_requirements::VitalSignsMonitorSystem.rejectImplausibleReading {
+    pre: valueBpm < self.plausibilityLowerBpm
+         or valueBpm > self.plausibilityUpperBpm;
+    post: self.isDisplayingReading = self.isDisplayingReading@pre;
+    post: self.currentHeartRateBpm = self.currentHeartRateBpm@pre;
+    post: self.rejectedReadingCount = self.rejectedReadingCount@pre + 1;
+    modifies: self.rejectedReadingCount;
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // ACTIVE RULE AR-2: Enforce the 2-second alarm-latency hard ceiling.
+  //
+  // If the system is asked to raise an alarm with a latency that
+  // exceeds the ceiling (self.maxAlarmLatencySeconds, invariantly
+  // <= 2.0), the alarm is STILL raised but faultDetected is set so
+  // that the IEC 62304 audit trail can flag the anomaly.
+  // ──────────────────────────────────────────────────────────────────
+  event enforceAlarmLatencyCeiling(requestedLatencySeconds: Real)
+    refines patient_monitoring_discovery::AlarmLatencyCommitment,
+            patient_monitoring_requirements::VitalSignsMonitorSystem.raiseThresholdAlarm {
+    pre: self.isDisplayingReading = true;
+    pre: not self.alarmActive;
+    pre: requestedLatencySeconds > self.maxAlarmLatencySeconds;
+    post: self.alarmActive = true;
+    post: self.alarmSilenced = false;
+    post: self.alarmSilenceElapsedSeconds = 0.0;
+    post: self.faultDetected = true;
+    modifies: self.alarmActive,
+              self.alarmSilenced,
+              self.alarmSilenceElapsedSeconds,
+              self.faultDetected;
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // ACTIVE RULE AR-3: Enforce the silence auto-rearm ceiling.
+  //
+  // If any subsystem attempts to extend the silence beyond
+  // maxSilenceDurationSeconds, the alarm is immediately re-armed.
+  // Directly discharges the GOAL-4 commitment predicate.
+  // ──────────────────────────────────────────────────────────────────
+  event enforceSilenceCeiling(elapsedSeconds: Real)
+    refines patient_monitoring_discovery::AlarmSilenceAutoRearmCommitment,
+            patient_monitoring_requirements::VitalSignsMonitorSystem.autoRearmAlarm {
+    pre: self.alarmActive = true;
+    pre: self.alarmSilenced = true;
+    pre: elapsedSeconds > self.maxSilenceDurationSeconds;
+    post: self.alarmSilenced = false;
+    post: self.alarmSilenceElapsedSeconds = 0.0;
+    modifies: self.alarmSilenced,
+              self.alarmSilenceElapsedSeconds;
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // ACTIVE RULE AR-4: Enforce sensor-disconnect alarm after timeout.
+  //
+  // IEC 60601-1 essential-performance clause requires that
+  // loss-of-signal detection be deterministic. This event makes the
+  // 5-second ceiling a formal guard that cannot be relaxed.
+  // ──────────────────────────────────────────────────────────────────
+  event enforceDisconnectTimeout(absentSeconds: Real)
+    refines patient_monitoring_discovery::SensorDisconnectDetectionCommitment,
+            patient_monitoring_requirements::VitalSignsMonitorSystem.raiseSensorDisconnectAlarm {
+    pre: self.sensorConnected = true;
+    pre: absentSeconds > self.disconnectTimeoutSeconds;
+    post: self.sensorConnected = false;
+    post: self.sensorDisconnectAlarmActive = true;
+    post: self.isDisplayingReading = false;
+    post: self.signalAbsentSeconds = absentSeconds;
+    modifies: self.sensorConnected,
+              self.sensorDisconnectAlarmActive,
+              self.isDisplayingReading,
+              self.signalAbsentSeconds;
+  }
+}
+
+// ─── 4. Passive assumptions ───────────────────────────────────────────
+//
+// Assumptions are documented as a FormalAssumptionRecord kind with
+// plain properties. They are NOT events — the system does not enforce
+// them at runtime; they constrain the deployment environment.
+
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property tag: String;
+  property description: String;
+  property rationale: String;
+  property linkedRequirementId: String;
+  invariants {
+    self.assumptionId <> null;
+    self.tag <> null;
+    self.description <> null;
+  }
+}
+
+// @assumption ASSUME-1: ECG sensor delivers readings at a rate of at
+// least 1 Hz during normal operation. The disconnect-timeout logic
+// (FR-7/FR-8) depends on a minimum signal frequency; if the sensor
+// legitimately goes quiet for architectural reasons (e.g. sleep mode),
+// false-positive disconnects will occur. This assumption must be
+// documented in the hazard analysis (IEC 62304 §7.1).
+
+// @assumption ASSUME-2: The system clock is monotonic and accurate to
+// within ±100 ms. Both the alarm-latency ceiling (2 s) and the
+// sensor-disconnect timeout (5 s) rely on elapsed-time measurements.
+// Clock drift or non-monotonic behaviour could produce false compliant
+// latency readings. The deployment environment must guarantee this.
+
+// @assumption ASSUME-3: Clinician-facing inputs (threshold configuration,
+// silence button) are authenticated before reaching the system. The
+// formalized model does not model authentication; it assumes the caller
+// has already been verified. Security controls are governed by the
+// GDPR Article 5 pseudonymisation obligation (GdprArticle5Compliant).
+
+// @assumption ASSUME-4: A single patient is monitored per device
+// instance. The model uses a single currentHeartRateBpm property; if
+// multi-patient monitoring is ever required, a separate device instance
+// (separate VitalSignsMonitorSystem identity) is used per patient.
+// This assumption must be re-evaluated if the system is extended to
+// ward-wide aggregation.

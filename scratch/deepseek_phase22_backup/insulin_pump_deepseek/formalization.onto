@@ -1,0 +1,311 @@
+schema "onto/0.1";
+namespace insulin_pump_formalization;
+import "./requirements.onto";
+
+// =====================================================================
+// Stage 3: Formalization
+// Purpose: Disambiguate requirements against external anchors —
+//          regulations, physical laws, active business rules.
+// =====================================================================
+
+// ─── Regulatory anchors (categories w/ documentary invariants) ─────
+// These categories are for documentary/traceability purposes only.
+// They carry properties but NO invariants that require Z3 verification.
+// This avoids W35_partial warnings about unsupported String types.
+
+// IEC 62304 Class C — highest-risk medical device software
+category Iec62304ClassC {
+  property softwareVersion: String;
+  property riskClass: String;
+  property requiresChangeReview: Boolean;
+}
+
+// ISO 13485 — Quality management for medical devices
+category Iso13485Compliant {
+  property certificationBody: String;
+  property lastAuditDate: Integer;
+  property nonConformancesResolved: Boolean;
+}
+
+// FDA 510(k) premarket notification
+category Fda510kCleared {
+  property fda510kNumber: String;
+  property indicationsForUse: String;
+  property contraindications: String;
+}
+
+// ─── Physical / domain-logical invariants (member-quantified) ───────
+// This category HAS invariants that require Z3 verification.
+// It uses the 'bearer' binding and constrains only Real properties.
+
+category PhysicallyPlausibleReadings where bearer: FormalizedPumpController {
+  invariants {
+    bearer.lastReadingMgDl >= 0.0;
+    bearer.lastReadingMgDl <= 1000.0;
+  }
+}
+
+// ─── Formalized system kind ─────────────────────────────────────────
+// A kind CAN specialize categories (S21 rule). This kind declares
+// its own identity and events. The categories with invariants use
+// member-quantified constraints that Z3 can verify.
+
+kind FormalizedPumpController
+  specializes Iec62304ClassC,
+              Iso13485Compliant,
+              Fda510kCleared,
+              PhysicallyPlausibleReadings {
+  identity: systemId;
+  property systemId: String;
+  property safeMaxDoseUnits: Real;
+  property lastDeliveredDose: Real;
+  property lastReadingMgDl: Real;
+  property safeZoneLower: Real;
+  property safeZoneUpper: Real;
+  property isOperating: Boolean;
+  property faultDetected: Boolean;
+  property alarmActive: Boolean;
+  property lowReservoirAlertThreshold: Real;
+  property reservoirUnits: Real;
+  property selfTestIntervalSeconds: Integer;
+
+  invariants {
+    self.systemId <> null;
+    self.safeMaxDoseUnits > 0.0;
+    self.lastDeliveredDose <= self.safeMaxDoseUnits;
+    self.safeZoneLower >= 0.0;
+    self.safeZoneUpper > self.safeZoneLower;
+    self.isOperating implies not self.faultDetected;
+    self.faultDetected implies not self.isOperating;
+    self.faultDetected implies self.alarmActive;
+    self.reservoirUnits >= 0.0;
+    self.lowReservoirAlertThreshold >= 0.0;
+    self.selfTestIntervalSeconds >= 60;
+    self.lastReadingMgDl >= 0.0;
+    self.lastReadingMgDl <= 1000.0;
+  }
+
+  // ─── FR-1: Deliver insulin ───────────────────────────────────────
+  event deliverInsulin(readingMgDl: Real, rateOfIncrease: Real): Real
+    refines insulin_pump_requirements::PumpControllerSystem.deliverInsulin,
+            insulin_pump_discovery::CorrectDoseCommitment {
+    pre: self.isOperating = true;
+    pre: not self.faultDetected;
+    pre: readingMgDl >= 0.0;
+    pre: readingMgDl <= 1000.0;
+    pre: readingMgDl > self.safeZoneUpper;
+    pre: rateOfIncrease >= 0.0;
+    pre: rateOfIncrease <= self.safeMaxDoseUnits;
+    pre: self.reservoirUnits >= rateOfIncrease;
+
+    post: result <= self.safeMaxDoseUnits;
+    post: self.lastDeliveredDose = result;
+    post: self.lastReadingMgDl = readingMgDl;
+    post: self.reservoirUnits = self.reservoirUnits@pre - result;
+    post: self.reservoirUnits >= 0.0;
+    post: self.isOperating = true;
+    post: not self.faultDetected;
+    post: result = if rateOfIncrease <= self.safeMaxDoseUnits
+                   then rateOfIncrease
+                   else self.safeMaxDoseUnits
+                   endif;
+
+    modifies: self.lastDeliveredDose, self.lastReadingMgDl, self.reservoirUnits;
+  }
+
+  // ─── FR-2: Detect fault and fail safe ────────────────────────────
+  event detectFault(faultCode: String, isFault: Boolean)
+    refines insulin_pump_requirements::PumpControllerSystem.detectFault,
+            insulin_pump_discovery::FailSafeCommitment {
+    pre: not self.faultDetected;
+    pre: faultCode <> null;
+
+    post: if isFault then
+            self.faultDetected = true
+          else
+            self.faultDetected = false
+          endif;
+    post: if self.faultDetected then
+            self.isOperating = false and
+            self.alarmActive = true
+          else
+            self.isOperating = true and
+            not self.alarmActive
+          endif;
+    post: self.faultDetected implies (not self.isOperating and self.alarmActive);
+    post: self.isOperating implies not self.faultDetected;
+
+    modifies: self.faultDetected, self.isOperating, self.alarmActive;
+  }
+
+  // ─── FR-2b: Sound alarm ──────────────────────────────────────────
+  event soundAlarm()
+    refines insulin_pump_requirements::PumpControllerSystem.soundAlarm,
+            insulin_pump_discovery::FailSafeCommitment {
+    pre: self.faultDetected = true;
+    pre: not self.alarmActive;
+
+    post: self.alarmActive = true;
+    modifies: self.alarmActive;
+  }
+
+  // ─── FR-3: Alert patient ─────────────────────────────────────────
+  event alertLowReservoir()
+    refines insulin_pump_requirements::PumpControllerSystem.alertLowReservoir,
+            insulin_pump_discovery::AlertCommitment {
+    pre: self.reservoirUnits > 0.0;
+    pre: self.reservoirUnits <= self.lowReservoirAlertThreshold;
+    pre: not self.alarmActive;
+
+    post: self.alarmActive = true;
+    modifies: self.alarmActive;
+  }
+
+  event alertMalfunction(faultDescription: String)
+    refines insulin_pump_requirements::PumpControllerSystem.alertMalfunction,
+            insulin_pump_discovery::AlertCommitment {
+    pre: self.faultDetected = true;
+    pre: not self.alarmActive;
+
+    post: self.alarmActive = true;
+    modifies: self.alarmActive;
+  }
+
+  // ─── Utility events ──────────────────────────────────────────────
+
+  event configureSystem(safeMax: Real, zoneLower: Real, zoneUpper: Real, lowResThreshold: Real)
+    refines insulin_pump_requirements::PumpControllerSystem.configureSystem {
+    pre: safeMax > 0.0;
+    pre: zoneLower >= 0.0;
+    pre: zoneUpper > zoneLower;
+    pre: lowResThreshold >= 0.0;
+
+    post: self.safeMaxDoseUnits = safeMax;
+    post: self.safeZoneLower = zoneLower;
+    post: self.safeZoneUpper = zoneUpper;
+    post: self.lowReservoirAlertThreshold = lowResThreshold;
+
+    modifies: self.safeMaxDoseUnits, self.safeZoneLower, self.safeZoneUpper, self.lowReservoirAlertThreshold;
+  }
+
+  event initializeSystem()
+    refines insulin_pump_requirements::PumpControllerSystem.initializeSystem {
+    pre: not self.isOperating;
+    pre: not self.faultDetected;
+    pre: not self.alarmActive;
+    pre: self.safeMaxDoseUnits > 0.0;
+    pre: self.safeZoneUpper > self.safeZoneLower;
+    pre: self.reservoirUnits >= 0.0;
+
+    post: self.isOperating = true;
+    post: self.lastDeliveredDose = 0.0;
+    post: self.lastReadingMgDl = 0.0;
+
+    modifies: self.isOperating, self.lastDeliveredDose, self.lastReadingMgDl;
+  }
+
+  event refillReservoir(amount: Real)
+    refines insulin_pump_requirements::PumpControllerSystem.refillReservoir {
+    pre: amount > 0.0;
+    pre: self.reservoirUnits + amount <= 100.0;
+
+    post: self.reservoirUnits = self.reservoirUnits@pre + amount;
+
+    modifies: self.reservoirUnits;
+  }
+}
+
+// ─── Active business rules: rejection / guard events ────────────────
+
+subkind InsulinPumpSystemFormalized
+  specializes FormalizedPumpController {
+
+  invariants {
+    true;
+  }
+
+  // ─── Active rule: Reject dose that exceeds safe max ───────────────
+  event rejectOverMaxDose(requestedDose: Real): Boolean
+    refines insulin_pump_discovery::CorrectDoseCommitment {
+    pre: requestedDose > self.safeMaxDoseUnits;
+    pre: self.isOperating = true;
+
+    post: result = false;
+    post: not self.faultDetected;
+  }
+
+  // ─── Active rule: Reject dose when reservoir too low ──────────────
+  event rejectLowReservoir(requestedDose: Real): Boolean {
+    pre: requestedDose > self.reservoirUnits;
+    pre: self.isOperating = true;
+
+    post: result = false;
+  }
+
+  // ─── Active rule: Reject delivery when not operating ──────────────
+  event rejectNotOperating(): Boolean
+    refines insulin_pump_discovery::CorrectDoseCommitment {
+    pre: not self.isOperating;
+
+    post: result = false;
+  }
+
+  // ─── Active rule: Reject delivery when fault detected ─────────────
+  event rejectFaultDetected(): Boolean
+    refines insulin_pump_discovery::FailSafeCommitment {
+    pre: self.faultDetected = true;
+
+    post: result = false;
+    post: self.alarmActive = true;
+    modifies: self.alarmActive;
+  }
+
+  // ─── Active rule: Reject reading that is physically implausible ──
+  event rejectImplausibleReading(readingMgDl: Real): Boolean {
+    pre: readingMgDl < 0.0 or readingMgDl > 1000.0;
+
+    post: result = false;
+    post: self.faultDetected = true;
+    post: self.isOperating = false;
+    post: self.alarmActive = true;
+    modifies: self.faultDetected, self.isOperating, self.alarmActive;
+  }
+
+  // ─── Active rule: Reject self-test that fails ───────────────────
+  event rejectFailedSelfTest(faultCode: String): Boolean
+    refines insulin_pump_discovery::FailSafeCommitment {
+    pre: faultCode <> null;
+    pre: self.isOperating = true;
+
+    post: self.faultDetected = true;
+    post: self.isOperating = false;
+    post: self.alarmActive = true;
+    post: result = true;
+    modifies: self.faultDetected, self.isOperating, self.alarmActive;
+  }
+
+  // ─── Active rule: Guard against configuration that violates safety ──
+  event rejectUnsafeConfiguration(safeMax: Real, zoneLower: Real, zoneUpper: Real): Boolean
+    refines insulin_pump_discovery::CorrectDoseCommitment {
+    pre: safeMax <= 0.0 or
+         zoneLower < 0.0 or
+         zoneUpper <= zoneLower;
+
+    post: result = false;
+  }
+
+  // ─── Passive assumptions (comment annotations) ────────────────────
+  // @assumption ASSUME-1: The patient is awake and responsive to alarms
+  // @assumption ASSUME-2: Blood sugar sensor calibration is correct
+  // @assumption ASSUME-3: The clock on the device is accurate within 1 second
+}
+
+// ─── Formal assumption record (kind w/ documentary properties) ─────
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property label: String;
+  property description: String;
+  property riskIfViolated: String;
+  property mitigations: String;
+}

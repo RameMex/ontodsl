@@ -1,0 +1,206 @@
+schema "onto/0.1";
+namespace electricity_meter_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =====================================================================
+// FORMALIZATION — Regulatory anchors, active business rules,
+// physical invariants, documented assumptions.
+// The world imposes these; the system must comply.
+// =====================================================================
+
+// ─── Regulatory Anchors (categories with documentary invariants) ─────
+
+category WeeeCompliant {
+  property weeeWasteCategoryCode: String;
+  property recyclableComponentsPct: Real;
+  invariants {
+    self.weeeWasteCategoryCode <> null;
+    self.recyclableComponentsPct >= 0.0;
+    self.recyclableComponentsPct <= 100.0;
+  }
+}
+
+category MidCompliant {
+  // Measuring Instruments Directive (EU 2014/32) — meters for billing
+  // must meet accuracy class B or better, tamper detection mandatory.
+  property midAccuracyClass: String;  // 'B' or 'C'
+  property midTamperDetectionRequired: Boolean;
+  invariants {
+    self.midAccuracyClass = 'B' or self.midAccuracyClass = 'C';
+    self.midTamperDetectionRequired = true;
+  }
+}
+
+category NistSmartGridFramework {
+  // NISTIR 7628 guidelines: non-repudiation of meter readings,
+  // tamper evidence preservation, audit trails.
+  property nistAuditRetentionDays: Integer;
+  property nistTamperEvidenceRequired: Boolean;
+  invariants {
+    self.nistAuditRetentionDays >= 365;
+    self.nistTamperEvidenceRequired = true;
+  }
+}
+
+category GdprDataMinimization {
+  // Personal data (customer account info) must not be retained in
+  // the meter reading stream longer than necessary for billing.
+  property gdprRetentionLimitDays: Integer;
+  invariants {
+    self.gdprRetentionLimitDays >= 0;
+    self.gdprRetentionLimitDays <= 365;
+  }
+}
+
+// ─── Physical / Domain-Logical Invariant Categories ──────────────────
+
+category PhysicallyPlausibleReadings where bearer: MeterBillingSystem {
+  invariants {
+    // Consumption deltas must be non-negative (kWh only accumulate forward).
+    // The system's own 'processReading' event enforces this, but the
+    // category makes it a physical invariant on the kind.
+    bearer.maxNegativeDeltaThreshold >= 0.0;
+  }
+}
+
+category TamperImmutableInvariants where bearer: MeterBillingSystem {
+  invariants {
+    // If a tamper event is active, billing is frozen.
+    not (bearer.tamperFreezeActive) or (not bearer.tamperCleared);
+    // Only manual clearance can resume billing after a tamper freeze.
+    not (bearer.tamperCleared) or (not bearer.tamperFreezeActive);
+  }
+}
+
+// ─── Documentation for Assumptions ────────────────────────────────────
+// @assumption ASSUME-1: The physical meter sends readings at regular
+//  15-minute intervals. The controller does NOT validate the interval.
+// @assumption ASSUME-2: The tamper flags field is a string, empty when
+//  no tamper. Actual encoding (bitmask vs CSV) is implementation-defined.
+// @assumption ASSUME-3: Authorized operator identity is authenticated
+//  outside this component (external IAM). The clearTamper event only
+//  receives a clearanceId string — the identity binding is assumed.
+// @assumption ASSUME-4: Compensation events are strictly financial;
+//  they do NOT mutate historical meter readings. The system treats them
+//  as separate billing transactions.
+// @assumption ASSUME-5: Regulatory compliance audits are conducted
+//  offline (external). The categories below define documentary
+//  obligations, not runtime enforcement contracts.
+
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property assumptionCode: String;   // e.g. 'ASSUME-1'
+  property description: String;
+  property riskLevel: String;        // 'LOW', 'MEDIUM', 'HIGH'
+  property validationMethod: String; // e.g. 'Review', 'Test', 'Waiver'
+  invariants {
+    self.assumptionId <> null;
+    self.assumptionCode <> null;
+    self.description <> null;
+    self.riskLevel = 'LOW' or self.riskLevel = 'MEDIUM' or self.riskLevel = 'HIGH';
+  }
+}
+
+// ─── Formalization: Add Regulatory Compliance via Categories ──────────
+// According to playbook: a 'kind' CAN specialize 'category' (multi-parent allowed).
+// But a 'kind' CANNOT specialize another 'kind' — only 'subkind' can do that.
+// So we declare MeterBillingSystemFormalized as a category that the system kind
+// already specializes, adding the regulatory invariants.
+// Then we declare a subkind that refines MeterBillingSystem and adds events.
+
+// Step 1: Categories that will be specialized by the formalized subkind.
+// We already declared them above.
+
+// Step 2: Create a subkind of MeterBillingSystem that adds the formalization events.
+// A subkind CAN specialize a kind (MeterBillingSystem) — that's legal.
+// The regulatory categories are inherited via the parent kind's specializes clause.
+// Since the parent (MeterBillingSystem) already specializes MonotonicConsumption,
+// TamperHandling, ReadingImmutability, we let it also specialize the new categories.
+
+// But wait — we cannot modify the parent's specializes clause here.
+// Instead, declare the formalized subkind with its own name and add events.
+// The parent kind already has the properties we need.
+
+subkind MeterBillingSystemFormalized specializes MeterBillingSystem {
+  // No property re-declarations — all properties inherited from MeterBillingSystem.
+  
+  // Add a rename table for clarity (optional, here to show the pattern)
+  // No renames needed — we use the same property names.
+
+  invariants {
+    // The formalized subkind inherits all parent invariants plus
+    // category invariants from the parent's category membership.
+    // No additional invariants needed — parent already covers them.
+    self.systemId <> null;
+  }
+
+  // ─── Active Business Rule: Reject Negative Delta (Enforcement) ──────
+  // Note: 'refines' targets a commitment, NOT the parent kind's event.
+  event rejectNegativeDelta(kwh: Real, lastAcceptedKwh: Real)
+    refines electricity_meter_discovery::MonotonicConsumptionCommitment {
+    pre: lastAcceptedKwh >= 0.0;
+    pre: kwh >= 0.0;
+    pre: kwh < lastAcceptedKwh;   // negative delta condition
+    // Pure rejection — no state change.
+    post: self.tamperFreezeActive = self.tamperFreezeActive@pre;
+    post: self.tamperCleared = self.tamperCleared@pre;
+    post: self.acceptedReadingCount = self.acceptedReadingCount@pre;
+    modifies: self.tamperFreezeActive, self.tamperCleared, self.acceptedReadingCount;
+  }
+
+  // ─── Active Business Rule: Reject Tampered Reading (Enforcement) ─────
+  event rejectTamperedReading(tamperFlags: String)
+    refines electricity_meter_discovery::TamperFreezeCommitment {
+    pre: tamperFlags <> null;
+    pre: tamperFlags <> '';
+    pre: not self.tamperFreezeActive;
+    post: self.tamperFreezeActive = true;
+    post: self.tamperCleared = false;
+    modifies: self.tamperFreezeActive, self.tamperCleared;
+  }
+
+  // ─── Active Business Rule: Reject Clearance on Inactive Tamper ──────
+  event rejectPrematureClearance(clearanceId: String)
+    refines electricity_meter_discovery::TamperClearanceCommitment {
+    pre: clearanceId <> null;
+    pre: not self.tamperFreezeActive;
+    post: self.tamperFreezeActive = self.tamperFreezeActive@pre;
+    post: self.tamperCleared = self.tamperCleared@pre;
+    modifies: self.tamperFreezeActive, self.tamperCleared;
+  }
+
+  // ─── Active Business Rule: Reject Adjustment During Tamper Freeze ───
+  event rejectCompensationDuringFreeze(adjustmentDelta: Real)
+    refines electricity_meter_discovery::ReadingImmutabilityCommitment {
+    pre: adjustmentDelta <> 0.0;
+    pre: self.tamperFreezeActive;
+    post: self.tamperFreezeActive = self.tamperFreezeActive@pre;
+    post: self.tamperCleared = self.tamperCleared@pre;
+    post: self.acceptedReadingCount = self.acceptedReadingCount@pre;
+    modifies: self.tamperFreezeActive, self.tamperCleared, self.acceptedReadingCount;
+  }
+
+  // ─── Active Business Rule: Audit Trail Record (Regulatory) ──────────
+  event recordAuditTrail(eventType: String, eventPayload: String)
+    refines electricity_meter_discovery::ReadingImmutabilityCommitment {
+    pre: eventType <> null;
+    pre: eventPayload <> null;
+    // Pure observation — no state change on the billing controller.
+    post: self.tamperFreezeActive = self.tamperFreezeActive@pre;
+    post: self.tamperCleared = self.tamperCleared@pre;
+    post: self.acceptedReadingCount = self.acceptedReadingCount@pre;
+    modifies: self.tamperFreezeActive, self.tamperCleared, self.acceptedReadingCount;
+  }
+
+  // ─── Active Business Rule: Enforce Retention Limit (GDPR) ───────────
+  event rejectRetentionOverflow()
+    refines electricity_meter_discovery::ReadingImmutabilityCommitment {
+    pre: self.acceptedReadingCount >= 365; // simplified: GDPR retention days
+    post: self.tamperFreezeActive = self.tamperFreezeActive@pre;
+    post: self.tamperCleared = self.tamperCleared@pre;
+    post: self.acceptedReadingCount = self.acceptedReadingCount@pre;
+    modifies: self.tamperFreezeActive, self.tamperCleared, self.acceptedReadingCount;
+  }
+}

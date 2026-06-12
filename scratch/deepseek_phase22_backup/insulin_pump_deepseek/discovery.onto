@@ -1,0 +1,196 @@
+schema "onto/0.1";
+namespace insulin_pump_discovery;
+
+// ─── Stakeholders ───────────────────────────────────────────────────
+agent Patient {
+  identity: patientId;
+  property patientId: String;
+  property name: String;
+  property hasDiabetes: Boolean;
+  invariants {
+    self.patientId <> null;
+    self.name <> null;
+  }
+}
+
+agent Clinician {
+  identity: clinicianId;
+  property clinicianId: String;
+  property name: String;
+  property certification: String;
+  invariants {
+    self.clinicianId <> null;
+    self.name <> null;
+    self.certification <> null;
+  }
+}
+
+// The vendor / dev team — debitor of all stakeholder commitments
+agent PumpVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+    self.name <> null;
+  }
+}
+
+// ─── Glossary Terms ─────────────────────────────────────────────────
+kind BloodSugarMeasurement {
+  identity: measurementId;
+  property measurementId: String;
+  property valueMgDl: Real;
+  property timestamp: Integer;
+  invariants {
+    self.measurementId <> null;
+    self.valueMgDl >= 0.0;
+    self.timestamp >= 0;
+  }
+}
+
+kind InsulinReservoir {
+  identity: reservoirId;
+  property reservoirId: String;
+  property capacityUnits: Real;
+  property currentUnits: Real;
+  property lowThresholdUnits: Real;
+  invariants {
+    self.reservoirId <> null;
+    self.capacityUnits > 0.0;
+    self.currentUnits >= 0.0;
+    self.lowThresholdUnits >= 0.0;
+    self.lowThresholdUnits <= self.capacityUnits;
+  }
+}
+
+kind SelfTestResult {
+  identity: testId;
+  property testId: String;
+  property isPassed: Boolean;
+  property faultCode: String;
+  property timestamp: Integer;
+  invariants {
+    self.testId <> null;
+    self.timestamp >= 0;
+  }
+}
+
+kind SafeZone {
+  identity: safeZoneId;
+  property safeZoneId: String;
+  property lowerBoundMgDl: Real;
+  property upperBoundMgDl: Real;
+  invariants {
+    self.safeZoneId <> null;
+    self.lowerBoundMgDl >= 0.0;
+    self.upperBoundMgDl > self.lowerBoundMgDl;
+  }
+}
+
+// ─── Commitments ───────────────────────────────────────────────────
+// GOAL-1: Deliver the correct insulin dose — safe max, safe zone, proportional rate
+commitment CorrectDoseCommitment
+  debitor: PumpVendor
+  creditor: Patient {
+    identity: commitmentId;
+    property commitmentId: String;
+    property safeMaxDoseUnits: Real;
+    property safeZoneLower: Real;
+    property safeZoneUpper: Real;
+    property maxDoseProportionalToRate: Boolean;
+    predicate: self.safeMaxDoseUnits > 0.0 and
+               self.safeZoneLower >= 0.0 and
+               self.safeZoneUpper > self.safeZoneLower and
+               self.maxDoseProportionalToRate = true;
+  }
+
+// GOAL-2: Fail safe on hardware fault — stop delivery + alarm
+commitment FailSafeCommitment
+  debitor: PumpVendor
+  creditor: Patient {
+    identity: commitmentId;
+    property commitmentId: String;
+    property alarmEnabled: Boolean;
+    property deliveryStoppedOnFault: Boolean;
+    predicate: self.alarmEnabled = true and
+               self.deliveryStoppedOnFault = true;
+  }
+
+// GOAL-3: Alert patient to low reservoir and malfunctions
+commitment AlertCommitment
+  debitor: PumpVendor
+  creditor: Patient {
+    identity: commitmentId;
+    property commitmentId: String;
+    property lowReservoirAlertThreshold: Real;
+    property malfunctionAlertDelaySeconds: Integer;
+    predicate: self.lowReservoirAlertThreshold > 0.0 and
+               self.malfunctionAlertDelaySeconds >= 0;
+  }
+
+// ─── Constraint Categories (member-quantified) ─────────────────────
+// These constrain the eventual system kind from Requirements.
+// We define a placeholder type 'InsulinPumpSystem' so the category
+// invariants can reference its properties. It will be imported/
+// replaced by the actual system kind in requirements.onto.
+
+kind InsulinPumpSystem {
+  identity: systemId;
+  property systemId: String;
+  property safeMaxDoseUnits: Real;
+  property lastDeliveredDose: Real;
+  property isOperating: Boolean;
+  property faultDetected: Boolean;
+  property alarmActive: Boolean;
+  invariants {
+    self.systemId <> null;
+  }
+}
+
+category DoseSafetyConstraints where bearer: InsulinPumpSystem {
+  invariants {
+    bearer.safeMaxDoseUnits > 0.0;
+    bearer.lastDeliveredDose <= bearer.safeMaxDoseUnits;
+  }
+}
+
+category HardwareSafety where bearer: InsulinPumpSystem {
+  invariants {
+    bearer.isOperating implies not bearer.faultDetected;
+    bearer.faultDetected implies not bearer.isOperating;
+    bearer.faultDetected implies bearer.alarmActive;
+  }
+}
+
+// ─── Domain Stories (with identity) ────────────────────────────────
+happening DoseDeliveryFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property measurement: BloodSugarMeasurement;
+  property doseDelivered: Real;
+  property deliveryTimestamp: Integer;
+  invariants {
+    self.flowId <> null;
+    self.measurement <> null;
+    self.doseDelivered >= 0.0;
+    self.deliveryTimestamp >= 0;
+  }
+}
+
+happening FaultResponseFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property fault: SelfTestResult;
+  property alarmActivated: Boolean;
+  property deliveryStopped: Boolean;
+  invariants {
+    self.flowId <> null;
+    self.fault <> null;
+    self.alarmActivated = (self.deliveryStopped and not self.fault.isPassed);
+  }
+}

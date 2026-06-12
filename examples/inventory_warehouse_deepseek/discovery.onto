@@ -1,0 +1,251 @@
+schema "onto/0.1";
+namespace inventory_warehouse_discovery;
+
+// ─── Stakeholders (agents) ────────────────────────────────────────────────
+agent WarehouseManager {
+  identity: agentId;
+  property agentId: String;
+  property name: String;
+  property facilityCode: String;
+  invariants {
+    self.agentId <> null;
+    self.facilityCode <> null;
+  }
+}
+
+agent FulfillmentPartner {
+  identity: partnerId;
+  property partnerId: String;
+  property companyName: String;
+  invariants {
+    self.partnerId <> null;
+    self.companyName <> null;
+  }
+}
+
+agent Auditor {
+  identity: auditorId;
+  property auditorId: String;
+  property certifyingBody: String;
+  invariants {
+    self.auditorId <> null;
+    self.certifyingBody <> null;
+  }
+}
+
+// The vendor/dev team — debitor of all stakeholder commitments.
+agent InventoryVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+  }
+}
+
+// ─── Stakeholder concerns as commitments ────────────────────────────────
+// The predicate clause references the commitment's own properties.
+// The discharge proof in Requirements will match these properties
+// to identically-named properties on the system kind.
+commitment NonNegativeStockCommitment
+  debitor: InventoryVendor
+  creditor: WarehouseManager {
+    identity: commitmentId;
+    property commitmentId: String;
+    property stockOnHand: Real;
+    predicate: self.stockOnHand >= 0.0;
+  }
+
+commitment JournaledMovementCommitment
+  debitor: InventoryVendor
+  creditor: Auditor {
+    identity: commitmentId;
+    property commitmentId: String;
+    property movementJournalSize: Integer;
+    property cachedStock: Real;
+    predicate: self.movementJournalSize >= 0 and self.cachedStock >= 0.0;
+  }
+
+commitment BackorderPolicyCommitment
+  debitor: InventoryVendor
+  creditor: FulfillmentPartner {
+    identity: commitmentId;
+    property commitmentId: String;
+    property stockOnHand: Real;
+    property isBackorderable: Boolean;
+    predicate: (if self.stockOnHand = 0.0 then self.isBackorderable = true else true endif);
+  }
+
+commitment ReconciliationConvergenceCommitment
+  debitor: InventoryVendor
+  creditor: Auditor {
+    identity: commitmentId;
+    property commitmentId: String;
+    property reconciledQty: Real;
+    property cachedStock: Real;
+    predicate: self.reconciledQty = self.cachedStock;
+  }
+
+// ─── Constraint goals as member-quantified categories ───────────────────
+// These categories reference a system kind that will be declared in
+// Requirements. To avoid S27, we need a placeholder that actually
+// carries the properties. We keep it minimal — it's a forward
+// reference that Requirements will concrete-specialize.
+kind _WarehouseInventorySystem {
+  identity: _placeholderId;
+  property _placeholderId: String;
+  property stockOnHand: Real;
+  property movementJournalSize: Integer;
+  property cachedStock: Real;
+  property isBackorderable: Boolean;
+  property reconciledQty: Real;
+}
+
+category NonNegativeStockConstraint where bearer: _WarehouseInventorySystem {
+  invariants {
+    bearer.stockOnHand >= 0.0;
+  }
+}
+
+category JournalBeforeMovement where bearer: _WarehouseInventorySystem {
+  invariants {
+    bearer.movementJournalSize >= 0;
+    (if bearer.cachedStock > 0.0 then bearer.movementJournalSize > 0 else true endif);
+  }
+}
+
+category BackorderDiscipline where bearer: _WarehouseInventorySystem {
+  invariants {
+    (if bearer.stockOnHand = 0.0 then bearer.isBackorderable = true else true endif);
+  }
+}
+
+category ReconciliationConvergent where bearer: _WarehouseInventorySystem {
+  invariants {
+    bearer.reconciledQty = bearer.cachedStock;
+  }
+}
+
+// ─── Glossary terms (kinds with identity) ──────────────────────────────
+kind SKU {
+  identity: skuId;
+  property skuId: String;
+  property description: String;
+  property isBackorderable: Boolean;
+  invariants {
+    self.skuId <> null;
+  }
+}
+
+kind StockOnHand {
+  identity: entryId;
+  property entryId: String;
+  property sku: SKU;
+  property qty: Real;
+  property lastUpdated: String;
+  invariants {
+    self.entryId <> null;
+    self.sku <> null;
+    self.qty >= 0.0;
+    self.lastUpdated <> null;
+  }
+}
+
+kind FulfillmentOrder {
+  identity: orderId;
+  property orderId: String;
+  property sku: SKU;
+  property requestedQty: Real;
+  property status: String;
+  invariants {
+    self.orderId <> null;
+    self.sku <> null;
+    self.requestedQty > 0.0;
+    self.status <> null;
+  }
+}
+
+kind Restock {
+  identity: restockId;
+  property restockId: String;
+  property sku: SKU;
+  property receivedQty: Real;
+  property inboundTimestamp: String;
+  invariants {
+    self.restockId <> null;
+    self.sku <> null;
+    self.receivedQty > 0.0;
+    self.inboundTimestamp <> null;
+  }
+}
+
+kind Backorder {
+  identity: boId;
+  property boId: String;
+  property sku: SKU;
+  property qty: Real;
+  property createdAt: String;
+  invariants {
+    self.boId <> null;
+    self.sku <> null;
+    self.qty > 0.0;
+    self.createdAt <> null;
+  }
+}
+
+kind MovementJournalEntry {
+  identity: entryId;
+  property entryId: String;
+  property sku: SKU;
+  property delta: Real;
+  property reason: String;
+  property recordedAt: String;
+  invariants {
+    self.entryId <> null;
+    self.sku <> null;
+    self.recordedAt <> null;
+  }
+}
+
+// ─── Domain stories (happenings) with identity ──────────────────────────
+happening OutboundShipmentFlow {
+  identity: flowId;
+  property flowId: String;
+  property sku: SKU;
+  property requestedQty: Real;
+  property allocatedQty: Real;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.outcome <> null;
+  }
+}
+
+happening InboundRestockFlow {
+  identity: flowId;
+  property flowId: String;
+  property sku: SKU;
+  property receivedQty: Real;
+  property fulfilledBackorderQty: Real;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.outcome <> null;
+  }
+}
+
+happening NightlyReconciliationFlow {
+  identity: flowId;
+  property flowId: String;
+  property startAt: String;
+  property endAt: String;
+  property computedQty: Real;
+  property cachedQty: Real;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.outcome <> null;
+  }
+}

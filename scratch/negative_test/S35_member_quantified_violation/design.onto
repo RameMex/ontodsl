@@ -1,0 +1,32 @@
+schema "onto/0.1";
+namespace o3_negtest;
+
+category PhysicallyPlausible where bearer: SensorKind {
+  invariants {
+    bearer.minPlausible >= 0.0;
+    bearer.maxPlausible > bearer.minPlausible;
+    bearer.maxPlausible <= 1000.0;
+  }
+}
+
+kind SensorKind specializes PhysicallyPlausible {
+  identity: sid;
+  property sid: String;
+  property minPlausible: Real;
+  property maxPlausible: Real;
+  invariants {
+    self.minPlausible = 0.0;
+    self.maxPlausible = 1000.0;
+  }
+}
+
+kind BrokenSensor specializes PhysicallyPlausible {
+  identity: bid;
+  property bid: String;
+  property minPlausible: Real;
+  property maxPlausible: Real;
+  invariants {
+    self.minPlausible = 0.0;
+    self.maxPlausible = 10000.0;
+  }
+}

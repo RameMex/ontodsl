@@ -1,0 +1,259 @@
+schema "onto/0.1";
+namespace library_system_discovery;
+
+// =====================================================================
+// Discovery — Library Lending System
+//
+// Captures the problem space: stakeholders, vocabulary (glossary kinds),
+// domain flows (happenings), hard-goal commitments, and constraint
+// categories that the Requirements-stage system kind must inherit.
+// No system kind is declared here; no events on agents.
+// =====================================================================
+
+// ─── Stakeholders ─────────────────────────────────────────────────────────
+
+agent Borrower {
+  identity: borrowerId;
+  property borrowerId: String;
+  property name: String;
+  property email: String;
+  invariants {
+    self.borrowerId <> null;
+    self.name <> null;
+  }
+}
+
+agent Librarian {
+  identity: librarianId;
+  property librarianId: String;
+  property name: String;
+  property employeeNumber: String;
+  invariants {
+    self.librarianId <> null;
+    self.name <> null;
+  }
+}
+
+// The development / operations team — debitor of every stakeholder
+// commitment declared in this stage. The system kind (which will
+// ultimately discharge these commitments) does not exist yet.
+agent LibrarySystemVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+  }
+}
+
+// ─── Glossary Kinds ───────────────────────────────────────────────────────
+
+// A published work (title-level entity; the thing borrowers request).
+kind Title {
+  identity: titleId;
+  property titleId: String;
+  property isbn: String;
+  property name: String;
+  property author: String;
+  invariants {
+    self.titleId <> null;
+    self.isbn <> null;
+    self.name <> null;
+  }
+}
+
+// A physical instance of a title; uniquely identified by a copy ID.
+kind BookCopy {
+  identity: copyId;
+  property copyId: String;
+  property title: Title;
+  // Lifecycle state: 'AVAILABLE' | 'LOANED' | 'RESERVED'
+  property status: String;
+  invariants {
+    self.copyId <> null;
+    self.title <> null;
+    self.status <> null;
+  }
+}
+
+// An assignment of a book copy to a borrower for a bounded period.
+kind Loan {
+  identity: loanId;
+  property loanId: String;
+  property borrower: Borrower;
+  property copy: BookCopy;
+  property loanDate: Integer;
+  property dueDate: Integer;
+  property returnDate: Integer;
+  property isReturned: Boolean;
+  invariants {
+    self.loanId <> null;
+    self.borrower <> null;
+    self.copy <> null;
+    self.dueDate > self.loanDate;
+  }
+}
+
+// A claim placed on a currently-loaned copy by another borrower,
+// served when the copy returns.
+kind Reservation {
+  identity: reservationId;
+  property reservationId: String;
+  property borrower: Borrower;
+  property copy: BookCopy;
+  property reservationDate: Integer;
+  property availableDate: Integer;
+  property expiryDays: Integer;
+  property isCancelled: Boolean;
+  invariants {
+    self.reservationId <> null;
+    self.borrower <> null;
+    self.copy <> null;
+    self.expiryDays > 0;
+  }
+}
+
+// Accumulated charge against a borrower for overdue returns.
+kind LateFee {
+  identity: feeId;
+  property feeId: String;
+  property borrower: Borrower;
+  property loan: Loan;
+  property dailyRate: Real;
+  property accruedAmount: Real;
+  property isPaid: Boolean;
+  invariants {
+    self.feeId <> null;
+    self.borrower <> null;
+    self.loan <> null;
+    self.dailyRate > 0.0;
+    self.accruedAmount >= 0.0;
+  }
+}
+
+// ─── Constraint Categories (hard goals → inherited invariants) ────────────
+
+// GOAL-1: Mutually-exclusive copy state.
+category MutuallyExclusiveCopyState where bearer: BookCopy {
+  invariants {
+    bearer.status <> null;
+  }
+}
+
+// GOAL-2: Block loans for indebted borrowers.
+category IndebtedBorrowerBlock where bearer: Borrower {
+  invariants {
+    bearer.borrowerId <> null;
+  }
+}
+
+// GOAL-3: Expire stale reservations — 7-day window post-availability.
+category StaleReservationExpiry where bearer: Reservation {
+  invariants {
+    bearer.expiryDays > 0;
+  }
+}
+
+// GOAL-4: Late fee computation integrity.
+category AccurateLateFeesConstraint where bearer: LateFee {
+  invariants {
+    bearer.dailyRate > 0.0;
+    bearer.accruedAmount >= 0.0;
+  }
+}
+
+// ─── Commitments (stakeholder concerns / hard goals) ──────────────────────
+
+// GOAL-1 commitment: the vendor guarantees copy states are
+// mutually exclusive and all transitions are recorded.
+commitment MutuallyExclusiveCopyStateCommitment
+  debitor: LibrarySystemVendor
+  creditor: Librarian {
+    identity: commitmentId;
+    property commitmentId: String;
+    predicate: self.commitmentId <> null;
+  }
+
+// GOAL-2 commitment: the vendor guarantees loans are blocked when
+// the borrower has outstanding (unpaid) late fees.
+commitment IndebtedBorrowerBlockCommitment
+  debitor: LibrarySystemVendor
+  creditor: Borrower {
+    identity: commitmentId;
+    property commitmentId: String;
+    property outstandingFeeThreshold: Real;
+    predicate: self.outstandingFeeThreshold >= 0.0;
+  }
+
+// GOAL-3 commitment: the vendor guarantees reservations auto-cancel
+// after the configured window following copy availability.
+commitment StaleReservationExpiryCommitment
+  debitor: LibrarySystemVendor
+  creditor: Borrower {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxReservationHoldDays: Real;
+    predicate: self.maxReservationHoldDays > 0.0;
+  }
+
+// GOAL-4 commitment: the vendor guarantees late fees are computed
+// as (returnDate - dueDate) * dailyRate and applied on return.
+commitment AccurateLateFeesCommitment
+  debitor: LibrarySystemVendor
+  creditor: Borrower {
+    identity: commitmentId;
+    property commitmentId: String;
+    property dailyRatePerDay: Real;
+    predicate: self.dailyRatePerDay > 0.0;
+  }
+
+// Vision-level commitment: the vendor commits to delivering a lending
+// system that fully enforces the library's lending policies end-to-end.
+commitment LibrarySystemVisionCommitment
+  debitor: LibrarySystemVendor
+  creditor: Librarian {
+    identity: commitmentId;
+    property commitmentId: String;
+    property systemName: String;
+    predicate: self.commitmentId <> null;
+  }
+
+// ─── Domain Stories (happenings) ─────────────────────────────────────────
+
+// Typical loan lifecycle: request → check → transition → return.
+happening LoanFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+  }
+}
+
+// Reservation lifecycle: placed on loaned copy → copy returns →
+// copy transitions to RESERVED → borrower picks up OR 7-day expiry.
+happening ReservationFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+  }
+}
+
+// Late fee lifecycle: overdue return detected → fee computed →
+// fee associated with borrower → blocks future loans until paid.
+happening LateFeeFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+  }
+}

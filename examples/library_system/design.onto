@@ -1,0 +1,604 @@
+schema "onto/0.1";
+namespace library_system_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Design — Library Lending System
+//
+// Decomposes LibraryLendingSystem into four cohesive components:
+//
+//   CopyLedger          — owns BookCopy lifecycle state transitions
+//   LoanManager         — owns Loan records and active-loan tracking
+//   ReservationManager  — owns Reservation records and expiry logic
+//   FeeManager          — owns LateFee records and borrower balances
+//
+// Components are sibling kinds (NOT subkinds of LibraryLendingSystem).
+// Interfaces between components are relators mediating role pairs.
+// Cross-component flows are modeled as happenings.
+//
+// Every component event carries a 'refines:' clause naming the
+// Requirements (or Formalization) parent event it implements, enabling
+// Obligation 4 / W38 / W39 verification by the inter-stage verifier.
+// =====================================================================
+
+
+// =====================================================================
+// SECTION 1 — ROLES
+// One role per component endpoint that participates in an interface
+// relator.  Each role is mediated by the relator that connects the
+// two components.
+// =====================================================================
+
+// Roles on the CopyLedger side
+role CopyLedgerEndpoint mediated-by LoanIssuanceInterface of CopyLedger {
+  property copyLedgerId: String;
+}
+
+role CopyLedgerReservationEndpoint mediated-by ReturnWithReservationInterface of CopyLedger {
+  property copyLedgerId: String;
+}
+
+// Roles on the LoanManager side
+role LoanManagerEndpoint mediated-by LoanIssuanceInterface of LoanManager {
+  property loanManagerId: String;
+}
+
+role LoanManagerFeeEndpoint mediated-by LoanReturnFeeInterface of LoanManager {
+  property loanManagerId: String;
+}
+
+// Roles on the ReservationManager side
+role ReservationManagerEndpoint mediated-by ReturnWithReservationInterface of ReservationManager {
+  property reservationManagerId: String;
+}
+
+// Roles on the FeeManager side
+role FeeManagerEndpoint mediated-by LoanReturnFeeInterface of FeeManager {
+  property feeManagerId: String;
+}
+
+
+// =====================================================================
+// SECTION 2 — COMPONENT KINDS
+// =====================================================================
+
+// ------------------------------------------------------------------
+// 2.1  CopyLedger
+// Responsibility: own and enforce the lifecycle state of every
+// BookCopy ('AVAILABLE' | 'LOANED' | 'RESERVED').  This component
+// is the single writer of BookCopy.status, enforcing GOAL-1.
+// ------------------------------------------------------------------
+kind CopyLedger {
+  identity: copyLedgerId;
+  property copyLedgerId: String;
+
+  // The copy being managed by this ledger instance.
+  property copyId: String;
+  property copyStatus: String;       // 'AVAILABLE' | 'LOANED' | 'RESERVED'
+
+  invariants {
+    self.copyLedgerId <> null;
+    self.copyId <> null;
+    self.copyStatus <> null;
+  }
+
+  // ----------------------------------------------------------------
+  // CL-1  transitionToLoaned
+  // Fires when checkOutCopy or pickUpReservation succeeds.
+  // Pre weaker-or-equal: requires copyStatus = 'AVAILABLE' or
+  // 'RESERVED' (both cases of the Requirements pre).
+  // Post stronger: asserts exact status value.
+  // ----------------------------------------------------------------
+  event transitionToLoaned()
+    refines
+      library_system_requirements::LibraryLendingSystem.checkOutCopy,
+      library_system_requirements::LibraryLendingSystem.pickUpReservation {
+
+    pre: self.copyStatus = 'AVAILABLE';
+
+    post: self.copyStatus = 'LOANED';
+
+    modifies: self.copyStatus;
+  }
+
+  // ----------------------------------------------------------------
+  // CL-1b  transitionToLoanedFromReserved
+  // Fires specifically when pickUpReservation consumes a RESERVED copy.
+  // ----------------------------------------------------------------
+  event transitionToLoanedFromReserved()
+    refines
+      library_system_requirements::LibraryLendingSystem.pickUpReservation {
+
+    pre: self.copyStatus = 'RESERVED';
+
+    post: self.copyStatus = 'LOANED';
+
+    modifies: self.copyStatus;
+  }
+
+  // ----------------------------------------------------------------
+  // CL-2  transitionToAvailable
+  // Fires when returnLoan (no waiting reservation) or
+  // expireReservation succeeds.
+  // ----------------------------------------------------------------
+  event transitionToAvailable()
+    refines
+      library_system_requirements::LibraryLendingSystem.returnLoan,
+      library_system_requirements::LibraryLendingSystem.expireReservation {
+
+    pre: self.copyStatus = 'LOANED';
+
+    post: self.copyStatus = 'AVAILABLE';
+
+    modifies: self.copyStatus;
+  }
+
+  // ----------------------------------------------------------------
+  // CL-2b  transitionToAvailableFromReserved
+  // Fires when expireReservation cancels a RESERVED copy.
+  // ----------------------------------------------------------------
+  event transitionToAvailableFromReserved()
+    refines
+      library_system_requirements::LibraryLendingSystem.expireReservation {
+
+    pre: self.copyStatus = 'RESERVED';
+
+    post: self.copyStatus = 'AVAILABLE';
+
+    modifies: self.copyStatus;
+  }
+
+  // ----------------------------------------------------------------
+  // CL-3  transitionToReserved
+  // Fires when returnLoanWithReservation detects a waiting
+  // reservation: copy goes LOANED -> RESERVED.
+  // ----------------------------------------------------------------
+  event transitionToReserved()
+    refines
+      library_system_requirements::LibraryLendingSystem.returnLoanWithReservation {
+
+    pre: self.copyStatus = 'LOANED';
+
+    post: self.copyStatus = 'RESERVED';
+
+    modifies: self.copyStatus;
+  }
+}
+
+
+// ------------------------------------------------------------------
+// 2.2  LoanManager
+// Responsibility: create, maintain, and close Loan records; track
+// the active-loans count; provide the dueDate for fee computation.
+// ------------------------------------------------------------------
+kind LoanManager {
+  identity: loanManagerId;
+  property loanManagerId: String;
+
+  property activeLoanCount: Integer;
+
+  // Representative loan fields for the current operation in flight.
+  property currentLoanId: String;
+  property currentLoanDate: Integer;
+  property currentDueDate: Integer;
+  property currentReturnDate: Integer;
+  property currentLoanReturned: Boolean;
+
+  invariants {
+    self.loanManagerId <> null;
+    self.activeLoanCount >= 0;
+  }
+
+  // ----------------------------------------------------------------
+  // LM-1  openLoan
+  // Record a new loan; increment active count.
+  // Weaker pre: dueDate > loanDate (same as Requirements).
+  // Stronger post: also records loanId and sets isReturned = false.
+  // ----------------------------------------------------------------
+  event openLoan(loanDate: Integer, dueDate: Integer)
+    refines
+      library_system_requirements::LibraryLendingSystem.checkOutCopy,
+      library_system_requirements::LibraryLendingSystem.pickUpReservation {
+
+    pre: dueDate > loanDate;
+    pre: self.activeLoanCount >= 0;
+
+    post: self.activeLoanCount = self.activeLoanCount@pre + 1;
+    post: self.currentLoanDate = loanDate;
+    post: self.currentDueDate = dueDate;
+    post: self.currentLoanReturned = false;
+
+    modifies:
+      self.activeLoanCount,
+      self.currentLoanDate,
+      self.currentDueDate,
+      self.currentLoanReturned;
+  }
+
+  // ----------------------------------------------------------------
+  // LM-2  closeLoan
+  // Mark a loan as returned; decrement active count.
+  // Used by both returnLoan and returnLoanWithReservation.
+  // ----------------------------------------------------------------
+  event closeLoan(returnDate: Integer)
+    refines
+      library_system_requirements::LibraryLendingSystem.returnLoan,
+      library_system_requirements::LibraryLendingSystem.returnLoanWithReservation {
+
+    pre: self.currentLoanReturned = false;
+    pre: self.activeLoanCount > 0;
+    pre: returnDate > 0;
+
+    post: self.currentReturnDate = returnDate;
+    post: self.currentLoanReturned = true;
+    post: self.activeLoanCount = self.activeLoanCount@pre - 1;
+
+    modifies:
+      self.currentReturnDate,
+      self.currentLoanReturned,
+      self.activeLoanCount;
+  }
+}
+
+
+// ------------------------------------------------------------------
+// 2.3  ReservationManager
+// Responsibility: create and cancel Reservation records; enforce the
+// 7-day expiry window (GOAL-3).
+// ------------------------------------------------------------------
+kind ReservationManager {
+  identity: reservationManagerId;
+  property reservationManagerId: String;
+
+  property currentReservationId: String;
+  property reservationActive: Boolean;
+  property reservationAge: Integer;         // days since copy became RESERVED
+  property maxHoldDays: Integer;            // configurable; default 7
+
+  invariants {
+    self.reservationManagerId <> null;
+    self.reservationAge >= 0;
+    self.maxHoldDays > 0;
+  }
+
+  // ----------------------------------------------------------------
+  // RM-1  createReservation
+  // Record a new reservation on a LOANED copy.
+  // ----------------------------------------------------------------
+  event createReservation()
+    refines
+      library_system_requirements::LibraryLendingSystem.placeReservation {
+
+    pre: self.reservationActive = false;
+
+    post: self.reservationActive = true;
+    post: self.reservationAge = 0;
+
+    modifies:
+      self.reservationActive,
+      self.reservationAge;
+  }
+
+  // ----------------------------------------------------------------
+  // RM-2  activateReservationOnReturn
+  // When a loaned copy returns and a reservation is waiting, reset
+  // the age clock so the 7-day window starts from today.
+  // ----------------------------------------------------------------
+  event activateReservationOnReturn()
+    refines
+      library_system_requirements::LibraryLendingSystem.returnLoanWithReservation {
+
+    pre: self.reservationActive = true;
+
+    post: self.reservationAge = 0;
+
+    modifies: self.reservationAge;
+  }
+
+  // ----------------------------------------------------------------
+  // RM-3  expireReservation
+  // Auto-cancel a stale reservation; GOAL-3 enforcement.
+  // Pre strictly stronger than Requirements (age > maxHoldDays
+  // already in requirements; we also require reservationActive).
+  // ----------------------------------------------------------------
+  event expireReservation()
+    refines
+      library_system_requirements::LibraryLendingSystem.expireReservation,
+      library_system_discovery::StaleReservationExpiryCommitment {
+
+    pre: self.reservationActive = true;
+    pre: self.reservationAge > self.maxHoldDays;
+
+    post: self.reservationActive = false;
+
+    modifies: self.reservationActive;
+  }
+
+  // ----------------------------------------------------------------
+  // RM-4  consumeReservation
+  // Mark reservation as fulfilled when borrower picks up the copy.
+  // ----------------------------------------------------------------
+  event consumeReservation()
+    refines
+      library_system_requirements::LibraryLendingSystem.pickUpReservation {
+
+    pre: self.reservationActive = true;
+    pre: self.reservationAge <= self.maxHoldDays;
+
+    post: self.reservationActive = false;
+
+    modifies: self.reservationActive;
+  }
+}
+
+
+// ------------------------------------------------------------------
+// 2.4  FeeManager
+// Responsibility: compute late fees on overdue returns; track
+// outstanding balance per borrower; record payments (GOAL-2, GOAL-4).
+// ------------------------------------------------------------------
+kind FeeManager {
+  identity: feeManagerId;
+  property feeManagerId: String;
+
+  property dailyLateRate: Real;
+  property outstandingBalance: Real;
+  property lastFeeCharged: Real;
+
+  invariants {
+    self.feeManagerId <> null;
+    self.dailyLateRate > 0.0;
+    self.outstandingBalance >= 0.0;
+    self.lastFeeCharged >= 0.0;
+  }
+
+  // ----------------------------------------------------------------
+  // FM-1  applyLateFee
+  // Compute and post a late fee when a copy is returned overdue.
+  // Post-condition discharges AccurateLateFeesCommitment: asserts the
+  // exact formula  fee = (returnDate - dueDate) * dailyLateRate.
+  // ----------------------------------------------------------------
+  event applyLateFee(returnDate: Integer, dueDate: Integer)
+    refines
+      library_system_requirements::LibraryLendingSystem.returnLoan,
+      library_system_requirements::LibraryLendingSystem.returnLoanWithReservation,
+      library_system_discovery::AccurateLateFeesCommitment,
+      library_system_formalization::LibraryLendingSystemFormalized.enforceLateFeeFormula {
+
+    pre: returnDate > dueDate;
+    pre: dueDate > 0;
+    pre: self.dailyLateRate > 0.0;
+
+    post: self.lastFeeCharged = (returnDate - dueDate) * self.dailyLateRate;
+    post: self.outstandingBalance = self.outstandingBalance@pre + self.lastFeeCharged;
+
+    modifies:
+      self.lastFeeCharged,
+      self.outstandingBalance;
+  }
+
+  // ----------------------------------------------------------------
+  // FM-2  applyNoFee
+  // Record that an on-time return accrues zero additional fees.
+  // ----------------------------------------------------------------
+  event applyNoFee()
+    refines
+      library_system_requirements::LibraryLendingSystem.returnLoan,
+      library_system_requirements::LibraryLendingSystem.returnLoanWithReservation {
+
+    pre: self.dailyLateRate > 0.0;
+
+    post: self.lastFeeCharged = 0.0;
+
+    modifies: self.lastFeeCharged;
+  }
+
+  // ----------------------------------------------------------------
+  // FM-3  settleBalance
+  // Record full payment of outstanding fees; clears the block on
+  // new loans (GOAL-2).
+  // ----------------------------------------------------------------
+  event settleBalance(amount: Real)
+    refines
+      library_system_requirements::LibraryLendingSystem.payLateFees,
+      library_system_discovery::IndebtedBorrowerBlockCommitment {
+
+    pre: amount > 0.0;
+    pre: amount >= self.outstandingBalance;
+
+    post: self.outstandingBalance = 0.0;
+
+    modifies: self.outstandingBalance;
+  }
+
+  // ----------------------------------------------------------------
+  // FM-4  rejectDueToOutstandingFees  (pure rejection; no modifies)
+  // Guard that blocks check-out / reservation / pick-up when the
+  // borrower's balance exceeds zero.
+  // ----------------------------------------------------------------
+  event rejectDueToOutstandingFees()
+    refines
+      library_system_requirements::LibraryLendingSystem.rejectLoanDueToFees,
+      library_system_formalization::LibraryLendingSystemFormalized.rejectPickUpWithFees,
+      library_system_formalization::LibraryLendingSystemFormalized.rejectReservationWithFees {
+
+    pre: self.outstandingBalance > 0.0;
+
+    post: self.outstandingBalance > 0.0;
+  }
+}
+
+
+// =====================================================================
+// SECTION 3 — INTERFACE RELATORS
+// Each relator mediates two component roles and captures the contract
+// that must hold at the boundary between the two components.
+// =====================================================================
+
+// ------------------------------------------------------------------
+// 3.1  LoanIssuanceInterface
+// Connects CopyLedger and LoanManager during check-out and
+// pick-up-reservation flows.  Both components must agree on the
+// copy's transition to LOANED and the opening of a new Loan record.
+// ------------------------------------------------------------------
+relator LoanIssuanceInterface mediates (CopyLedgerEndpoint, LoanManagerEndpoint) {
+  identity: issuanceInterfaceId;
+  property issuanceInterfaceId: String;
+  property loanDate: Integer;
+  property dueDate: Integer;
+  property copyId: String;
+
+  invariants {
+    self.issuanceInterfaceId <> null;
+    self.dueDate > self.loanDate;
+    self.copyId <> null;
+  }
+}
+
+// ------------------------------------------------------------------
+// 3.2  ReturnWithReservationInterface
+// Connects CopyLedger and ReservationManager when a loaned copy
+// returns and a reservation is waiting.  Both must coordinate the
+// LOANED → RESERVED transition and the age-clock reset.
+// ------------------------------------------------------------------
+relator ReturnWithReservationInterface mediates (CopyLedgerReservationEndpoint, ReservationManagerEndpoint) {
+  identity: returnReservationInterfaceId;
+  property returnReservationInterfaceId: String;
+  property copyId: String;
+  property returnDate: Integer;
+
+  invariants {
+    self.returnReservationInterfaceId <> null;
+    self.copyId <> null;
+    self.returnDate > 0;
+  }
+}
+
+// ------------------------------------------------------------------
+// 3.3  LoanReturnFeeInterface
+// Connects LoanManager and FeeManager on return: LoanManager provides
+// the dueDate, FeeManager computes and posts any late fee.
+// ------------------------------------------------------------------
+relator LoanReturnFeeInterface mediates (LoanManagerFeeEndpoint, FeeManagerEndpoint) {
+  identity: returnFeeInterfaceId;
+  property returnFeeInterfaceId: String;
+  property returnDate: Integer;
+  property dueDate: Integer;
+  property dailyLateRate: Real;
+
+  invariants {
+    self.returnFeeInterfaceId <> null;
+    self.dailyLateRate > 0.0;
+    self.returnDate > 0;
+    self.dueDate > 0;
+  }
+}
+
+
+// =====================================================================
+// SECTION 4 — CROSS-COMPONENT DATA FLOWS (HAPPENINGS)
+// One happening per end-to-end story whose steps cross component
+// boundaries.  Steps are described via triggeredBy / outcome
+// properties so the inter-stage verifier can match them against the
+// Discovery domain stories.
+// =====================================================================
+
+// ------------------------------------------------------------------
+// 4.1  CheckOutFlow
+// CopyLedger.transitionToLoaned + LoanManager.openLoan.
+// Corresponds to Discovery::LoanFlow.
+// ------------------------------------------------------------------
+happening CheckOutFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+  }
+}
+
+// ------------------------------------------------------------------
+// 4.2  ReturnNoReservationFlow
+// CopyLedger.transitionToAvailable + LoanManager.closeLoan +
+// FeeManager.applyLateFee (or applyNoFee).
+// Corresponds to Discovery::LoanFlow + LateFeeFlow.
+// ------------------------------------------------------------------
+happening ReturnNoReservationFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+  }
+}
+
+// ------------------------------------------------------------------
+// 4.3  ReturnWithReservationFlow
+// CopyLedger.transitionToReserved + LoanManager.closeLoan +
+// ReservationManager.activateReservationOnReturn +
+// FeeManager.applyLateFee (or applyNoFee).
+// Corresponds to Discovery::LoanFlow + ReservationFlow + LateFeeFlow.
+// ------------------------------------------------------------------
+happening ReturnWithReservationFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+  }
+}
+
+// ------------------------------------------------------------------
+// 4.4  ReservationExpiryFlow
+// ReservationManager.expireReservation +
+// CopyLedger.transitionToAvailableFromReserved.
+// Corresponds to Discovery::ReservationFlow.
+// ------------------------------------------------------------------
+happening ReservationExpiryFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+  }
+}
+
+// ------------------------------------------------------------------
+// 4.5  PickUpReservationFlow
+// CopyLedger.transitionToLoanedFromReserved +
+// LoanManager.openLoan + ReservationManager.consumeReservation +
+// FeeManager guard (rejectDueToOutstandingFees or proceed).
+// Corresponds to Discovery::ReservationFlow.
+// ------------------------------------------------------------------
+happening PickUpReservationFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+  }
+}
+
+
+// =====================================================================
+// SECTION 5 — EXPLICIT RELATIONS
+// =====================================================================
+
+relation issuanceToLedger:   <<mediation>> from LoanIssuanceInterface [1] to CopyLedgerEndpoint [1];
+relation issuanceToLoan:     <<mediation>> from LoanIssuanceInterface [1] to LoanManagerEndpoint [1];
+relation returnResvToLedger: <<mediation>> from ReturnWithReservationInterface [1] to CopyLedgerReservationEndpoint [1];
+relation returnResvToResv:   <<mediation>> from ReturnWithReservationInterface [1] to ReservationManagerEndpoint [1];
+relation returnFeeToLoan:    <<mediation>> from LoanReturnFeeInterface [1] to LoanManagerFeeEndpoint [1];
+relation returnFeeToFee:     <<mediation>> from LoanReturnFeeInterface [1] to FeeManagerEndpoint [1];

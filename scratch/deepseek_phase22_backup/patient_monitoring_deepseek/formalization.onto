@@ -1,0 +1,393 @@
+schema "onto/0.1";
+namespace patient_monitoring_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stage 3 — Formalization
+// What the WORLD imposes on the bedside vital-signs monitor.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── 1. REGULATORY / COMPLIANCE ANCHORS (categories with documentary invariants) ───
+
+// IEC 62304 — Class C (life-sustaining) software lifecycle standard.
+category Iec62304ClassC {
+  property softwareVersion: String;
+  property safetyClassification: String;
+  property riskAssessmentDocRef: String;
+  invariants {
+    self.softwareVersion <> null;
+    self.safetyClassification = 'Class C';
+    self.riskAssessmentDocRef <> null;
+  }
+}
+
+// IEC 60601-1-8 — Alarm system standard for medical electrical equipment.
+category Iec60601_1_8Compliant {
+  property alarmPriorityLevels: String;   // "LOW", "MEDIUM", "HIGH"
+  property alarmSignalType: String;       // "AUDIBLE + VISUAL"
+  property alarmDelayMaxMs: Real;
+  invariants {
+    self.alarmPriorityLevels <> null;
+    self.alarmDelayMaxMs > 0.0;
+    self.alarmDelayMaxMs <= 2000.0;   // 2 seconds in ms
+  }
+}
+
+// ISO 13485 — Quality management system for medical devices.
+category Iso13485Compliant {
+  property qualitySystemRef: String;
+  property auditCycleMonths: Integer;
+  invariants {
+    self.qualitySystemRef <> null;
+    self.auditCycleMonths >= 12;
+  }
+}
+
+// FDA 510(k) clearance category (documentary — the monitor is cleared for sale).
+category FdaCleared {
+  property fda510kNumber: String;
+  property indicationsForUse: String;
+  property clearanceDate: String;
+  invariants {
+    self.fda510kNumber <> null;
+    self.indicationsForUse <> null;
+  }
+}
+
+// ─── 2. PHYSICAL / DOMAIN-LOGICAL INVARIANTS (member-quantified categories) ───
+
+// Plausibility: heart rate readings MUST be within [20, 250] bpm.
+// Any value outside this range is a sensor/physiology artifact.
+category PhysicallyPlausibleHeartRate where bearer: VitalSignMonitorSystem {
+  invariants {
+    bearer.plausibleMin >= 20.0;
+    bearer.plausibleMax <= 250.0;
+    bearer.plausibleMax > bearer.plausibleMin;
+    // The system must not display values outside this window.
+    bearer.isDisplaying implies
+      (bearer.displayValue >= bearer.plausibleMin and
+       bearer.displayValue <= bearer.plausibleMax);
+  }
+}
+
+// Alarm timing: alarms must fire within 2 seconds of threshold crossing.
+category AlarmTimingConstraint where bearer: VitalSignMonitorSystem {
+  invariants {
+    bearer.alarmLatencyBudgetSeconds <= 2.0;
+    bearer.alarmLatencyBudgetSeconds >= 0.0;
+  }
+}
+
+// Sensor disconnect: loss of signal >5 seconds triggers disconnect alarm.
+category SensorDisconnectTiming where bearer: VitalSignMonitorSystem {
+  invariants {
+    bearer.disconnectThresholdSeconds = 5.0;
+    bearer.disconnectThresholdSeconds > 0.0;
+    (bearer.sensorConnected = false) implies bearer.disconnectAlarmRaised;
+    bearer.disconnectAlarmRaised implies
+      ((bearer.alarmRaisedAt - bearer.lastSignalAt) > bearer.disconnectThresholdSeconds);
+  }
+}
+
+// Silence auto-rearm: alarm unsilences after exactly 120 seconds.
+category SilenceAutoRearmRule where bearer: VitalSignMonitorSystem {
+  invariants {
+    bearer.autoRearmSeconds = 120.0;
+    bearer.autoRearmSeconds > 0.0;
+    (bearer.alarmSilenced and bearer.silenceStartedAt > 0.0) implies
+      (bearer.silenceStartedAt + bearer.autoRearmSeconds > 0.0);
+  }
+}
+
+// ─── 3. PASSIVE ASSUMPTIONS (documentary record, NOT events) ───────────────
+// Each is an explicit kind with a `@assumption` annotation on its
+// identity property.
+
+// @assumption ASSUME-1: The ECG sensor delivers at least one reading per
+// second under normal conditions (to guarantee 5-second disconnect detection).
+kind SensorDeliveryRateAssumption {
+  identity: assumptionId;
+  property assumptionId: String;      // @assumption ASSUME-1
+  property sourceSensorType: String;
+  property minDeliveryHz: Real;
+  property maxInterarrivalSeconds: Real;
+  invariants {
+    self.assumptionId <> null;        // @assumption ASSUME-1
+    self.sourceSensorType = 'ecg';
+    self.minDeliveryHz >= 1.0;
+    self.maxInterarrivalSeconds > 0.0;
+    self.maxInterarrivalSeconds <= 1.0;   // at most 1 sec between readings
+  }
+}
+
+// @assumption ASSUME-2: The clock/timer subsystem advances monotonically
+// and never skips more than 1ms per tick.
+kind ClockMonotonicityAssumption {
+  identity: assumptionId;
+  property assumptionId: String;      // @assumption ASSUME-2
+  property maxTickSkewMs: Real;
+  invariants {
+    self.assumptionId <> null;        // @assumption ASSUME-2
+    self.maxTickSkewMs <= 1.0;
+    self.maxTickSkewMs >= 0.0;
+  }
+}
+
+// @assumption ASSUME-3: The clinician's acknowledgement button is debounced
+// in hardware; one press fires exactly one acknowledgeAlarm event.
+kind ButtonDebounceAssumption {
+  identity: assumptionId;
+  property assumptionId: String;      // @assumption ASSUME-3
+  property debounceWindowMs: Real;
+  invariants {
+    self.assumptionId <> null;        // @assumption ASSUME-3
+    self.debounceWindowMs >= 50.0;
+    self.debounceWindowMs <= 100.0;
+  }
+}
+
+// @assumption ASSUME-4: The configured thresholds (low/high) always
+// fall within the plausibility window [20, 250] bpm.
+kind ThresholdBoundsAssumption {
+  identity: assumptionId;
+  property assumptionId: String;      // @assumption ASSUME-4
+  property plausibleMin: Real;
+  property plausibleMax: Real;
+  invariants {
+    self.assumptionId <> null;        // @assumption ASSUME-4
+    self.plausibleMin = 20.0;
+    self.plausibleMax = 250.0;
+  }
+}
+
+// ─── 4. ACTIVE BUSINESS RULES — events on a formalized subkind ────────────────
+// Per the playbook Stage 3: a subkind that specializes the requirements-stage
+// Kind. Categories are NOT on the specializes list (S21 restriction).
+// Instead, the requirements-stage Kind already specializes the constraint
+// categories from Stage 2. The Formalization subkind inherits those.
+// The regulatory categories are inherited via the parent Kind's
+// specializes clause (we add them to VitalSignMonitorSystem's specializes
+// list in requirements — but since we cannot modify that file here,
+// we express the membership of THIS subkind via <<memberOf>> relations
+// (target must be a Kind, so we turn the regulatory categories into Kinds).
+
+// ─── 4a. Regulatory categories become Kinds (sortals) for <<memberOf>> ─────
+// This is the correct modeling: a regulatory "clearance" is a sortal —
+// a system either HAS it or does NOT. It has identity (the clearance number).
+
+kind Iec62304Clearance {
+  identity: clearanceId;
+  property clearanceId: String;
+  property softwareVersion: String;
+  property safetyClassification: String;
+  property riskAssessmentDocRef: String;
+  invariants {
+    self.clearanceId <> null;
+    self.softwareVersion <> null;
+    self.safetyClassification = 'Class C';
+    self.riskAssessmentDocRef <> null;
+  }
+}
+
+kind Iec60601Clearance {
+  identity: clearanceId;
+  property clearanceId: String;
+  property alarmPriorityLevels: String;
+  property alarmSignalType: String;
+  property alarmDelayMaxMs: Real;
+  invariants {
+    self.clearanceId <> null;
+    self.alarmPriorityLevels <> null;
+    self.alarmSignalType = 'AUDIBLE + VISUAL';
+    self.alarmDelayMaxMs > 0.0;
+    self.alarmDelayMaxMs <= 2000.0;
+  }
+}
+
+kind Iso13485Clearance {
+  identity: clearanceId;
+  property clearanceId: String;
+  property qualitySystemRef: String;
+  property auditCycleMonths: Integer;
+  invariants {
+    self.clearanceId <> null;
+    self.qualitySystemRef <> null;
+    self.auditCycleMonths >= 12;
+  }
+}
+
+kind FdaClearance {
+  identity: clearanceId;
+  property clearanceId: String;
+  property fda510kNumber: String;
+  property indicationsForUse: String;
+  property clearanceDate: String;
+  invariants {
+    self.clearanceId <> null;
+    self.fda510kNumber <> null;
+    self.indicationsForUse <> null;
+  }
+}
+
+// ─── 4b. Formalized system subkind (specializes the requirements Kind) ─────
+// S21: a Subkind CAN specialize a Kind (VitalSignMonitorSystem).
+// S22: allowed.
+// The formalized subkind INHERITS identity from VitalSignMonitorSystem.
+
+subkind VitalSignMonitorSystemFormalized
+  specializes VitalSignMonitorSystem {
+
+  // ─── Assumption instances ──────────────────────────────────────────────
+  property sensorDeliveryAssumption: SensorDeliveryRateAssumption;
+  property clockMonotonicityAssumption: ClockMonotonicityAssumption;
+  property buttonDebounceAssumption: ButtonDebounceAssumption;
+  property thresholdBoundsAssumption: ThresholdBoundsAssumption;
+
+  // ─── Regulatory clearance references ──────────────────────────────────
+  property iec62304Clearance: Iec62304Clearance;
+  property iec60601Clearance: Iec60601Clearance;
+  property iso13485Clearance: Iso13485Clearance;
+  property fdaClearance: FdaClearance;
+
+  // ─── Inherited invariants from categories ─────────────────────────────
+  // The categories are member-quantified and apply to VitalSignMonitorSystem.
+  // Since this subkind inherits from it, Z3 must prove the entailment.
+  // We reinforce the key numeric invariants here for clarity.
+  invariants {
+    // Inherit identity from VitalSignMonitorSystem via specializes.
+    // Assumption instances
+    self.sensorDeliveryAssumption <> null;
+    self.clockMonotonicityAssumption <> null;
+    self.buttonDebounceAssumption <> null;
+    self.thresholdBoundsAssumption <> null;
+    // Regulatory clearances
+    self.iec62304Clearance <> null;
+    self.iec60601Clearance <> null;
+    self.iso13485Clearance <> null;
+    self.fdaClearance <> null;
+    // Reinforce physical invariants (from categories)
+    self.plausibleMin = 20.0;
+    self.plausibleMax = 250.0;
+    self.disconnectThresholdSeconds = 5.0;
+    self.autoRearmSeconds = 120.0;
+    self.alarmLatencyBudgetSeconds <= 2.0;
+  }
+
+  // ─── ACTIVE BUSINESS RULE 1: Reject implausible reading (guard) ──────
+  // This event fires BEFORE deliverReading to intercept values outside
+  // [20, 250] before they enter the normal path.
+  // It updates the rejection counter and does NOT display the value.
+  event rejectImplausibleReading(heartRate: Real, timestamp: Real)
+    refines patient_monitoring_discovery::RejectImplausibleCommitment {
+    pre: heartRate < self.plausibleMin or heartRate > self.plausibleMax;
+    pre: timestamp >= 0.0;
+
+    post: self.rejectionCounter = self.rejectionCounter@pre + 1;
+    post: self.displayValue = self.displayValue@pre;          // unchanged
+    post: self.isDisplaying = self.isDisplaying@pre;          // unchanged
+    post: self.currentHeartRate = self.currentHeartRate@pre;  // unchanged
+    // Sensor signal timestamp NOT updated — prevents disconnect timer reset
+    post: self.lastSignalAt = self.lastSignalAt@pre;
+    post: self.sensorConnected = self.sensorConnected@pre;
+    post: self.disconnectAlarmRaised = self.disconnectAlarmRaised@pre;
+    // Alarm state unchanged — this reading does not cross a threshold
+    post: self.alarmRaised = self.alarmRaised@pre;
+    post: self.alarmRaisedAt = self.alarmRaisedAt@pre;
+    post: self.alarmSilenced = self.alarmSilenced@pre;
+    post: self.silenceStartedAt = self.silenceStartedAt@pre;
+
+    modifies: self.rejectionCounter;
+  }
+
+  // ─── ACTIVE BUSINESS RULE 2: Threshold crossing alarm timer ──────────
+  // A periodic clock event that fires after deliverReading sets
+  // alarmRaised = true. This event verifies the alarm latency budget
+  // is met. If not, it forces an alarm.
+  event enforceAlarmLatency(currentTime: Real)
+    refines patient_monitoring_discovery::AlarmLatencyCommitment {
+    pre: self.alarmRaised;
+    pre: currentTime >= 0.0;
+
+    post: if (currentTime - self.alarmRaisedAt) > self.alarmLatencyBudgetSeconds then
+            self.alarmRaised = true   // remain raised (force compliance)
+          else
+            self.alarmRaised = self.alarmRaised@pre
+          endif;
+    post: self.alarmRaisedAt = self.alarmRaisedAt@pre;
+
+    modifies: self.alarmRaised;
+  }
+
+  // ─── ACTIVE BUSINESS RULE 3: Sensor disconnect alarm ─────────────────
+  // Clock-driven: monitors lastSignalAt and raises disconnect alarm
+  // when (currentTime - lastSignalAt) > disconnectThresholdSeconds.
+  // The parent's sensorDisconnectDetected already does this; this event
+  // is a FORMALIZATION GUARD that re-checks the invariant even if the
+  // parent event never fires (e.g., if the system misses a tick).
+  event assertSensorDisconnect(currentTime: Real)
+    refines patient_monitoring_discovery::SensorDisconnectCommitment {
+    pre: self.sensorConnected;
+    pre: currentTime >= 0.0;
+
+    post: if (currentTime - self.lastSignalAt) > self.disconnectThresholdSeconds then
+            self.sensorConnected = false
+            and self.disconnectAlarmRaised = true
+            and self.alarmRaised = true
+            and self.alarmRaisedAt = currentTime
+          else
+            self.sensorConnected = self.sensorConnected@pre
+            and self.disconnectAlarmRaised = self.disconnectAlarmRaised@pre
+            and self.alarmRaised = self.alarmRaised@pre
+            and self.alarmRaisedAt = self.alarmRaisedAt@pre
+          endif;
+
+    modifies: self.sensorConnected,
+              self.disconnectAlarmRaised,
+              self.alarmRaised,
+              self.alarmRaisedAt;
+  }
+
+  // ─── ACTIVE BUSINESS RULE 4: Auto-rearm timer ────────────────────────
+  // Clock-driven: unsilences the alarm after 120 seconds.
+  event autoRearmAlarm(currentTime: Real)
+    refines patient_monitoring_discovery::SilenceAutoRearmCommitment {
+    pre: self.alarmSilenced;
+    pre: self.silenceStartedAt > 0.0;
+    pre: currentTime >= 0.0;
+
+    post: if (currentTime - self.silenceStartedAt) >= self.autoRearmSeconds then
+            self.alarmSilenced = false
+            and self.silenceStartedAt = 0.0
+          else
+            self.alarmSilenced = self.alarmSilenced@pre
+            and self.silenceStartedAt = self.silenceStartedAt@pre
+          endif;
+
+    modifies: self.alarmSilenced, self.silenceStartedAt;
+  }
+
+  // ─── ACTIVE BUSINESS RULE 5: Regulated configuration guard ───────────
+  // IEC 60601-1-8 requires that alarm thresholds be configurable only
+  // within the approved physiological range. This event enforces that.
+  event configureThresholdsRegulated(newLow: Real, newHigh: Real) {
+    pre: newLow >= 20.0;            // plausibility floor
+    pre: newHigh <= 250.0;          // plausibility ceiling
+    pre: newLow < newHigh;
+    pre: newHigh > newLow;
+
+    post: self.lowAlarmThreshold = newLow;
+    post: self.highAlarmThreshold = newHigh;
+
+    modifies: self.lowAlarmThreshold, self.highAlarmThreshold;
+  }
+}
+
+// ─── 5. EXPLICIT <<memberOf>> RELATIONS FOR FORMALIZATION ARTIFACTS ──────
+// The formalized system kind belongs to each regulatory clearance (now a Kind).
+// <<memberOf>> target must be a sortal (Kind or Subkind) — check.
+
+relation formalizedSystemIsIec62304Member: <<memberOf>> from VitalSignMonitorSystemFormalized [1] to Iec62304Clearance [1];
+relation formalizedSystemIsIec60601Member: <<memberOf>> from VitalSignMonitorSystemFormalized [1] to Iec60601Clearance [1];
+relation formalizedSystemIsIso13485Member: <<memberOf>> from VitalSignMonitorSystemFormalized [1] to Iso13485Clearance [1];
+relation formalizedSystemIsFdaMember: <<memberOf>> from VitalSignMonitorSystemFormalized [1] to FdaClearance [1];

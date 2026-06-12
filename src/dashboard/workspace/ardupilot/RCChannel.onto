@@ -1,0 +1,54 @@
+schema "onto/0.1";
+namespace ardupilot_rc;
+
+// First-pass attempt, modeling RC_Channel.{h,cpp} — written quickly
+// without much care for ontodls's stricter contract requirements.
+// Intentionally sloppy so the verify loop has work to do.
+
+kind RC_Channel {
+  identity: channelId;
+
+  property channelId: String;
+  property radioIn: Integer internal default 0;
+  property radioMin: Integer default 1100;
+  property radioMax: Integer default 1900;
+  property radioTrim: Integer default 1500;
+  property deadZone: Integer default 30;
+  property controlIn: Integer internal default 0;
+
+  invariants {
+    self.channelId <> null;
+    // Fix: radioMin is an Integer microsecond PWM count; the invariant
+    // wants "non-zero positive" — use a bare Integer literal so the
+    // generated Rust stays in the i64 lane.
+    self.radioMin > 0;
+    self.radioMax > self.radioMin;
+    self.deadZone >= 0;
+  }
+
+  event set_pwm(pwm: Integer) {
+    pre: pwm >= 0;
+    pre: pwm <= 2500;
+    post: self.radioIn = pwm;
+    modifies: self.radioIn;
+  }
+
+  event update() {
+    effects: HardwareRead;
+    writes: radioIn, controlIn;
+    post: self.controlIn = self.radioIn;
+    modifies: self.radioIn, self.controlIn;
+  }
+
+  // Fix: declare the return type so 'result' is bound. Normalized
+  // stick input in [-1, 1] around the trim point.
+  event norm_input(): Real {
+    post: result.isFinite();
+    post: result >= 0.0 - 1.0;
+    post: result <= 1.0;
+  }
+
+  event get_radio_in(): Integer {
+    post: result = self.radioIn;
+  }
+}

@@ -1,0 +1,109 @@
+schema "onto/0.1";
+namespace ardupilot_math;
+
+// =====================================================================
+// UFO-A model of ArduPilot libraries/AP_Math/AP_Math.h.
+//
+// AP_Math is a namespace of free functions in C++; OntoDSL only has
+// Kinds/Subkinds with identity. We model it as a stateless utility
+// Kind (a singleton "AP_Math_Lib" instance) whose events are the
+// DbC-wrapped safe-math operations. The impl_fn supplied by the
+// caller does the actual computation; the wrapper enforces the
+// pre/post contracts that the C++ free functions implicitly assume.
+//
+// Scope: the operations most depended on by AC_PID, AHRS, motors,
+// and the EKF. Curve helpers and angle-wrapping utilities are out
+// of scope for this slice — they'd be straightforward to add.
+//
+// Generate with --rust-f32.
+// =====================================================================
+
+kind AP_Math {
+  identity: libId;
+
+  property libId: String;
+
+  invariants {
+    self.libId <> null;
+  }
+
+  // Mirrors `constrain_float(value, low, high)` — clamps `value`
+  // into [low, high]. C++ does NOT validate that low <= high; we
+  // strengthen the contract so a flipped range is caught.
+  event constrain(value: Real, low: Real, high: Real): Real {
+    pre: value.isFinite();
+    pre: low.isFinite();
+    pre: high.isFinite();
+    pre: low <= high;
+    post: result.isFinite();
+    post: result >= low;
+    post: result <= high;
+  }
+
+  // Mirrors `safe_sqrt(x)` — returns sqrt(x), or 0 if x < 0.
+  // The C++ version eats negative inputs silently; we keep that
+  // semantics (pre allows any value), and pin a non-negative finite
+  // result.
+  event safe_sqrt(value: Real): Real {
+    pre: value.isFinite();
+    post: result.isFinite();
+    post: result >= 0.0;
+  }
+
+  // Mirrors `safe_asin(x)` — returns asin(x) clamped to the legal
+  // input range [-1, 1]. C++ returns 0 for NaN.
+  event safe_asin(value: Real): Real {
+    pre: value.isFinite();
+    post: result.isFinite();
+    // asin's range is [-pi/2, pi/2] ≈ [-1.5707..., 1.5707...]
+    post: result >= 0.0 - 1.5708;
+    post: result <= 1.5708;
+  }
+
+  // Mirrors `is_zero(x)` — true iff |x| <= epsilon. The wrapper
+  // promises only a Boolean result; epsilon comparison logic lives
+  // in the impl.
+  event is_zero(value: Real): Boolean {
+    pre: value.isFinite();
+  }
+
+  // Mirrors `is_positive(x)` and `is_negative(x)` — strict sign
+  // tests that exclude NaN and small-magnitude denormals.
+  event is_positive(value: Real): Boolean {
+    pre: value.isFinite();
+  }
+
+  event is_negative(value: Real): Boolean {
+    pre: value.isFinite();
+  }
+
+  // Mirrors `calc_lowpass_alpha_dt(dt, cutoff_freq)` — produces an
+  // alpha in (0, 1]. Used by every LowPassFilter variant. The
+  // pre-conditions match the safe-call envelope.
+  event calc_lowpass_alpha(dt: Real, cutoffFreq: Real): Real {
+    pre: dt > 0.0;
+    pre: cutoffFreq >= 0.0;
+    post: result.isFinite();
+    post: result > 0.0;
+    post: result <= 1.0;
+  }
+
+  // Mirrors `wrap_PI(rad)` — normalises an angle to (-PI, PI].
+  event wrap_pi(rad: Real): Real {
+    pre: rad.isFinite();
+    post: result.isFinite();
+    post: result > 0.0 - 3.14159;
+    post: result <= 3.14160;
+  }
+
+  // Mirrors `radians(deg)` and `degrees(rad)`.
+  event radians(deg: Real): Real {
+    pre: deg.isFinite();
+    post: result.isFinite();
+  }
+
+  event degrees(rad: Real): Real {
+    pre: rad.isFinite();
+    post: result.isFinite();
+  }
+}

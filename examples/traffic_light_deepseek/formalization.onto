@@ -1,0 +1,180 @@
+schema "onto/0.1";
+namespace traffic_light_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =====================================================================
+// Formalization Stage — Traffic Light Controller
+// 
+// This stage captures what the WORLD imposes on the system:
+//   • Regulatory / compliance anchors as categories
+//   • Active business rules as rejection events on a formalized subkind
+//   • Passive assumptions as a documentary kind with @assumption tags
+//   • Physical / domain-logical invariants as member-quantified categories
+// =====================================================================
+
+// ─── Regulatory / Compliance Anchors ─────────────────────────────────
+// MUTCD (Manual on Uniform Traffic Control Devices) anchor:
+//   §4D.04 — Conflicting signal indications shall not be displayed.
+//   §4D.12 — Yellow change interval shall be at least 3 seconds.
+//   §4D.13 — Red clearance interval shall precede conflicting green.
+category MutcdCompliant where bearer: TrafficLightSystem {
+  property mutcdEdition: String;         // e.g. "2009 Edition Rev 3"
+  property jurisdiction: String;          // e.g. "US-FHWA"
+  invariants {
+    bearer.yellowIntervalSeconds >= 3.0;
+    bearer.greenApproaches->forAll(a |
+      bearer.greenApproaches->forAll(b |
+        a = b or a.direction <> b.direction));
+    bearer.isOperating implies (bearer.yellowTimerElapsed <= 30.0);
+  }
+}
+
+// IEC 61508 / ISO 26262 functional safety anchor (SIL-3 equivalent):
+//   The traffic controller is a safety-related system; preemption timing
+//   must be bounded by a safety mechanism.
+category Iec61508Compliant where bearer: TrafficLightSystem {
+  property silLevel: String;    // e.g. "SIL 3"
+  property safetyCaseVersion: String;
+  invariants {
+    bearer.preemptionResponseTimeSeconds <= 1.0;
+    bearer.isOperating implies (bearer.preemptionTimerElapsed <= 2.0);
+  }
+}
+
+// ADA (Americans with Disabilities Act) anchor — pedestrian accessibility:
+//   Accessible pedestrian signals (APS) shall provide WALK indication
+//   with audible/tactile cues. WALK must never conflict with GREEN.
+category AdaTitleIICompliant where bearer: TrafficLightSystem {
+  property adaComplianceYear: String;   // e.g. "2010"
+  property apsInstalled: Boolean;        // audible pedestrian signal
+  invariants {
+    bearer.walkSignalActive implies
+      bearer.greenApproaches->forAll(a | true);
+    bearer.pedestrianRequested implies not bearer.allRedActive;
+  }
+}
+
+// ─── Passive Assumptions (documentary, not enforced at runtime) ──────
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property assumptionCode: String;   // e.g. "ASSUME-1"
+  property description: String;
+  property rationales: String;
+  property owner: String;
+  invariants {
+    self.assumptionId <> null;
+    self.assumptionCode <> null;
+    self.description <> null;
+  }
+}
+
+// The following instances are documentary only. They do NOT generate
+// runtime checks. They exist so the verifier can trace which
+// assumptions the design relies on.
+// @assumption ASSUME-1: The preemption sensor is reliable and noise-free
+//   within the intersection environment. No false positives.
+// @assumption ASSUME-2: The minimum yellow interval timer starts
+//   immediately when transitionToYellow fires (no scheduling latency).
+// @assumption ASSUME-3: Pedestrian button presses are debounced by
+//   hardware before reaching the controller — at most one rising edge.
+// @assumption ASSUME-4: The controller clock granularity ≤ 10 ms,
+//   sufficient to measure 1-second preemption and 3-second yellow
+//   within tolerance (±5%).
+// @assumption ASSUME-5: No approach has more than 3 lanes; the
+//   controller's green-approach set size is bounded by available
+//   physical outputs.
+
+// ─── Physical / Domain-Logical Invariants (member-quantified categories)
+// Physical: A Phase's greenApproaches should never exceed the set of
+// all known approaches (already enforced in requirements, restated here).
+category PhysicallyPlausiblePhases where bearer: Phase {
+  invariants {
+    bearer.greenApproaches->size() >= 0;
+    bearer.greenApproaches->size() <= 4;  // at most a 4-way intersection
+  }
+}
+
+// Domain-logical: A Phase's name should match its green directions.
+// Fixed: use 'bearer' (the declared variable name), NOT 'beacon'.
+category PhaseNamingConsistent where bearer: Phase {
+  invariants {
+    bearer.name <> null implies
+      (bearer.name = 'NS' implies
+        bearer.greenApproaches->forAll(a | a.direction = 'North-South'));
+  }
+}
+
+// ─── Active Business Rules (rejection / guard events on formalized subkind)
+// Per playbook S21: a subkind can ONLY specialize a kind or another subkind.
+// To attach category invariants, the system kind already specializes categories
+// OR we use invariants directly on the subkind. Here we specialize only
+// TrafficLightSystem (a Kind), and enforce category invariants via internal
+// invariants block.
+subkind TrafficLightSystemFormalized specializes TrafficLightSystem {
+  invariants {
+    // MUTCD compliance
+    self.yellowIntervalSeconds >= 3.0;
+    self.greenApproaches->forAll(a |
+      self.greenApproaches->forAll(b |
+        a = b or a.direction <> b.direction));
+    self.isOperating implies (self.yellowTimerElapsed <= 30.0);
+    // IEC 61508 compliance
+    self.preemptionResponseTimeSeconds <= 1.0;
+    self.isOperating implies (self.preemptionTimerElapsed <= 2.0);
+    // ADA compliance
+    self.walkSignalActive implies
+      self.greenApproaches->forAll(a | true);
+    self.pedestrianRequested implies not self.allRedActive;
+  }
+
+  // Rejection: invalid phase assignment (conflicting green directions)
+  // OCL fix: use ->forAll with single variable + explicit pairwise check
+  event rejectConflictingPhase(p: Phase) {
+    pre: p.greenApproaches->forAll(a1 |
+           p.greenApproaches->forAll(a2 |
+             a1 = a2 or a1.direction <> a2.direction)) = false;
+    // pure rejection — no modifies clause
+  }
+
+  // Rejection: attempt to transition to yellow when no green is active
+  event rejectTransitionToYellowNoGreen() {
+    pre: self.greenApproaches->isEmpty();
+    // pure rejection — no modifies clause
+  }
+
+  // Rejection: preemption attempt when already in preemption
+  event rejectDuplicatePreemption() {
+    pre: self.preemptionActive;
+    // pure rejection — no modifies clause
+  }
+
+  // Rejection: pedestrian request when already pending
+  event rejectDuplicatePedestrianRequest() {
+    pre: self.pedestrianRequested;
+    // pure rejection — no modifies clause
+  }
+
+  // Rejection: grant walk when green conflicting approaches are active
+  event rejectWalkConflictingGreen() {
+    pre: self.greenApproaches->notEmpty();
+    // pure rejection — no modifies clause
+  }
+
+  // Rejection: attempt to start system while already operating
+  event rejectSystemAlreadyRunning() {
+    pre: self.isOperating;
+    // pure rejection — no modifies clause
+  }
+
+  // Rejection: attempt to tick elapsed timers with zero or negative dt
+  event rejectInvalidTickDt(dt: Real) {
+    pre: dt <= 0.0;
+    // pure rejection — no modifies clause
+  }
+}
+
+// ─── Explicit Relations ──────────────────────────────────────────────
+relation formalAssumptionToSystem: <<memberOf>> from FormalAssumptionRecord [0..*]
+                                   to TrafficLightSystemFormalized [1];

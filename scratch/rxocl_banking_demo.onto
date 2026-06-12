@@ -1,0 +1,52 @@
+schema "onto/0.1";
+namespace rxocl_banking_demo;
+
+// Simplified banking ledger to demonstrate Phase 24 (RxOCL) trace
+// clauses: bounded LTL operators over event sequences.
+
+kind Account {
+  identity: accountId;
+  property accountId: String;
+  property balance: Real;
+  property isFrozen: Boolean;
+
+  invariants {
+    self.balance >= 0.0;
+  }
+
+  trace {
+    // SAFETY: balance never goes negative across any event sequence
+    always self.balance >= 0.0;
+
+    // BOUNDED LIVENESS: within 10 events, a frozen account should be
+    // unfrozen (eventually). Deferred to BMC (W40_pending).
+    eventually within 10 steps: self.isFrozen = false;
+  }
+
+  event deposit(amount: Real) {
+    pre: amount > 0.0;
+    pre: self.isFrozen = false;
+    post: self.balance = self.balance@pre + amount;
+    modifies: self.balance;
+  }
+
+  event withdraw(amount: Real) {
+    pre: amount > 0.0;
+    pre: self.isFrozen = false;
+    pre: self.balance >= amount;
+    post: self.balance = self.balance@pre - amount;
+    modifies: self.balance;
+  }
+
+  event freeze() {
+    pre: self.isFrozen = false;
+    post: self.isFrozen = true;
+    modifies: self.isFrozen;
+  }
+
+  event unfreeze() {
+    pre: self.isFrozen = true;
+    post: self.isFrozen = false;
+    modifies: self.isFrozen;
+  }
+}

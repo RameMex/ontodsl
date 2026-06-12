@@ -1,0 +1,106 @@
+schema "onto/0.1";
+namespace parking_garage_requirements;
+import "./discovery.onto";
+
+// ─── The System Kind ─────────────────────────────────────────────────
+
+kind ParkingGarageSystem specializes CapacityConstraints, TicketIntegrityConstraints {
+  identity: systemId;
+  property systemId: String;
+  
+  // Properties mirrored from Discovery commitments and categories
+  property certifiedCapacity: Integer;
+  property currentOccupancy: Integer;
+  
+  // Ticket tracking — use scalar count + property invariants instead of set ops
+  property ticketCount: Integer;            // number of issued tickets
+  
+  // Entry/Exit state
+  property entryGateOpen: Boolean;
+  property exitGateOpen: Boolean;
+  property isFull: Boolean;
+  
+  invariants {
+    self.systemId <> null;
+    self.certifiedCapacity > 0;
+    self.currentOccupancy >= 0;
+    self.currentOccupancy <= self.certifiedCapacity;
+    self.isFull = (self.currentOccupancy = self.certifiedCapacity);
+    self.entryGateOpen implies self.currentOccupancy < self.certifiedCapacity;
+    self.exitGateOpen implies (self.currentOccupancy > 0);
+    self.ticketCount >= 0;
+  }
+  
+  // ─── ENTRY EVENT (FR-1) ─────────────────────────────────────────────
+  event enterGarage(vehicleId: String): Ticket
+    refines parking_garage_discovery::EntryFlow,
+            parking_garage_discovery::CapacityRespectedGoal,
+            parking_garage_discovery::TicketUniquenessGoal {
+    
+    pre: vehicleId <> null;
+    
+    post: if self.currentOccupancy@pre < self.certifiedCapacity then
+            self.currentOccupancy = self.currentOccupancy@pre + 1
+            and result <> null
+            and result.ticketId <> null
+            and result.issuedAtEntry <> null
+            and result.isUsed = false
+            and result.isPaid = false
+            and result.consumedAtExit = null
+            and self.ticketCount = self.ticketCount@pre + 1
+            and self.entryGateOpen = true
+            and self.isFull = (self.currentOccupancy = self.certifiedCapacity)
+          else
+            result = null
+            and self.currentOccupancy = self.currentOccupancy@pre
+            and self.ticketCount = self.ticketCount@pre
+            and self.entryGateOpen = false
+            and self.isFull = true
+          endif;
+    
+    modifies: self.currentOccupancy,
+              self.ticketCount,
+              self.entryGateOpen,
+              self.isFull;
+  }
+  
+  // ─── EXIT EVENT (FR-2) ──────────────────────────────────────────────
+  event exitGarage(ticketId: String): Boolean
+    refines parking_garage_discovery::ExitFlow,
+            parking_garage_discovery::RejectedExitFlow,
+            parking_garage_discovery::ExitGatingGoal {
+    
+    pre: ticketId <> null;
+    
+    post: if self.ticketCount@pre > 0 and self.currentOccupancy@pre > 0 then
+            result = true
+            and self.currentOccupancy = self.currentOccupancy@pre - 1
+            and self.exitGateOpen = true
+            and self.ticketCount = self.ticketCount@pre
+          else
+            result = false
+            and self.currentOccupancy = self.currentOccupancy@pre
+            and self.exitGateOpen = false
+            and self.ticketCount = self.ticketCount@pre
+          endif;
+    
+    modifies: self.currentOccupancy,
+              self.exitGateOpen,
+              self.ticketCount;
+  }
+  
+  // ─── PAY TICKET (FR-3, if payment is required) ──────────────────────
+  event payForTicket(ticketId: String): Boolean
+    refines parking_garage_discovery::ExitGatingGoal {
+    
+    pre: ticketId <> null;
+    
+    post: if self.ticketCount@pre > 0 then
+            result = true
+          else
+            result = false
+          endif;
+    
+    // No modifies clause — this event is a pure observation (no state change)
+  }
+}

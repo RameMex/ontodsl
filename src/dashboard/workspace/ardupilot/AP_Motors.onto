@@ -1,0 +1,128 @@
+schema "onto/0.1";
+namespace ardupilot_motors;
+
+// =====================================================================
+// UFO-A model of ArduPilot libraries/AP_Motors/AP_MotorsMatrix.{h,cpp}.
+//
+// AP_MotorsMatrix is the multicopter motor prioritization mixer:
+// takes desired roll / pitch / yaw / throttle stick commands and
+// distributes them to physical motors, prioritising attitude
+// control over throttle when motors saturate (the famous "lose
+// throttle, keep level" behaviour). The DbC surface:
+//
+//   * set_throttle / set_roll / set_pitch / set_yaw — accept the
+//     stick command. Range [-1, 1] for RPY, [0, 1] for throttle.
+//     C++ doesn't enforce these; we make them precondition.
+//   * output_armed_stabilizing — runs the mix. Postcondition: every
+//     motor's commanded thrust is in [0, 1] (saturation handled by
+//     the impl per the prioritization algorithm).
+//   * arm / disarm — toggle the armed flag. Postcondition reflects.
+//
+// The motor-factor arrays (per-motor coefficients) live in the impl
+// as ArduPilot uses; we expose only the count and the bounds.
+//
+// Generate with --rust-f32.
+// =====================================================================
+
+kind AP_Motors {
+  identity: mixerId;
+
+  property mixerId: String;
+
+  // Stick commands (units: -1.0..1.0 for RPY, 0..1.0 for throttle).
+  property roll: Real internal default 0.0;
+  property pitch: Real internal default 0.0;
+  property yaw: Real internal default 0.0;
+  property throttle: Real internal default 0.0;
+
+  // Mixer state.
+  property armed: Boolean internal default false;
+  // Number of physical motors actively driven (typically 4, 6, 8).
+  // We constrain via invariant.
+  property motorCount: Integer internal default 4;
+  // Per-motor minimum spin floor — prevents blade-stall on rapid
+  // throttle drops. Tunable.
+  property minThrottle: Real default 0.1;
+
+  invariants {
+    self.mixerId <> null;
+    self.motorCount >= 1;
+    self.motorCount <= 12;
+    self.minThrottle >= 0.0;
+    self.minThrottle <= 1.0;
+    self.roll >= 0.0 - 1.0;
+    self.roll <= 1.0;
+    self.pitch >= 0.0 - 1.0;
+    self.pitch <= 1.0;
+    self.yaw >= 0.0 - 1.0;
+    self.yaw <= 1.0;
+    self.throttle >= 0.0;
+    self.throttle <= 1.0;
+  }
+
+  event arm() {
+    post: self.armed = true;
+    modifies: self.armed;
+  }
+
+  event disarm() {
+    post: self.armed = false;
+    post: self.throttle = 0.0;
+    modifies: self.armed, self.throttle;
+  }
+
+  event set_roll(cmd: Real) {
+    pre: cmd.isFinite();
+    pre: cmd >= 0.0 - 1.0;
+    pre: cmd <= 1.0;
+    post: self.roll = cmd;
+    modifies: self.roll;
+  }
+
+  event set_pitch(cmd: Real) {
+    pre: cmd.isFinite();
+    pre: cmd >= 0.0 - 1.0;
+    pre: cmd <= 1.0;
+    post: self.pitch = cmd;
+    modifies: self.pitch;
+  }
+
+  event set_yaw(cmd: Real) {
+    pre: cmd.isFinite();
+    pre: cmd >= 0.0 - 1.0;
+    pre: cmd <= 1.0;
+    post: self.yaw = cmd;
+    modifies: self.yaw;
+  }
+
+  event set_throttle(cmd: Real) {
+    pre: cmd.isFinite();
+    pre: cmd >= 0.0;
+    pre: cmd <= 1.0;
+    post: self.throttle = cmd;
+    modifies: self.throttle;
+  }
+
+  // Mirrors C++ output_armed_stabilizing(). Runs the priority mixer.
+  // Side effects: hardware PWM writes (Telemetry-like effect). The
+  // wrapper documents this via the `effects` clause.
+  event output_stabilizing() {
+    pre: self.armed = true;
+    effects: HardwarePwm;
+    reads:   roll, pitch, yaw, throttle, motorCount, minThrottle;
+    post: self.throttle >= 0.0;
+    post: self.throttle <= 1.0;
+    modifies: self.throttle;
+  }
+
+  // Internal: mix one motor i and return its commanded thrust [0, 1].
+  // The impl applies per-motor factor arrays kept private to it.
+  event mix_motor(i: Integer): Real {
+    pre: i >= 0;
+    pre: i < self.motorCount;
+    reads: roll, pitch, yaw, throttle, minThrottle;
+    post: result.isFinite();
+    post: result >= 0.0;
+    post: result <= 1.0;
+  }
+}

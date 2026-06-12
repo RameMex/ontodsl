@@ -1,0 +1,237 @@
+schema "onto/0.1";
+namespace factory_plc_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// ============================================================================
+// INDUSTRIAL PLC SAFETY CONTROLLER — FORMALIZATION STAGE
+// ============================================================================
+// Formalization stage: what the WORLD imposes on the system.
+// 
+// Key constraints from verifier:
+// - A Kind can specialize Category (or Mixin), but NOT another Kind.
+//   (SafetyControllerSystem is a Kind from requirements.onto — can't specialize it.)
+// - A Subkind can specialize ONLY Kind or Subkind.
+// - Categories serve as mixin-like constraints but are not sortals.
+// - Properties cannot shadow inherited properties (S22).
+//
+// Solution: keep SafetyControllerFormalized as a subkind of SafetyControllerSystem
+// (the only kind in the chain). Categories are attached to SafetyControllerSystem 
+// via its 'specializes' clause in requirements.onto. The formalization stage just 
+// adds events and invariants to the existing subkind lineage.
+// ============================================================================
+
+// ============================================================================
+// REGULATORY ANCHORS (categories representing external standards / laws)
+// ============================================================================
+
+category Iec61508Sil3Compliant {
+  property silLevel: String;
+  property pfH_Rate: Real;
+  property proofTestIntervalDays: Integer;
+  invariants {
+    self.silLevel = 'SIL3';
+    self.pfH_Rate >= 0.00000001;
+    self.pfH_Rate <  0.0000001;
+    self.proofTestIntervalDays > 0;
+    self.proofTestIntervalDays <= 365;
+  }
+}
+
+category Iso13849PlECompliant {
+  property performanceLevel: String;
+  property mttfDYears: Real;
+  property dcAvg: Real;
+  property categoryArchitecture: String;
+
+  invariants {
+    self.performanceLevel = 'PL e';
+    self.mttfDYears >= 30.0;
+    self.dcAvg >= 0.99;
+    self.categoryArchitecture = 'Cat 4';
+  }
+}
+
+category Iec61131_3Compliant {
+  property languageUsed: String;
+  property revision: String;
+  property certifiedCompilers: Set<String>;
+  invariants {
+    (self.languageUsed = 'ST') or (self.languageUsed = 'LD') or (self.languageUsed = 'FBD');
+    self.revision <> null;
+    self.certifiedCompilers->notEmpty();
+  }
+}
+
+category Iec61131_6SafetyCompliant {
+  property safetyFunctionList: Set<String>;
+  property validatedLibraries: Set<String>;
+  property faultExclusionTimesMs: Real;
+  invariants {
+    self.safetyFunctionList->notEmpty();
+    self.validatedLibraries->notEmpty();
+    self.faultExclusionTimesMs >= 0.0;
+    self.faultExclusionTimesMs <= 50.0;
+  }
+}
+
+category EuMachineryDirectiveCompliant {
+  property declarationOfConformityRef: String;
+  property ceMarkingYear: Integer;
+  property essentialSafetyReqs: Set<String>;
+  invariants {
+    self.declarationOfConformityRef <> null;
+    self.ceMarkingYear >= 2024;
+    self.essentialSafetyReqs->notEmpty();
+  }
+}
+
+// ============================================================================
+// PHYSICAL / DOMAIN-LOGICAL INVARIANTS (member-quantified categories)
+// ============================================================================
+
+category PhysicallyPlausibleSensorReadings where bearer: SafetySensor {
+  invariants {
+    bearer.calibratedRangeMin >= 0.0;
+    bearer.calibratedRangeMax > bearer.calibratedRangeMin;
+    bearer.calibratedRangeMax <= 1000000.0;
+    bearer.currentReading >= 0.0;
+    bearer.currentReading <= 1000000.0;
+  }
+}
+
+category EStopHaltTiming where bearer: PLCSafetyController {
+  invariants {
+    bearer.maxEStopLatencyMs > 0.0;
+    bearer.maxEStopLatencyMs <= 50.0;
+  }
+}
+
+category SensorFaultWithinOneCycle where bearer: PLCSafetyController {
+  invariants {
+    bearer.maxSensorFaultResponseCycles > 0;
+    bearer.maxSensorFaultResponseCycles <= 1;
+  }
+}
+
+// ============================================================================
+// ASSUMPTION RECORD (passive — documents what we assume from the world)
+// ============================================================================
+
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property assumptionCode: String;
+  property description: String;
+  property rationale: String;
+  property status: String;
+  property verificationMethod: String;
+
+  invariants {
+    self.assumptionId <> null;
+    self.assumptionCode <> null;
+    self.description <> null;
+    self.status <> null;
+    self.verificationMethod <> null;
+  }
+}
+
+// ============================================================================
+// FORMALIZED SUBSYSTEM (extends SafetyControllerSystem with formalization events)
+// ============================================================================
+// SafetyControllerSystem is a Kind declared in requirements.onto.
+// It already specializes: EStopHaltPerformance, FailsafeLatching,
+// SensorFaultResponse, MotionRejectionInFailsafe (from discovery.onto).
+//
+// We CANNOT attach our new categories here because subkind can only
+// specialize Kind or Subkind. Instead, we use <<memberOf>> relations
+// (target must be a sortal — kind/subkind — NOT category).
+// Since categories are not sortals, the regulatory categories remain
+// as documentary annotations visible in the model but not enforced
+// by membership relations.
+//
+// The physical invariant categories (EStopHaltTiming, SensorFaultWithinOneCycle)
+// are already covered by the constraint categories from discovery.onto
+// that SafetyControllerSystem specializes.
+// ============================================================================
+
+subkind SafetyControllerFormalized specializes SafetyControllerSystem {
+  // ─── PHYSICAL INVARIANTS ───────────────────────────────────────────────
+  invariants {
+    // The e-stop response time MUST be ≤ maxEStopLatencyMs
+    self.eStopResponseTimeMs <= self.maxEStopLatencyMs;
+
+    // The controller must be in failsafe mode when e-stop is active
+    // or a sensor fault is detected
+    (not self.eStopInputActive) or self.isFailsafeActive;
+    (not self.sensorFaultDetected) or self.isFailsafeActive;
+
+    // All motion outputs MUST be de-energized when failsafe is active
+    (not self.isFailsafeActive) or self.allMotionOutputsDeEnergized;
+  }
+
+  // ─── ACTIVE BUSINESS RULES (guard events) ──────────────────────────────
+
+  // Rule: reject any motion command while failsafe is active
+  event rejectMotionCommandDuringFailsafe(commandId: String, commandType: String) {
+    pre: self.isFailsafeActive;
+    pre: self.rejectionActive;
+    pre: commandId <> null;
+    pre: commandType <> null;
+
+    post: true;
+  }
+
+  // Rule: enforcement of the e-stop latch
+  event enforceEStopLatch(activationTimestampMs: Real) {
+    pre: self.eStopInputActive;
+    pre: not self.manualResetInputActive;
+
+    post: self.eStopInputActive;
+    post: self.isFailsafeActive;
+    post: self.allMotionOutputsDeEnergized;
+    post: self.eStopResponseTimeMs = activationTimestampMs - self.lastEStopTimestampMs;
+    post: self.eStopResponseTimeMs >= 0.0;
+    post: self.eStopResponseTimeMs <= self.maxEStopLatencyMs;
+
+    modifies: self.eStopResponseTimeMs;
+  }
+
+  // Rule: auto-recover from sensor fault once the sensor returns to range
+  event autoRecoverFromSensorFault(recoveryTimestampMs: Real) {
+    pre: self.sensorFaultDetected;
+    pre: self.isFailsafeActive;
+    pre: not self.eStopInputActive;
+    pre: recoveryTimestampMs >= 0.0;
+
+    post: self.sensorFaultDetected = false;
+    post: self.isFailsafeActive = false;
+    post: self.allMotionOutputsDeEnergized = false;
+
+    modifies: self.sensorFaultDetected,
+              self.isFailsafeActive,
+              self.allMotionOutputsDeEnergized;
+  }
+
+  // Rule: invalid sensor reading detected — transition to failsafe
+  event transitionToFailsafeDueToSensorFault(sensorId: String, faultTimestampMs: Real) {
+    pre: sensorId <> null;
+    pre: faultTimestampMs >= 0.0;
+    pre: not self.eStopInputActive;
+    pre: not self.sensorFaultDetected;
+
+    post: self.sensorFaultDetected = true;
+    post: self.isFailsafeActive = true;
+    post: self.allMotionOutputsDeEnergized = true;
+    post: self.lastSensorFaultTimestampMs = faultTimestampMs;
+
+    modifies: self.sensorFaultDetected,
+              self.isFailsafeActive,
+              self.allMotionOutputsDeEnergized,
+              self.lastSensorFaultTimestampMs;
+  }
+
+  // // @assumption ASSUME-1: The e-stop signal propagation delay through the
+  // // input circuit (R/C filter, isolation, optocoupler) is ≤ 1 ms.
+  // // This is a HARDWARE assumption verified by circuit simulation (not software).
+}

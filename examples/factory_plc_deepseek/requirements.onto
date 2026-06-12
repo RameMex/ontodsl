@@ -1,0 +1,144 @@
+schema "onto/0.1";
+namespace factory_plc_requirements;
+import "./discovery.onto";
+
+// ============================================================================
+// INDUSTRIAL PLC SAFETY CONTROLLER — REQUIREMENTS STAGE
+// ============================================================================
+// The Discovery stage declares PLCSafetyController as a kind.
+// In Requirements we CANNOT declare a subkind with the same name (E2).
+// Instead we declare a NEW kind that specializes the constraint categories
+// and mirrors the relevant properties. This avoids duplication and cycle.
+// 
+// The new kind name: SafetyControllerSystem (distinct from Discovery's
+// PLCSafetyController while still traceable via refines clauses).
+// ============================================================================
+
+kind SafetyControllerSystem 
+  specializes EStopHaltPerformance,
+              FailsafeLatching,
+              SensorFaultResponse,
+              MotionRejectionInFailsafe 
+{
+  identity: controllerId;
+  property controllerId: String;
+  property maxEStopLatencyMs: Real;
+  property latchingEnforced: Boolean;
+  property maxSensorFaultResponseCycles: Integer;
+  property rejectionActive: Boolean;
+
+  property isFailsafeActive: Boolean;
+  property eStopInputActive: Boolean;
+  property manualResetInputActive: Boolean;
+  property sensorFaultDetected: Boolean;
+  property allMotionOutputsDeEnergized: Boolean;
+  property eStopResponseTimeMs: Real;
+  property currentScanCycleId: String;
+  property lastEStopTimestampMs: Real;
+  property lastSensorFaultTimestampMs: Real;
+  property connectedEStopButtons: Set<String>;
+  property connectedSensors: Set<String>;
+  property connectedMotionOutputs: Set<String>;
+
+  invariants {
+    self.controllerId <> null;
+    self.maxEStopLatencyMs > 0.0;
+    self.maxEStopLatencyMs <= 50.0;
+    self.latchingEnforced;
+    self.maxSensorFaultResponseCycles > 0;
+    self.maxSensorFaultResponseCycles <= 1;
+    self.rejectionActive;
+  }
+
+  event activateEStop(activationTimestampMs: Real)
+    refines factory_plc_discovery::EStopLatencyCommitment,
+            factory_plc_discovery::EStopLatchingCommitment {
+    pre: not self.eStopInputActive;
+    pre: activationTimestampMs >= 0.0;
+
+    post: self.eStopInputActive = true;
+    post: self.isFailsafeActive = true;
+    post: self.allMotionOutputsDeEnergized = true;
+    post: self.lastEStopTimestampMs = activationTimestampMs;
+    post: self.eStopResponseTimeMs = self.lastEStopTimestampMs - self.lastEStopTimestampMs@pre;
+    post: self.eStopResponseTimeMs >= 0.0;
+    post: self.eStopResponseTimeMs <= self.maxEStopLatencyMs;
+
+    modifies: self.eStopInputActive,
+              self.isFailsafeActive,
+              self.allMotionOutputsDeEnergized,
+              self.lastEStopTimestampMs,
+              self.eStopResponseTimeMs;
+  }
+
+  event manualReset(resetTimestampMs: Real)
+    refines factory_plc_discovery::EStopLatchingCommitment {
+    pre: self.eStopInputActive;
+    pre: self.manualResetInputActive = true;
+    pre: self.isFailsafeActive;
+    pre: resetTimestampMs >= 0.0;
+
+    post: self.eStopInputActive = false;
+    post: self.manualResetInputActive = false;
+    post: self.isFailsafeActive = false;
+    post: self.allMotionOutputsDeEnergized = false;
+    post: self.rejectionActive = false;
+
+    modifies: self.eStopInputActive,
+              self.manualResetInputActive,
+              self.isFailsafeActive,
+              self.allMotionOutputsDeEnergized,
+              self.rejectionActive;
+  }
+
+  event detectSensorFault(faultTimestampMs: Real, faultReported: Boolean)
+    refines factory_plc_discovery::SensorFaultFailsafeCommitment {
+    pre: not self.sensorFaultDetected;
+    pre: faultReported;
+    pre: faultTimestampMs >= 0.0;
+    pre: not self.eStopInputActive;
+
+    post: self.sensorFaultDetected = true;
+    post: self.isFailsafeActive = true;
+    post: self.allMotionOutputsDeEnergized = true;
+    post: self.lastSensorFaultTimestampMs = faultTimestampMs;
+    post: not self.sensorFaultDetected or self.isFailsafeActive;
+
+    modifies: self.sensorFaultDetected,
+              self.isFailsafeActive,
+              self.allMotionOutputsDeEnergized,
+              self.lastSensorFaultTimestampMs;
+  }
+
+  event sensorFaultRecovery(recoveryTimestampMs: Real) {
+    pre: self.sensorFaultDetected;
+    pre: self.isFailsafeActive;
+    pre: not self.eStopInputActive;
+
+    post: self.sensorFaultDetected = false;
+    post: self.isFailsafeActive = false;
+    post: self.allMotionOutputsDeEnergized = false;
+
+    modifies: self.sensorFaultDetected,
+              self.isFailsafeActive,
+              self.allMotionOutputsDeEnergized;
+  }
+
+  event rejectMotionCommand(commandId: String, commandType: String)
+    refines factory_plc_discovery::MotionCommandRejectionCommitment {
+    pre: self.isFailsafeActive;
+    pre: self.rejectionActive;
+    pre: commandId <> null;
+    pre: commandType <> null;
+
+    post: true;
+  }
+
+  event acceptMotionCommand(commandId: String, commandType: String) {
+    pre: not self.isFailsafeActive;
+    pre: commandId <> null;
+    pre: commandType <> null;
+
+    post: true;
+  }
+}

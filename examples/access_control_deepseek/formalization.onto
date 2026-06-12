@@ -1,0 +1,207 @@
+schema "onto/0.1";
+namespace access_control_formalization;
+import "./requirements.onto";
+
+// ─────────────────────────────────────────────────────────────────────────
+// Formalization stage — CORRECTED for S35:
+//   When a kind specializes a category with invariants, the kind's
+//   OWN invariants MUST entail the category's invariants.  The Z3
+//   verifier proves: member.invariants ⊨ category.invariants.
+//
+//   The regulatory categories (PciDssCompliant, Iec62443OrEquivalent,
+//   SoxRelevantDecisionRecord) have invariants referencing their own
+//   properties (e.g., self.pciDssVersion <> null).  The member kind
+//   MUST declare those same properties AND assert the same invariants
+//   to satisfy entailment.
+//
+//   Additionally: the categories are now member-quantified so the
+//   member kind can properly inherit and satisfy the invariants.
+//   We add non-null and bounds invariants to the member kind.
+// ─────────────────────────────────────────────────────────────────────────
+
+// ─── 1. REGULATORY ANCHORS (categories with member quantification) ──
+
+category PciDssCompliant where bearer: AccessControlGatewayRegulatoryBody {
+  invariants {
+    bearer.pciDssVersion <> null;
+    bearer.cardholderDataScope <> null;
+  }
+}
+
+category Iec62443OrEquivalent where bearer: AccessControlGatewayRegulatoryBody {
+  invariants {
+    bearer.securityLevel <> null;
+    bearer.zoneModelDocumented = true;
+  }
+}
+
+category SoxRelevantDecisionRecord where bearer: AccessControlGatewayRegulatoryBody {
+  invariants {
+    bearer.retentionYears >= 7.0;
+    bearer.financialScope <> null;
+  }
+}
+
+// ─── 2. MEMBER-QUANTIFIED CATEGORIES (unchanged from previous) ─────
+
+category AuditLatencyBound where bearer: AccessControlGatewaySystem {
+  invariants {
+    bearer.maxAuditLatencyMs >= 0.0;
+    bearer.maxAuditLatencyMs <= 100.0;
+  }
+}
+
+category PermissionUnionFinite where bearer: AccessControlGatewaySystem {
+  invariants {
+    bearer.rolePermissions->size() >= 0;
+    bearer.activeRoles->size() >= 0;
+  }
+}
+
+category ImmutableAuditLogContract where bearer: AccessControlGatewaySystem {
+  invariants {
+    bearer.auditLog->forAll(e |
+      e.isImmutable = true and
+      e.timestamp >= 0.0 and
+      (e.outcome = 'allow' or e.outcome = 'deny')
+    );
+  }
+}
+
+// ─── 3. FORMALIZED SYSTEM KIND (regulatory identity) ──────────────
+//
+// This kind specializes the regulatory categories.  It MUST declare
+// the properties referenced by those categories AND enforce the
+// invariants such that entailment holds.
+
+kind AccessControlGatewayRegulatoryBody
+  specializes PciDssCompliant,
+              Iec62443OrEquivalent,
+              SoxRelevantDecisionRecord {
+
+  identity: regulatoryId;
+  property regulatoryId: String;
+  property certificationDate: Real;
+
+  // ─── Properties required by category invariants ────────────────
+  property pciDssVersion: String;
+  property cardholderDataScope: String;
+  property securityLevel: String;
+  property zoneModelDocumented: Boolean;
+  property retentionYears: Real;
+  property financialScope: String;
+
+  invariants {
+    // Identity
+    self.regulatoryId <> null;
+    self.certificationDate >= 0.0;
+
+    // ─── Entailment of PciDssCompliant invariants ──────────────
+    self.pciDssVersion <> null;
+    self.cardholderDataScope <> null;
+
+    // ─── Entailment of Iec62443OrEquivalent invariants ─────────
+    self.securityLevel <> null;
+    self.zoneModelDocumented = true;
+
+    // ─── Entailment of SoxRelevantDecisionRecord invariants ────
+    self.retentionYears >= 7.0;
+    self.financialScope <> null;
+  }
+}
+
+// ─── 4. BEHAVIORAL EXTENSION (subkind of the base system kind) ────
+//
+// This subkind specializes ONLY the base system kind.
+// The member-quantified category invariants (AuditLatencyBound, etc.)
+// are already entailed by the BASE system kind's own invariants
+// (declared in requirements.onto).  No duplicate category membership
+// needed here.
+
+subkind AccessControlGatewaySystemFormalized
+  specializes AccessControlGatewaySystem {
+
+  // ─── New properties for active business rules ───────────────────
+  property complianceAlerts: Set<String>;
+  property roleLastUsed: Real;
+
+  invariants {
+    self.complianceAlerts->forAll(a | a <> null);
+    self.roleLastUsed >= 0.0;
+  }
+
+  // ─── ACTIVE BUSINESS RULES ─────────────────────────────────────
+
+  event rejectUnknownPermission(requestedPermission: String): Boolean {
+    pre: requestedPermission <> null and requestedPermission <> '';
+    pre: not self.rolePermissions->exists(p |
+      p.permissionId = requestedPermission
+    );
+    post: result = false;
+
+    post: self.auditLog->exists(e |
+      e.permissionId = requestedPermission and
+      e.outcome = 'deny' and
+      e.isImmutable = true and
+      e.timestamp >= 0.0
+    );
+    post: self.auditLog->size() = self.auditLog@pre->size() + 1;
+
+    modifies: self.auditLog;
+  }
+
+  event enforceLatencyCompliance(currentLatency: Real) {
+    pre: currentLatency > self.maxAuditLatencyMs;
+    pre: self.maxAuditLatencyMs <= 100.0;
+
+    post: self.complianceAlerts->size() = self.complianceAlerts@pre->size() + 1;
+    modifies: self.complianceAlerts;
+  }
+
+  event blockExpiredRole(subjectToken: String, roleId: String, currentTimestamp: Real) {
+    pre: subjectToken <> null and subjectToken <> '';
+    pre: roleId <> null and roleId <> '';
+    pre: currentTimestamp >= 0.0;
+    pre: self.activeRoles->includes(roleId);
+    pre: self.roleLastUsed < currentTimestamp - (self.maxRoleExpiryDays * 86400.0);
+
+    post: not self.activeRoles->includes(roleId);
+    post: self.auditLog->exists(e |
+      e.subjectId = subjectToken and
+      e.permissionId = roleId and
+      e.outcome = 'deny' and
+      e.isImmutable = true
+    );
+    post: self.auditLog->size() = self.auditLog@pre->size() + 1;
+
+    modifies: self.activeRoles, self.auditLog;
+  }
+}
+
+// ─── 5. PASSIVE ASSUMPTIONS ────────────────────────────────────────
+
+// @assumption ASSUME-1: The subject token contains a verifiable
+//   identifier that resolves to a set of active roles in a directory
+//   (LDAP / AD / IAM). The resolution is assumed reliable within the
+//   gateway's trust boundary.
+// @assumption ASSUME-2: The system clock is NTP-synchronized within
+//   ±1 second of UTC, ensuring audit timestamps are globally ordered.
+// @assumption ASSUME-3: The audit log backend provides append-only
+//   semantics with a durability guarantee of at least one replica
+//   acknowledgment — the `isImmutable` property is enforced by the
+//   storage layer, not the in-memory model.
+
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property assumptionCode: String;
+  property description: String;
+  property riskLevel: String;
+  property mitigationStrategy: String;
+  invariants {
+    self.assumptionId <> null;
+    self.assumptionCode <> null;
+    self.description <> null;
+    self.riskLevel <> null;
+  }
+}

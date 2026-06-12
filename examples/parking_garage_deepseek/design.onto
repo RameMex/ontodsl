@@ -1,0 +1,473 @@
+schema "onto/0.1";
+namespace parking_garage_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Design Stage — Decomposition of ParkingGarageSystem into components.
+//
+// Components (all 'kind', siblings, NOT subkinds of the system kind):
+//   EntrySensor       — detects vehicle at entry, triggers gate
+//   ExitSensor        — detects vehicle at exit, triggers gate
+//   TicketIssuer      — creates unique tickets
+//   TicketValidator   — validates tickets on exit (exists, unused, paid)
+//   OccupancyTracker  — maintains occupancy count
+//   GateController    — operates entry/exit gates
+//   PaymentProcessor  — handles payment (ticket → paid)
+//
+// Interfaces (relators) connect components via roles.
+// Each component event refines at least one Requirements/Formalization
+// parent event for traceability.
+// =====================================================================
+
+// =====================================================================
+// COMPONENT 1: EntrySensor
+//   Detects vehicle presence at entry gate.
+// =====================================================================
+kind EntrySensor {
+  identity: sensorId;
+  property sensorId: String;
+  property vehiclePresent: Boolean;
+  property lastDetectionTimestamp: String;
+
+  invariants {
+    self.sensorId <> null;
+  }
+
+  event detectVehicle(timestamp: String)
+    refines parking_garage_requirements::ParkingGarageSystem.enterGarage {
+    pre: timestamp <> null;
+    post: self.vehiclePresent = true;
+    post: self.lastDetectionTimestamp = timestamp;
+    modifies: self.vehiclePresent, self.lastDetectionTimestamp;
+  }
+
+  event clearDetection()
+    refines parking_garage_requirements::ParkingGarageSystem.enterGarage {
+    pre: self.vehiclePresent = true;
+    post: self.vehiclePresent = false;
+    modifies: self.vehiclePresent;
+  }
+}
+
+// =====================================================================
+// COMPONENT 2: ExitSensor
+//   Detects ticket presentation at exit gate.
+// =====================================================================
+kind ExitSensor {
+  identity: sensorId;
+  property sensorId: String;
+  property ticketPresented: Boolean;
+  property lastTicketId: String;
+  property lastDetectionTimestamp: String;
+
+  invariants {
+    self.sensorId <> null;
+  }
+
+  event detectTicket(ticketId: String, timestamp: String)
+    refines parking_garage_requirements::ParkingGarageSystem.exitGarage {
+    pre: ticketId <> null;
+    pre: timestamp <> null;
+    post: self.ticketPresented = true;
+    post: self.lastTicketId = ticketId;
+    post: self.lastDetectionTimestamp = timestamp;
+    modifies: self.ticketPresented, self.lastTicketId, self.lastDetectionTimestamp;
+  }
+
+  event clearDetection()
+    refines parking_garage_requirements::ParkingGarageSystem.exitGarage {
+    pre: self.ticketPresented = true;
+    post: self.ticketPresented = false;
+    modifies: self.ticketPresented;
+  }
+}
+
+// =====================================================================
+// COMPONENT 3: TicketIssuer
+//   Creates unique tickets at entry.
+// =====================================================================
+kind TicketIssuer {
+  identity: issuerId;
+  property issuerId: String;
+  property nextTicketNumber: Integer;
+
+  invariants {
+    self.issuerId <> null;
+    self.nextTicketNumber >= 0;
+  }
+
+  // NOTE: OCL dialect does not support .concat() on String.
+  // Use a single string property with formatted ticket ID.
+  // The ticket ID is composed as: issuerId + "/" + nextTicketNumber
+  // represented as a single string field on the result.
+  event issueTicket(ticketCode: String): Ticket
+    refines parking_garage_requirements::ParkingGarageSystem.enterGarage,
+            parking_garage_discovery::CapacityRespectedGoal,
+            parking_garage_discovery::TicketUniquenessGoal {
+    pre: ticketCode <> null;
+    post: result <> null;
+    post: result.ticketId = ticketCode;
+    post: result.isUsed = false;
+    post: result.isPaid = false;
+    post: result.consumedAtExit = null;
+    post: self.nextTicketNumber = self.nextTicketNumber@pre + 1;
+    modifies: self.nextTicketNumber;
+  }
+
+  event resetCounter()
+    refines parking_garage_requirements::ParkingGarageSystem.enterGarage {
+    pre: self.nextTicketNumber > 0;
+    post: self.nextTicketNumber = 0;
+    modifies: self.nextTicketNumber;
+  }
+}
+
+// =====================================================================
+// COMPONENT 4: TicketValidator
+//   Validates tickets on exit: exists, unused, paid.
+// =====================================================================
+kind TicketValidator {
+  identity: validatorId;
+  property validatorId: String;
+  property validationResult: Boolean;
+  property lastValidatedTicketId: String;
+
+  invariants {
+    self.validatorId <> null;
+  }
+
+  event validateTicket(ticketId: String): Boolean
+    refines parking_garage_requirements::ParkingGarageSystem.exitGarage,
+            parking_garage_discovery::ExitGatingGoal {
+    pre: ticketId <> null;
+    post: self.lastValidatedTicketId = ticketId;
+    post: self.validationResult = result;
+    modifies: self.lastValidatedTicketId, self.validationResult;
+  }
+
+  event markTicketExited(ticketId: String): Boolean
+    refines parking_garage_requirements::ParkingGarageSystem.exitGarage,
+            parking_garage_discovery::TicketUniquenessGoal {
+    pre: ticketId <> null;
+    post: if self.validationResult@pre then
+            result = true
+          else
+            result = false
+          endif;
+    post: self.validationResult = false;
+    modifies: self.validationResult;
+  }
+}
+
+// =====================================================================
+// COMPONENT 5: OccupancyTracker
+//   Maintains occupancy count; enforces capacity limits.
+// =====================================================================
+kind OccupancyTracker {
+  identity: trackerId;
+  property trackerId: String;
+  property currentOccupancy: Integer;
+  property certifiedCapacity: Integer;
+  property isFull: Boolean;
+
+  invariants {
+    self.trackerId <> null;
+    self.certifiedCapacity > 0;
+    self.currentOccupancy >= 0;
+    self.currentOccupancy <= self.certifiedCapacity;
+    self.isFull = (self.currentOccupancy = self.certifiedCapacity);
+  }
+
+  event incrementOccupancy()
+    refines parking_garage_requirements::ParkingGarageSystem.enterGarage,
+            parking_garage_discovery::CapacityRespectedGoal {
+    pre: self.currentOccupancy < self.certifiedCapacity;
+    post: self.currentOccupancy = self.currentOccupancy@pre + 1;
+    post: self.isFull = (self.currentOccupancy = self.certifiedCapacity);
+    modifies: self.currentOccupancy, self.isFull;
+  }
+
+  event decrementOccupancy()
+    refines parking_garage_requirements::ParkingGarageSystem.exitGarage,
+            parking_garage_discovery::CapacityRespectedGoal {
+    pre: self.currentOccupancy > 0;
+    post: self.currentOccupancy = self.currentOccupancy@pre - 1;
+    post: self.isFull = (self.currentOccupancy = self.certifiedCapacity);
+    modifies: self.currentOccupancy, self.isFull;
+  }
+
+  event checkCapacity(): Boolean
+    refines parking_garage_requirements::ParkingGarageSystem.enterGarage {
+    post: result = (self.currentOccupancy < self.certifiedCapacity);
+    // No modifies — pure observation
+  }
+}
+
+// =====================================================================
+// COMPONENT 6: GateController
+//   Raises/lowers entry and exit gates.
+// =====================================================================
+kind GateController {
+  identity: controllerId;
+  property controllerId: String;
+  property entryGateOpen: Boolean;
+  property exitGateOpen: Boolean;
+  property entryGateTimer: Integer;  // seconds until gate closes
+  property exitGateTimer: Integer;
+
+  invariants {
+    self.controllerId <> null;
+    self.entryGateTimer >= 0;
+    self.exitGateTimer >= 0;
+  }
+
+  event raiseEntryGate()
+    refines parking_garage_requirements::ParkingGarageSystem.enterGarage {
+    pre: not self.entryGateOpen;
+    post: self.entryGateOpen = true;
+    post: self.entryGateTimer = 5;  // 5 seconds open
+    modifies: self.entryGateOpen, self.entryGateTimer;
+  }
+
+  event lowerEntryGate()
+    refines parking_garage_requirements::ParkingGarageSystem.enterGarage {
+    pre: self.entryGateOpen;
+    post: self.entryGateOpen = false;
+    post: self.entryGateTimer = 0;
+    modifies: self.entryGateOpen, self.entryGateTimer;
+  }
+
+  event raiseExitGate()
+    refines parking_garage_requirements::ParkingGarageSystem.exitGarage {
+    pre: not self.exitGateOpen;
+    post: self.exitGateOpen = true;
+    post: self.exitGateTimer = 5;
+    modifies: self.exitGateOpen, self.exitGateTimer;
+  }
+
+  event lowerExitGate()
+    refines parking_garage_requirements::ParkingGarageSystem.exitGarage {
+    pre: self.exitGateOpen;
+    post: self.exitGateOpen = false;
+    post: self.exitGateTimer = 0;
+    modifies: self.exitGateOpen, self.exitGateTimer;
+  }
+
+  // FIXED: OCL if/then/else/endif requires 'else' clause for non-Boolean
+  // expressions. For Boolean assignment, use Boolean operators instead.
+  event displayFullSign(full: Boolean)
+    refines parking_garage_formalization::ParkingGarageSystemFormalized.rejectEntryWhenFull {
+    pre: full implies not self.entryGateOpen;
+    post: if full then 
+            self.entryGateOpen = false 
+          else 
+            self.entryGateOpen = self.entryGateOpen@pre 
+          endif;
+    modifies: self.entryGateOpen;
+  }
+}
+
+// =====================================================================
+// COMPONENT 7: PaymentProcessor
+//   Handles payment for tickets.
+// =====================================================================
+kind PaymentProcessor {
+  identity: processorId;
+  property processorId: String;
+  property lastPaidTicketId: String;
+  property paymentSuccessful: Boolean;
+
+  invariants {
+    self.processorId <> null;
+  }
+
+  event processPayment(ticketId: String, amount: Real): Boolean
+    refines parking_garage_requirements::ParkingGarageSystem.payForTicket,
+            parking_garage_discovery::ExitGatingGoal {
+    pre: ticketId <> null;
+    pre: amount >= 0.0;
+    post: self.lastPaidTicketId = ticketId;
+    post: self.paymentSuccessful = result;
+    modifies: self.lastPaidTicketId, self.paymentSuccessful;
+  }
+
+  event markTicketPaid(ticketId: String)
+    refines parking_garage_requirements::ParkingGarageSystem.payForTicket {
+    pre: ticketId <> null;
+    pre: self.paymentSuccessful = true;
+    post: self.paymentSuccessful = false;
+    post: self.lastPaidTicketId = ticketId;
+    modifies: self.paymentSuccessful, self.lastPaidTicketId;
+  }
+}
+
+// =====================================================================
+// INTERFACES (Relators)
+//   Each relator mediates two roles (one per component endpoint).
+// =====================================================================
+
+// Interface: Sensor-to-Controller data flow
+// EntrySensor sends detection events to GateController and OccupancyTracker.
+role EntrySensorRole mediated-by EntrySensorControllerChannel of EntrySensor {
+  property sensorId: String;
+  property vehiclePresent: Boolean;
+}
+
+role GateControllerEntryRole mediated-by EntrySensorControllerChannel of GateController {
+  property controllerId: String;
+  property entryGateOpen: Boolean;
+}
+
+relator EntrySensorControllerChannel mediates (EntrySensorRole, GateControllerEntryRole) {
+  identity: channelId;
+  property channelId: String;
+  property channelActive: Boolean;
+  property lastTransmissionId: String;
+
+  invariants {
+    self.channelId <> null;
+  }
+}
+
+// Interface: Ticket flow between TicketIssuer and TicketValidator
+role TicketIssuerRole mediated-by TicketHandoverChannel of TicketIssuer {
+  property issuerId: String;
+  property nextTicketNumber: Integer;
+}
+
+role TicketValidatorRole mediated-by TicketHandoverChannel of TicketValidator {
+  property validatorId: String;
+  property lastValidatedTicketId: String;
+}
+
+relator TicketHandoverChannel mediates (TicketIssuerRole, TicketValidatorRole) {
+  identity: channelId;
+  property channelId: String;
+  property lastTicketTransferred: String;
+
+  invariants {
+    self.channelId <> null;
+  }
+}
+
+// Interface: Occupancy data to GateController (entry gate only if not full)
+role OccupancyTrackerRole mediated-by OccupancyGateCoordination of OccupancyTracker {
+  property trackerId: String;
+  property currentOccupancy: Integer;
+  property certifiedCapacity: Integer;
+  property isFull: Boolean;
+}
+
+role GateControllerOccupancyRole mediated-by OccupancyGateCoordination of GateController {
+  property controllerId: String;
+  property entryGateOpen: Boolean;
+}
+
+relator OccupancyGateCoordination mediates (OccupancyTrackerRole, GateControllerOccupancyRole) {
+  identity: channelId;
+  property channelId: String;
+  property coordinationActive: Boolean;
+
+  invariants {
+    self.channelId <> null;
+  }
+}
+
+// Interface: PaymentProcessor to TicketValidator (payment confirmation)
+role PaymentProcessorRole mediated-by PaymentValidationChannel of PaymentProcessor {
+  property processorId: String;
+  property lastPaidTicketId: String;
+}
+
+role TicketValidatorPaymentRole mediated-by PaymentValidationChannel of TicketValidator {
+  property validatorId: String;
+  property lastValidatedTicketId: String;
+}
+
+relator PaymentValidationChannel mediates (PaymentProcessorRole, TicketValidatorPaymentRole) {
+  identity: channelId;
+  property channelId: String;
+  property paymentConfirmed: Boolean;
+
+  invariants {
+    self.channelId <> null;
+  }
+}
+
+// =====================================================================
+// DATA FLOWS (Happenings)
+//   One happening per end-to-end story that crosses component boundaries.
+// =====================================================================
+happening EntryFlowProcess {
+  identity: flowId;
+  property flowId: String;
+  property sensorDetection: String;
+  property ticketIssued: String;
+  property occupancyIncremented: String;
+  property gateRaised: String;
+
+  invariants {
+    self.flowId <> null;
+  }
+
+  // Steps ordered by time:
+  // 1. EntrySensor.detectVehicle
+  // 2. OccupancyTracker.checkCapacity (must be < capacity)
+  // 3. TicketIssuer.issueTicket
+  // 4. OccupancyTracker.incrementOccupancy
+  // 5. GateController.raiseEntryGate
+}
+
+happening ExitFlowProcess {
+  identity: flowId;
+  property flowId: String;
+  property sensorDetection: String;
+  property ticketValidation: String;
+  property paymentCheck: String;
+  property occupancyDecremented: String;
+  property gateRaised: String;
+
+  invariants {
+    self.flowId <> null;
+  }
+
+  // Steps ordered by time:
+  // 1. ExitSensor.detectTicket
+  // 2. TicketValidator.validateTicket (exists, unused, paid)
+  // 3. PaymentProcessor.processPayment (if not already paid)
+  // 4. TicketValidator.markTicketExited
+  // 5. OccupancyTracker.decrementOccupancy
+  // 6. GateController.raiseExitGate
+}
+
+happening RejectedExitFlowProcess {
+  identity: flowId;
+  property flowId: String;
+  property sensorDetection: String;
+  property validationFailure: String;
+  property gateNotRaised: String;
+
+  invariants {
+    self.flowId <> null;
+  }
+
+  // Steps:
+  // 1. ExitSensor.detectTicket
+  // 2. TicketValidator.validateTicket → fails (used or unpaid)
+  // 3. GateController.displayFullSign (or remain closed)
+  // 4. Attendant called (manual intervention)
+}
+
+// =====================================================================
+// EXPLICIT RELATIONS (OntoUML Stereotypes)
+// =====================================================================
+relation sensorChannelEntry: <<mediation>> from EntrySensorControllerChannel [1] to EntrySensorRole [1];
+relation sensorChannelGateEntry: <<mediation>> from EntrySensorControllerChannel [1] to GateControllerEntryRole [1];
+relation ticketChannelIssuer: <<mediation>> from TicketHandoverChannel [1] to TicketIssuerRole [1];
+relation ticketChannelValidator: <<mediation>> from TicketHandoverChannel [1] to TicketValidatorRole [1];
+relation occupancyChannelTracker: <<mediation>> from OccupancyGateCoordination [1] to OccupancyTrackerRole [1];
+relation occupancyChannelGate: <<mediation>> from OccupancyGateCoordination [1] to GateControllerOccupancyRole [1];
+relation paymentChannelProcessor: <<mediation>> from PaymentValidationChannel [1] to PaymentProcessorRole [1];
+relation paymentChannelValidator: <<mediation>> from PaymentValidationChannel [1] to TicketValidatorPaymentRole [1];

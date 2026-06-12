@@ -1,0 +1,149 @@
+schema "onto/0.1";
+namespace meeting_scheduler_discovery;
+
+// ─── Stakeholders ───────────────────────────────────────────────────────
+agent MeetingInitiator {
+  identity: initiatorId;
+  property initiatorId: String;
+  property name: String;
+  invariants {
+    self.initiatorId <> null;
+    self.name <> null;
+  }
+}
+
+agent Participant {
+  identity: participantId;
+  property participantId: String;
+  property name: String;
+  invariants {
+    self.participantId <> null;
+    self.name <> null;
+  }
+}
+
+agent MeetingSchedulerVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+    self.name <> null;
+  }
+}
+
+// ─── Glossary Terms ─────────────────────────────────────────────────────
+kind DateRange {
+  identity: rangeId;
+  property rangeId: String;
+  property startDate: String;
+  property endDate: String;
+  invariants {
+    self.rangeId <> null;
+    self.startDate <> null;
+    self.endDate <> null;
+  }
+}
+
+kind ExclusionSet {
+  identity: exclusionId;
+  property exclusionId: String;
+  property excludedDates: Set<String>;
+  invariants {
+    self.exclusionId <> null;
+  }
+}
+
+kind PreferenceSet {
+  identity: preferenceId;
+  property preferenceId: String;
+  property preferredDates: Set<String>;
+  invariants {
+    self.preferenceId <> null;
+  }
+}
+
+// ─── Hard Goals as Commitments ──────────────────────────────────────────
+// GOAL-1: Schedule a meeting that fits every participant's constraints.
+commitment FitConstraintsCommitment
+  debitor: MeetingSchedulerVendor
+  creditor: MeetingInitiator {
+    identity: commitmentId;
+    property commitmentId: String;
+    property dateWithinRange: String;
+    predicate: self.dateWithinRange <> null;
+  }
+
+// GOAL-2: Handle the case where no common date exists.
+commitment ConflictHandlingCommitment
+  debitor: MeetingSchedulerVendor
+  creditor: MeetingInitiator {
+    identity: commitmentId;
+    property commitmentId: String;
+    property conflictReported: String;
+    predicate: self.conflictReported <> null;
+  }
+
+// GOAL-3a: Participants must be notified on confirmation.
+commitment ParticipantNotificationCommitment
+  debitor: MeetingSchedulerVendor
+  creditor: Participant {
+    identity: commitmentId;
+    property commitmentId: String;
+    property notificationSent: String;
+    predicate: self.notificationSent <> null;
+  }
+
+// GOAL-3b: Updated constraints must be accepted while open.
+commitment UpdatedConstraintsCommitment
+  debitor: MeetingSchedulerVendor
+  creditor: Participant {
+    identity: commitmentId;
+    property commitmentId: String;
+    property constraintsUpdated: String;
+    predicate: self.constraintsUpdated <> null;
+  }
+
+// ─── Constraint Goal Category ──────────────────────────────────────────
+category ParticipantConstraintsRespected where bearer: MeetingSchedulerVendor {
+  invariants {
+    true;
+  }
+}
+
+// ─── Domain Stories (happenings) ────────────────────────────────────────
+happening MeetingSchedulingFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy = 'initiator_request';
+    self.outcome <> null;
+  }
+}
+
+happening ConflictResolutionFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy = 'scheduling_conflict';
+    self.outcome = 'conflict_reported_to_initiator';
+  }
+}
+
+happening ParticipantUpdateFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy = 'participant_constraint_update';
+    self.outcome = 'constraints_accepted_while_open';
+  }
+}

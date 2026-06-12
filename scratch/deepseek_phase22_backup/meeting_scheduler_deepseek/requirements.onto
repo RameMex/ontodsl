@@ -1,0 +1,178 @@
+schema "onto/0.1";
+namespace meeting_scheduler_requirements;
+import "./discovery.onto";
+
+// ─── System Kind ─────────────────────────────────────────────────────────
+kind MeetingSchedulerSystem specializes ParticipantConstraintsRespected {
+  identity: systemId;
+  property systemId: String;
+  property dateRangeStart: Real;
+  property dateRangeEnd: Real;
+  property isOpen: Boolean;
+  property initiatorNotified: Boolean;
+  property participantsNotified: Boolean;
+  property constraintsUpdated: Boolean;
+  property conflictDetected: Boolean;
+  property proposedDate: Real;
+
+  invariants {
+    self.systemId <> null;
+    self.dateRangeStart >= 0.0;
+    self.dateRangeEnd >= 0.0;
+    self.dateRangeEnd >= self.dateRangeStart;
+    // If a proposed date exists, it must be within the range
+    if self.proposedDate >= 0.0 then
+      self.proposedDate >= self.dateRangeStart and self.proposedDate <= self.dateRangeEnd
+    else
+      true
+    endif;
+  }
+
+  // ─── FR-1: Request Meeting ─────────────────────────────────────────────
+  event requestMeeting(rangeStart: Real, rangeEnd: Real)
+    refines meeting_scheduler_discovery::FitConstraintsCommitment,
+            meeting_scheduler_discovery::ConflictHandlingCommitment {
+    pre: not self.isOpen;
+    pre: rangeStart >= 0.0;
+    pre: rangeEnd >= 0.0;
+    pre: rangeEnd >= rangeStart;
+    post: self.dateRangeStart = rangeStart;
+    post: self.dateRangeEnd = rangeEnd;
+    post: self.isOpen = true;
+    post: self.conflictDetected = false;
+    post: self.initiatorNotified = false;
+    post: self.participantsNotified = false;
+    post: self.constraintsUpdated = false;
+    post: self.proposedDate = -1.0;
+    modifies: self.dateRangeStart, self.dateRangeEnd, self.isOpen,
+              self.conflictDetected, self.initiatorNotified,
+              self.participantsNotified, self.constraintsUpdated, self.proposedDate;
+  }
+
+  // ─── FR-2: Propose Date ────────────────────────────────────────────────
+  event proposeDate(exclusionSet: Set<Real>, preferenceSet: Set<Real>): Real
+    refines meeting_scheduler_discovery::FitConstraintsCommitment {
+    pre: self.isOpen = true;
+    pre: not self.conflictDetected;
+    pre: self.proposedDate < 0.0;
+    post: if result >= 0.0 then
+            result >= self.dateRangeStart and
+            result <= self.dateRangeEnd and
+            not exclusionSet->includes(result)
+          else
+            self.conflictDetected = true
+          endif;
+    post: if result >= 0.0 then
+            self.proposedDate = result
+          else
+            self.proposedDate = -1.0
+          endif;
+    post: if preferenceSet->notEmpty() and result >= 0.0 then
+            preferenceSet->includes(result)
+          else
+            true
+          endif;
+    modifies: self.conflictDetected, self.proposedDate;
+  }
+
+  // ─── FR-3: Report Conflict ─────────────────────────────────────────────
+  event reportConflict()
+    refines meeting_scheduler_discovery::ConflictHandlingCommitment {
+    pre: self.conflictDetected = true;
+    pre: not self.initiatorNotified;
+    post: self.initiatorNotified = true;
+    modifies: self.initiatorNotified;
+  }
+
+  // ─── FR-4: Confirm Meeting ─────────────────────────────────────────────
+  event confirmMeeting(location: String)
+    refines meeting_scheduler_discovery::ParticipantNotificationCommitment {
+    pre: self.isOpen = true;
+    pre: self.proposedDate >= 0.0;
+    pre: location <> null;
+    post: self.isOpen = false;
+    post: self.participantsNotified = true;
+    modifies: self.isOpen, self.participantsNotified;
+  }
+
+  // ─── FR-5: Update Constraints ──────────────────────────────────────────
+  event updateConstraints(newExclusionSet: Set<Real>)
+    refines meeting_scheduler_discovery::UpdatedConstraintsCommitment {
+    pre: self.isOpen = true;
+    pre: not self.conflictDetected;
+    post: self.constraintsUpdated = true;
+    post: self.proposedDate = -1.0;
+    modifies: self.constraintsUpdated, self.proposedDate;
+  }
+
+  // ─── FR-6: Notify Initiator of Outcome ─────────────────────────────────
+  event notifyInitiator(outcomeMessage: String)
+    refines meeting_scheduler_discovery::ConflictHandlingCommitment {
+    pre: not self.initiatorNotified;
+    pre: (self.conflictDetected = true) or (self.participantsNotified = true);
+    post: self.initiatorNotified = true;
+    modifies: self.initiatorNotified;
+  }
+}
+
+// ─── Supporting Kinds for the Requirements Model ─────────────────────────
+kind MeetingRequest {
+  identity: requestId;
+  property requestId: String;
+  property initiatorId: String;
+  property rangeStart: Real;
+  property rangeEnd: Real;
+  property status: String;
+
+  invariants {
+    self.requestId <> null;
+    self.initiatorId <> null;
+    self.rangeStart >= 0.0;
+    self.rangeEnd >= 0.0;
+    self.rangeEnd >= self.rangeStart;
+    self.status = 'OPEN' or self.status = 'CONFIRMED' or self.status = 'CANCELLED';
+  }
+
+  event create(initId: String, start: Real, end: Real) {
+    pre: initId <> null;
+    pre: start >= 0.0;
+    pre: end >= 0.0;
+    pre: end >= start;
+    post: self.initiatorId = initId;
+    post: self.rangeStart = start;
+    post: self.rangeEnd = end;
+    post: self.status = 'OPEN';
+    modifies: self.initiatorId, self.rangeStart, self.rangeEnd, self.status;
+  }
+
+  event confirm() {
+    pre: self.status = 'OPEN';
+    post: self.status = 'CONFIRMED';
+    modifies: self.status;
+  }
+
+  event cancel() {
+    pre: self.status = 'OPEN';
+    post: self.status = 'CANCELLED';
+    modifies: self.status;
+  }
+}
+
+kind ParticipantConstraints {
+  identity: constraintId;
+  property constraintId: String;
+  property participantId: String;
+  property requestId: String;
+  property exclusionSet: Set<Real>;
+  property preferenceSet: Set<Real>;
+
+  invariants {
+    self.constraintId <> null;
+    self.participantId <> null;
+    self.requestId <> null;
+  }
+}
+
+// ─── Explicit Relations ──────────────────────────────────────────────────
+relation requestHasConstraints: <<memberOf>> from ParticipantConstraints [0..*] to MeetingRequest [1];
+relation schedulerHandlesRequests: <<memberOf>> from MeetingRequest [0..*] to MeetingSchedulerSystem [1];

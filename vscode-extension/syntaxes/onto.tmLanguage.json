@@ -1,0 +1,135 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Onto DSL",
+  "scopeName": "source.onto",
+  "fileTypes": ["onto"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#stereotypes" },
+    { "include": "#header-keywords" },
+    { "include": "#body-keywords" },
+    { "include": "#contract-keywords" },
+    { "include": "#ocl-keywords" },
+    { "include": "#ocl-collection-ops" },
+    { "include": "#allen-operators" },
+    { "include": "#primitive-types" },
+    { "include": "#operators" },
+    { "include": "#pre-suffix" },
+    { "include": "#identifiers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.onto",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.onto",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.onto",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.onto",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.real.onto",
+          "match": "\\b\\d+\\.\\d+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.onto",
+          "match": "\\b\\d+\\b"
+        }
+      ]
+    },
+    "stereotypes": {
+      "comment": "Top-level declaration stereotypes. The `\\b...\\b` boundaries prevent matching inside identifiers like `kindling` or `roleMixinFoo`.",
+      "name": "keyword.control.stereotype.onto",
+      "match": "\\b(kind|subkind|role|relator|category|mixin|roleMixin|mode|quality|collective|quantity|happening|agent|commitment|useCase|relation|phaseGroup)\\b"
+    },
+    "header-keywords": {
+      "comment": "Top-of-file directives and inheritance.",
+      "name": "keyword.control.header.onto",
+      "match": "\\b(schema|namespace|specializes|override|of)\\b"
+    },
+    "body-keywords": {
+      "comment": "Block-level keywords inside declarations. Followed by `:` in source — we match the keyword alone and let the `:` fall to default coloring.",
+      "name": "keyword.control.body.onto",
+      "match": "\\b(identity|property|event|query|invariants|actors|trigger|success|failure|body|debitor|creditor|predicate|modifies)\\b"
+    },
+    "contract-keywords": {
+      "comment": "Pre/post conditions on events.",
+      "name": "keyword.control.contract.onto",
+      "match": "\\b(pre|post)\\b"
+    },
+    "ocl-keywords": {
+      "comment": "OCL keywords inside invariant/pre/post/predicate clauses.",
+      "name": "keyword.other.ocl.onto",
+      "match": "\\b(self|null|true|false|and|or|not|if|then|else|endif)\\b"
+    },
+    "ocl-collection-ops": {
+      "comment": "Collection operators that follow `->`. We match the bare word; the `->` itself is in #operators.",
+      "name": "support.function.ocl.onto",
+      "match": "\\b(forAll|exists|size|isEmpty|notEmpty|includes)\\b"
+    },
+    "allen-operators": {
+      "comment": "Allen interval-algebra method calls on happenings.",
+      "name": "support.function.allen.onto",
+      "match": "\\b(before|after|meets|metBy|overlaps|overlappedBy|during|contains|starts|startedBy|finishes|finishedBy|equals)\\b"
+    },
+    "primitive-types": {
+      "name": "support.type.primitive.onto",
+      "match": "\\b(Real|Integer|String|Boolean|Set)\\b"
+    },
+    "operators": {
+      "patterns": [
+        {
+          "comment": "Comparison & equality. `<>` is OCL's `!=`. Order matters: longer patterns first so `<=` matches before `<`.",
+          "name": "keyword.operator.comparison.onto",
+          "match": "<>|<=|>=|=|<|>"
+        },
+        {
+          "comment": "Arrow used for collection ops: `coll->forAll(...)`.",
+          "name": "keyword.operator.arrow.onto",
+          "match": "->"
+        },
+        {
+          "name": "keyword.operator.arithmetic.onto",
+          "match": "[+\\-*/]"
+        }
+      ]
+    },
+    "pre-suffix": {
+      "comment": "OCL `@pre` — references the value before an event ran. Always written attached to a property: `self.balance@pre`.",
+      "name": "keyword.other.pre-suffix.onto",
+      "match": "@pre\\b"
+    },
+    "identifiers": {
+      "comment": "Catch-all identifier rule. Capitalized identifiers get tagged as types (so unknown declared types in property/event signatures get colored differently from values). The matcher is intentionally simple — TextMate has no scope information, so we rely on capitalization.",
+      "patterns": [
+        {
+          "name": "entity.name.type.onto",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        },
+        {
+          "name": "variable.other.onto",
+          "match": "\\b[a-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,492 @@
+schema "onto/0.1";
+namespace insulin_pump_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Design stage — insulin pump control system
+//
+// Decomposes InsulinPumpSystem into four components:
+//
+//   BloodSugarSensor   — reads glucose values, validates plausibility
+//   PumpActuator       — holds the reservoir and delivers insulin
+//   SafetyMonitor      — runs self-tests, sets fault flag, halts pump
+//   AlertSystem        — owns alarm state, surfaces conditions to patient
+//
+// Interfaces (relators) between components:
+//   SensorToMonitorChannel   — carries raw reading + validity flag
+//   MonitorToActuatorChannel — carries fault/halt signal
+//   MonitorToAlertChannel    — carries fault-alarm trigger
+//   ActuatorToAlertChannel   — carries low-reservoir trigger
+//
+// Data flows (happenings):
+//   SensorReadingFlow      — sensor -> monitor -> actuator
+//   FaultResponseFlow      — monitor -> actuator + alert
+//   LowReservoirAlertFlow  — actuator -> alert
+// =====================================================================
+
+
+// =====================================================================
+// COMPONENT 1: BloodSugarSensor
+// =====================================================================
+
+kind BloodSugarSensor {
+  identity: sensorId;
+
+  property sensorId: String;
+  property lastReadingMgDl: Real;
+  property readingValid: Boolean;
+  property readingTimestampMin: Real;
+  property minPlausibleMgDl: Real;
+  property maxPlausibleMgDl: Real;
+
+  invariants {
+    self.sensorId <> null;
+    self.minPlausibleMgDl = 0.0;
+    self.maxPlausibleMgDl = 1000.0;
+    self.maxPlausibleMgDl > self.minPlausibleMgDl;
+    self.readingValid implies
+      (self.lastReadingMgDl >= self.minPlausibleMgDl
+       and self.lastReadingMgDl <= self.maxPlausibleMgDl);
+  }
+
+  // Refines: supports deliverInsulin (FR-1) and rejectInvalidReading (R-4).
+  // LSP: no parent event; pre is trivially weaker-or-equal.
+  // Encapsulation: modifies only BloodSugarSensor properties.
+  event takeReading(rawValueMgDl: Real, timestampMin: Real) {
+    pre: timestampMin >= 0.0;
+
+    post: self.lastReadingMgDl = rawValueMgDl;
+    post: self.readingTimestampMin = timestampMin;
+    post: self.readingValid =
+            (rawValueMgDl >= self.minPlausibleMgDl
+             and rawValueMgDl <= self.maxPlausibleMgDl);
+
+    modifies: self.lastReadingMgDl, self.readingTimestampMin, self.readingValid;
+  }
+
+  // Refines: formalization rejectInvalidReading (sensor-side).
+  // LSP pre: weaker — sensor gates only on value, not isOperating.
+  // LSP post: readingValid = false; alarm/fault propagated via channel.
+  // Encapsulation: modifies only BloodSugarSensor properties.
+  event rejectBadReading(rawValueMgDl: Real) {
+    pre: rawValueMgDl < self.minPlausibleMgDl
+         or rawValueMgDl > self.maxPlausibleMgDl;
+
+    post: self.readingValid = false;
+    post: self.lastReadingMgDl = rawValueMgDl;
+
+    modifies: self.readingValid, self.lastReadingMgDl;
+  }
+}
+
+
+// =====================================================================
+// COMPONENT 2: PumpActuator
+// =====================================================================
+
+kind PumpActuator {
+  identity: actuatorId;
+
+  property actuatorId: String;
+  property reservoirUnits: Real;
+  property reservoirCapacityUnits: Real;
+  property lowReservoirThresholdUnits: Real;
+  property reservoirIsLow: Boolean;
+  property safeMaxDoseUnits: Real;
+  property lastDoseDelivered: Real;
+  property delivering: Boolean;
+
+  invariants {
+    self.actuatorId <> null;
+    self.safeMaxDoseUnits > 0.0;
+    self.reservoirCapacityUnits > 0.0;
+    self.reservoirUnits >= 0.0;
+    self.reservoirUnits <= self.reservoirCapacityUnits;
+    self.lowReservoirThresholdUnits > 0.0;
+    self.lastDoseDelivered >= 0.0;
+    self.lastDoseDelivered <= self.safeMaxDoseUnits;
+    self.reservoirIsLow = (self.reservoirUnits < self.lowReservoirThresholdUnits);
+  }
+
+  // Refines: FR-1 deliverInsulin.
+  // LSP pre: weaker — isOperating/faultDetected guarded upstream by SafetyMonitor.
+  // LSP post: stronger — exact reservoir decrement (not just bounded result).
+  // Encapsulation: modifies only PumpActuator properties.
+  event deliverDose(dose: Real) {
+    pre: dose > 0.0;
+    pre: dose <= self.safeMaxDoseUnits;
+    pre: self.reservoirUnits >= dose;
+    pre: not self.delivering;
+
+    post: self.lastDoseDelivered = dose;
+    post: self.reservoirUnits = self.reservoirUnits@pre - dose;
+    post: self.delivering = true;
+    post: self.lastDoseDelivered <= self.safeMaxDoseUnits;
+    post: self.reservoirUnits >= 0.0;
+
+    modifies: self.lastDoseDelivered, self.reservoirUnits, self.delivering;
+  }
+
+  // Supporting operation: clears delivering flag after physical dose completes.
+  // No Requirements counterpart.
+  // Encapsulation: modifies only PumpActuator properties.
+  event completeDose() {
+    pre: self.delivering = true;
+
+    post: self.delivering = false;
+
+    modifies: self.delivering;
+  }
+
+  // Refines: FR-6 checkReservoir.
+  // LSP pre: weaker — no isOperating guard needed for a read-and-flag op.
+  // LSP post: stronger — alarm consequences handled by AlertSystem via channel.
+  // Encapsulation: modifies only PumpActuator properties.
+  event checkReservoir() {
+    post: self.reservoirIsLow =
+            (self.reservoirUnits < self.lowReservoirThresholdUnits);
+
+    modifies: self.reservoirIsLow;
+  }
+
+  // Refines: FR-5 configureSafeMax.
+  // LSP pre: weaker — isOperating = false guarded at system boundary.
+  // LSP post: equal — safeMaxDoseUnits = newMaxUnits and > 0.
+  // Encapsulation: modifies only PumpActuator properties.
+  event configureSafeMax(newMaxUnits: Real) {
+    pre: newMaxUnits > 0.0;
+    pre: not self.delivering;
+
+    post: self.safeMaxDoseUnits = newMaxUnits;
+    post: self.safeMaxDoseUnits > 0.0;
+
+    modifies: self.safeMaxDoseUnits;
+  }
+
+  // Refines: FR-3 haltOnFault (actuator-side — stops physical delivery).
+  // LSP pre: weaker — unconditional halt is safer than gated halt.
+  // LSP post: delivering = false; isOperating/alarm owned by other components.
+  // Encapsulation: modifies only PumpActuator properties.
+  event haltDelivery() {
+    post: self.delivering = false;
+
+    modifies: self.delivering;
+  }
+}
+
+
+// =====================================================================
+// COMPONENT 3: SafetyMonitor
+// =====================================================================
+
+kind SafetyMonitor {
+  identity: monitorId;
+
+  property monitorId: String;
+  property isOperating: Boolean;
+  property faultDetected: Boolean;
+  property selfTestPeriodMin: Real;
+  property maxFaultResponseMin: Real;
+  property lastTestTimestampMin: Real;
+
+  invariants {
+    self.monitorId <> null;
+    self.selfTestPeriodMin > 0.0;
+    self.selfTestPeriodMin <= 1.0;
+    self.maxFaultResponseMin > 0.0;
+    self.maxFaultResponseMin <= 1.0;
+    self.faultDetected = true implies self.isOperating = false;
+  }
+
+  // Refines: FR-2 runSelfTest.
+  // LSP pre: equal — isOperating = true.
+  // LSP post: stronger — adds lastTestTimestampMin update.
+  // Encapsulation: modifies only SafetyMonitor properties.
+  event runSelfTest(passed: Boolean, timestampMin: Real) {
+    pre: self.isOperating = true;
+    pre: timestampMin >= 0.0;
+
+    post: if passed then
+            self.faultDetected = self.faultDetected@pre
+          else
+            self.faultDetected = true
+          endif;
+    post: self.lastTestTimestampMin = timestampMin;
+    post: self.selfTestPeriodMin <= 1.0;
+
+    modifies: self.faultDetected, self.lastTestTimestampMin;
+  }
+
+  // Refines: FR-3 haltOnFault (monitor-side — owns isOperating).
+  // LSP pre: weaker — reason check delegated to AlertSystem.
+  // LSP post: isOperating = false; alarm owned by AlertSystem.
+  // Encapsulation: modifies only SafetyMonitor properties.
+  event haltPump() {
+    pre: self.faultDetected = true;
+
+    post: self.isOperating = false;
+
+    modifies: self.isOperating;
+  }
+
+  // Refines: formalization rejectInvalidReading (monitor-side state change).
+  // LSP pre: weaker — plausibility already checked by BloodSugarSensor.
+  // LSP post: faultDetected = true; isOperating = false via haltPump;
+  //           alarm owned by AlertSystem. Composition yields full parent post.
+  // Encapsulation: modifies only SafetyMonitor properties.
+  event notifySensorFault() {
+    pre: self.isOperating = true;
+
+    post: self.faultDetected = true;
+
+    modifies: self.faultDetected;
+  }
+}
+
+
+// =====================================================================
+// COMPONENT 4: AlertSystem
+// =====================================================================
+
+kind AlertSystem {
+  identity: alertId;
+
+  property alertId: String;
+  property alarmActive: Boolean;
+  property alarmReason: String;
+  property maxAlertLatencyMin: Real;
+
+  invariants {
+    self.alertId <> null;
+    self.maxAlertLatencyMin > 0.0;
+    self.alarmActive implies
+      (self.alarmReason = 'LOW_RESERVOIR'
+       or self.alarmReason = 'FAULT'
+       or self.alarmReason = 'MALFUNCTION');
+  }
+
+  // Refines: FR-4 raiseAlarm.
+  // LSP pre: weaker — accepts 'FAULT' in addition to 'LOW_RESERVOIR'/'MALFUNCTION'.
+  // LSP post: stronger-or-equal — alarmActive = true, alarmReason = reason,
+  //           maxAlertLatencyMin > 0 (threshold guard held in PumpActuator invariant).
+  // Encapsulation: modifies only AlertSystem properties.
+  event raiseAlarm(reason: String) {
+    pre: reason = 'LOW_RESERVOIR'
+         or reason = 'FAULT'
+         or reason = 'MALFUNCTION';
+
+    post: self.alarmActive = true;
+    post: self.alarmReason = reason;
+    post: self.maxAlertLatencyMin > 0.0;
+
+    modifies: self.alarmActive, self.alarmReason;
+  }
+
+  // Supporting operation: clears the alarm once the condition is resolved.
+  // No direct Requirements counterpart; supports system reset flows.
+  // Encapsulation: modifies only AlertSystem properties.
+  event clearAlarm() {
+    pre: self.alarmActive = true;
+
+    post: self.alarmActive = false;
+
+    modifies: self.alarmActive;
+  }
+}
+
+
+// =====================================================================
+// INTERFACES (relators between components)
+// =====================================================================
+
+// Roles for SensorToMonitorChannel
+role SensorRole mediated-by SensorToMonitorChannel of BloodSugarSensor {
+  property sensorId: String;
+}
+
+role MonitorListenerRole mediated-by SensorToMonitorChannel of SafetyMonitor {
+  property monitorId: String;
+}
+
+// Interface: BloodSugarSensor <-> SafetyMonitor
+// Carries the validated reading and validity flag from sensor to monitor.
+// The monitor uses readingValid = false to trigger notifySensorFault.
+relator SensorToMonitorChannel mediates (SensorRole, MonitorListenerRole) {
+  identity: channelId;
+
+  property channelId: String;
+  property readingMgDl: Real;
+  property readingValid: Boolean;
+  property readingTimestampMin: Real;
+  property maxLatencyMs: Integer;
+
+  invariants {
+    self.channelId <> null;
+    self.maxLatencyMs > 0;
+    self.readingMgDl >= 0.0;
+  }
+}
+
+
+// Roles for MonitorToActuatorChannel
+role MonitorCommandRole mediated-by MonitorToActuatorChannel of SafetyMonitor {
+  property monitorId: String;
+}
+
+role ActuatorListenerRole mediated-by MonitorToActuatorChannel of PumpActuator {
+  property actuatorId: String;
+}
+
+// Interface: SafetyMonitor <-> PumpActuator
+// Carries the halt signal from monitor to actuator on fault detection.
+// Invariant: when faultSignal = true the actuator must call haltDelivery.
+relator MonitorToActuatorChannel mediates (MonitorCommandRole, ActuatorListenerRole) {
+  identity: channelId;
+
+  property channelId: String;
+  property faultSignal: Boolean;
+  property maxLatencyMs: Integer;
+
+  invariants {
+    self.channelId <> null;
+    self.maxLatencyMs > 0;
+  }
+}
+
+
+// Roles for MonitorToAlertChannel
+role MonitorAlertRole mediated-by MonitorToAlertChannel of SafetyMonitor {
+  property monitorId: String;
+}
+
+role AlertListenerFromMonitorRole mediated-by MonitorToAlertChannel of AlertSystem {
+  property alertId: String;
+}
+
+// Interface: SafetyMonitor <-> AlertSystem
+// Carries the fault-alarm trigger ('FAULT' or 'MALFUNCTION') from
+// monitor to alert system after haltPump.
+relator MonitorToAlertChannel mediates (MonitorAlertRole, AlertListenerFromMonitorRole) {
+  identity: channelId;
+
+  property channelId: String;
+  property alarmReason: String;
+  property maxLatencyMs: Integer;
+
+  invariants {
+    self.channelId <> null;
+    self.maxLatencyMs > 0;
+    self.alarmReason = 'FAULT' or self.alarmReason = 'MALFUNCTION';
+  }
+}
+
+
+// Roles for ActuatorToAlertChannel
+role ActuatorAlertRole mediated-by ActuatorToAlertChannel of PumpActuator {
+  property actuatorId: String;
+}
+
+role AlertListenerFromActuatorRole mediated-by ActuatorToAlertChannel of AlertSystem {
+  property alertId: String;
+}
+
+// Interface: PumpActuator <-> AlertSystem
+// Carries the low-reservoir trigger from actuator to alert system
+// after checkReservoir sets reservoirIsLow = true.
+relator ActuatorToAlertChannel mediates (ActuatorAlertRole, AlertListenerFromActuatorRole) {
+  identity: channelId;
+
+  property channelId: String;
+  property reservoirIsLow: Boolean;
+  property maxLatencyMs: Integer;
+
+  invariants {
+    self.channelId <> null;
+    self.maxLatencyMs > 0;
+  }
+}
+
+
+// =====================================================================
+// DATA FLOWS (happenings)
+// =====================================================================
+
+// Flow 1: Normal dose-delivery cycle (every 10 minutes).
+// BloodSugarSensor.takeReading ->
+//   SensorToMonitorChannel ->
+//     SafetyMonitor (validates no fault) ->
+//       PumpActuator.deliverDose
+happening SensorReadingFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property intervalMin: Real;
+
+  invariants {
+    self.flowId <> null;
+    self.intervalMin > 0.0;
+    self.intervalMin <= 10.0;
+  }
+}
+
+// Flow 2: Hardware fault handling.
+// SafetyMonitor.runSelfTest (failed) ->
+//   SafetyMonitor.haltPump ->
+//     MonitorToActuatorChannel -> PumpActuator.haltDelivery
+//     MonitorToAlertChannel   -> AlertSystem.raiseAlarm('FAULT')
+happening FaultHandlingFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+// Flow 3: Low-reservoir alarm.
+// PumpActuator.checkReservoir (reservoirIsLow = true) ->
+//   ActuatorToAlertChannel -> AlertSystem.raiseAlarm('LOW_RESERVOIR')
+happening LowReservoirAlertFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+
+// =====================================================================
+// EXPLICIT RELATIONS
+// =====================================================================
+
+relation sensorToChannel: <<mediation>>
+  from SensorToMonitorChannel [1] to SensorRole [1];
+
+relation monitorListensToSensor: <<mediation>>
+  from SensorToMonitorChannel [1] to MonitorListenerRole [1];
+
+relation monitorToActuatorRel: <<mediation>>
+  from MonitorToActuatorChannel [1] to MonitorCommandRole [1];
+
+relation actuatorListensToMonitor: <<mediation>>
+  from MonitorToActuatorChannel [1] to ActuatorListenerRole [1];
+
+relation monitorToAlertRel: <<mediation>>
+  from MonitorToAlertChannel [1] to MonitorAlertRole [1];
+
+relation alertListensToMonitor: <<mediation>>
+  from MonitorToAlertChannel [1] to AlertListenerFromMonitorRole [1];
+
+relation actuatorToAlertRel: <<mediation>>
+  from ActuatorToAlertChannel [1] to ActuatorAlertRole [1];
+
+relation alertListensToActuator: <<mediation>>
+  from ActuatorToAlertChannel [1] to AlertListenerFromActuatorRole [1];

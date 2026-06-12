@@ -1,0 +1,276 @@
+schema "onto/0.1";
+namespace engine_control_discovery;
+
+// ─── Stakeholders ─────────────────────────────────────────────────────────
+agent AircraftOperator {
+  identity: operatorId;
+  property operatorId: String;
+  property name: String;
+  property fleetSize: Integer;
+  invariants {
+    self.operatorId <> null;
+    self.name <> null;
+    self.fleetSize > 0;
+  }
+}
+
+agent AirlinePilot {
+  identity: pilotId;
+  property pilotId: String;
+  property name: String;
+  property licenseType: String;
+  invariants {
+    self.pilotId <> null;
+    self.name <> null;
+    self.licenseType <> null;
+  }
+}
+
+agent MaintenanceEngineer {
+  identity: engineerId;
+  property engineerId: String;
+  property name: String;
+  property certification: String;
+  invariants {
+    self.engineerId <> null;
+    self.name <> null;
+    self.certification <> null;
+  }
+}
+
+agent RegulatoryAuthority {
+  identity: authorityId;
+  property authorityId: String;
+  property name: String;
+  property regulationsVersion: String;
+  invariants {
+    self.authorityId <> null;
+    self.name <> null;
+    self.regulationsVersion <> null;
+  }
+}
+
+// The vendor / dev team — debitor of every stakeholder commitment.
+agent EngineControlVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  property certifiedStandards: Set<String>;
+  invariants {
+    self.vendorId <> null;
+    self.name <> null;
+  }
+}
+
+// ─── Hard Goals (Commitments) ─────────────────────────────────────────────
+// GOAL-1: Keep the engine within safe operating limits
+commitment OverspeedPreventionCommitment
+  debitor: EngineControlVendor
+  creditor: AircraftOperator {
+  identity: commitmentId;
+  property commitmentId: String;
+  property maxSafeSpeed: Real;
+  property overspeedMargin: Real;
+  predicate: self.maxSafeSpeed > 0.0 and self.overspeedMargin > 0.0;
+}
+
+commitment FuelCutCommitment
+  debitor: EngineControlVendor
+  creditor: AircraftOperator {
+  identity: commitmentId;
+  property commitmentId: String;
+  property maxSafeSpeed: Real;
+  property fuelCutThreshold: Real;
+  predicate: self.fuelCutThreshold <= self.maxSafeSpeed;
+}
+
+// GOAL-2: Manage ignition and thrust correctly across flight phases
+commitment ContinuousIgnitionCommitment
+  debitor: EngineControlVendor
+  creditor: AirlinePilot {
+  identity: commitmentId;
+  property commitmentId: String;
+  property ignitesOnCommand: Boolean;
+  property continuousIgnitionDurationSec: Integer;
+  predicate: self.ignitesOnCommand = true and self.continuousIgnitionDurationSec > 0;
+}
+
+commitment ThrustHoldCommitment
+  debitor: EngineControlVendor
+  creditor: AirlinePilot {
+  identity: commitmentId;
+  property commitmentId: String;
+  property thrustCommanded: Real;
+  property thrustAchieved: Real;
+  predicate: self.thrustCommanded > 0.0 implies self.thrustAchieved >= 0.0;
+}
+
+commitment ReverserGroundOnlyCommitment
+  debitor: EngineControlVendor
+  creditor: AirlinePilot {
+  identity: commitmentId;
+  property commitmentId: String;
+  property isOnGround: Boolean;
+  property reverserDeployed: Boolean;
+  predicate: self.reverserDeployed implies self.isOnGround;
+}
+
+// GOAL-3: Tolerate sensor faults without losing control
+commitment SensorFaultToleranceCommitment
+  debitor: EngineControlVendor
+  creditor: MaintenanceEngineer {
+  identity: commitmentId;
+  property commitmentId: String;
+  property maxFaultySensors: Integer;
+  property modelledValueAvailable: Boolean;
+  predicate: self.maxFaultySensors > 0 and self.modelledValueAvailable = true;
+}
+
+// ─── Glossary Terms (as Kinds) — these define the bearer type's properties ──
+kind Overspeed {
+  identity: overspeedId;
+  property overspeedId: String;
+  property detectedSpeed: Real;
+  property maxSafeSpeed: Real;
+  property isActive: Boolean;
+  invariants {
+    self.overspeedId <> null;
+    self.detectedSpeed > 0.0;
+    self.maxSafeSpeed > 0.0;
+    self.isActive implies self.detectedSpeed > self.maxSafeSpeed;
+  }
+}
+
+kind ContinuousIgnitionMode {
+  identity: modeId;
+  property modeId: String;
+  property isActive: Boolean;
+  property flightPhase: String;
+  invariants {
+    self.modeId <> null;
+    self.isActive implies (self.flightPhase = 'TAKEOFF' or self.flightPhase = 'LANDING');
+  }
+}
+
+kind ThrustReverser {
+  identity: reverserId;
+  property reverserId: String;
+  property isDeployed: Boolean;
+  property isOnGround: Boolean;
+  invariants {
+    self.reverserId <> null;
+    self.isDeployed implies self.isOnGround;
+  }
+}
+
+kind ModelledValue {
+  identity: valueId;
+  property valueId: String;
+  property sensorId: String;
+  property estimatedValue: Real;
+  property confidence: Real;
+  invariants {
+    self.valueId <> null;
+    self.sensorId <> null;
+    self.confidence >= 0.0 and self.confidence <= 1.0;
+  }
+}
+
+// ─── Constraint Goals (become invariants on system kind) ──────────────────
+// Categories constrain the MEMBER type. We declare the member type as a
+// kind here so the 'where' clause can reference its properties.
+kind EngineControlKind {
+  identity: kindId;
+  property kindId: String;
+  property maxSafeSpeed: Real;
+  property fuelCutThreshold: Real;
+  property sensorCount: Integer;
+  property maxToleratedFaults: Integer;
+  property reverserEnabled: Boolean;
+  property isOnGround: Boolean;
+  property continuousIgnitionEnabled: Boolean;
+  property flightPhase: String;
+  invariants {
+    self.kindId <> null;
+    self.maxSafeSpeed > 0.0;
+    self.fuelCutThreshold <= self.maxSafeSpeed;
+    self.sensorCount >= 2;
+    self.maxToleratedFaults >= 1;
+  }
+}
+
+category OverspeedSafetyConstraints where bearer: EngineControlKind {
+  invariants {
+    bearer.maxSafeSpeed > 0.0;
+    bearer.fuelCutThreshold <= bearer.maxSafeSpeed;
+  }
+}
+
+category FaultToleranceCategory where bearer: EngineControlKind {
+  invariants {
+    bearer.sensorCount >= 2;
+    bearer.maxToleratedFaults >= 1;
+  }
+}
+
+category FlightPhaseConstraints where bearer: EngineControlKind {
+  invariants {
+    bearer.reverserEnabled implies bearer.isOnGround;
+    bearer.continuousIgnitionEnabled implies (bearer.flightPhase = 'TAKEOFF' or bearer.flightPhase = 'LANDING');
+  }
+}
+
+// ─── Domain Stories (with identity) ───────────────────────────────────────
+happening OverspeedProtectionFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}
+
+happening ContinuousIgnitionFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property flightPhase: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.flightPhase <> null;
+    self.outcome <> null;
+  }
+}
+
+happening ThrustReverserDeploymentFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property isOnGround: Boolean;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}
+
+happening SensorFaultHandlingFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property faultySensorId: String;
+  property modelledValue: Real;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.faultySensorId <> null;
+    self.outcome <> null;
+  }
+}

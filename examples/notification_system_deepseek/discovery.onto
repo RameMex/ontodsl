@@ -1,0 +1,151 @@
+schema "onto/0.1";
+namespace notification_system_discovery;
+
+// ─── Stakeholders ─────────────────────────────────────────────────────
+agent Recipient {
+  identity: recipientId;
+  property recipientId: String;
+  property email: String;
+  property phoneNumber: String;
+  invariants {
+    self.recipientId <> null;
+  }
+}
+
+agent Sender {
+  identity: senderId;
+  property senderId: String;
+  property name: String;
+  invariants {
+    self.senderId <> null;
+    self.name <> null;
+  }
+}
+
+agent OpsTeam {
+  identity: teamId;
+  property teamId: String;
+  property escalationEmail: String;
+  invariants {
+    self.teamId <> null;
+    self.escalationEmail <> null;
+  }
+}
+
+// The vendor/dev team — debitor of every stakeholder commitment.
+agent NotificationVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+}
+
+// ─── Glossary Terms (sortals) ─────────────────────────────────────────
+kind NotificationRequest {
+  identity: requestId;
+  property requestId: String;
+  property recipient: String;     // serialized recipient ID
+  property messageBody: String;
+  property channelList: String;   // serialized list: email,push,sms
+  invariants {
+    self.requestId <> null;
+    self.messageBody <> null;
+  }
+}
+
+kind Channel {
+  identity: channelId;
+  property channelId: String;
+  property channelType: String;  // 'email', 'push', 'sms'
+  property maxRetries: Integer;
+  invariants {
+    self.channelId <> null;
+    self.channelType <> null;
+  }
+}
+
+kind DeliveryAttempt {
+  identity: attemptId;
+  property attemptId: String;
+  property requestId: String;
+  property channelId: String;
+  property attemptNumber: Integer;
+  property scheduledAt: Integer;  // Unix timestamp
+  property result: String;        // 'pending', 'success', 'failed'
+  invariants {
+    self.attemptId <> null;
+    self.requestId <> null;
+    self.channelId <> null;
+    self.attemptNumber >= 0;
+    self.attemptNumber <= 5;
+  }
+}
+
+// ─── Hard Goals (commitments) with system-aligned property names ──────
+// GOAL-1: Exactly-once delivery per channel.
+// Property 'maxDeliveredPerChannel' MUST appear on the system kind
+// in Requirements stage.
+commitment ExactlyOnceDelivery
+  debitor: NotificationVendor
+  creditor: Recipient {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxDeliveredPerChannel: Integer;
+    predicate: self.maxDeliveredPerChannel = 1;
+  }
+
+// GOAL-2: Bounded retries (retry_count <= 5).
+commitment BoundedRetries
+  debitor: NotificationVendor
+  creditor: Recipient {
+    identity: commitmentId;
+    property commitmentId: String;
+    property allowedRetries: Integer;
+    predicate: self.allowedRetries <= 5;
+  }
+
+// GOAL-3: Exponential backoff (next attempt at 2^attempt seconds).
+commitment ExponentialBackoff
+  debitor: NotificationVendor
+  creditor: Recipient {
+    identity: commitmentId;
+    property commitmentId: String;
+    property backoffBaseSeconds: Integer;
+    predicate: self.backoffBaseSeconds >= 1;
+  }
+
+// GOAL-4: Failure escalation (after 5 retries, alert ops).
+commitment FailureEscalation
+  debitor: NotificationVendor
+  creditor: OpsTeam {
+    identity: commitmentId;
+    property commitmentId: String;
+    property alertThreshold: Integer;
+    predicate: self.alertThreshold = 5;
+  }
+
+// ─── Constraint Goals (categories with member invariants) ─────────────
+category DeliveryGovernance where bearer: NotificationRequest {
+  invariants {
+    bearer.channelList <> null;
+    bearer.messageBody <> null;
+  }
+}
+
+category RetryPolicy where bearer: Channel {
+  invariants {
+    bearer.maxRetries >= 0;
+    bearer.maxRetries <= 5;
+  }
+}
+
+// ─── Domain Story ─────────────────────────────────────────────────────
+happening DispatchFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;  // ref to event: NotificationRequest arrival
+  property outcome: String;      // OCL predicate: per channel succeeded or escalated
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+  }
+}

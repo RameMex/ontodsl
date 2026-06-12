@@ -1,0 +1,267 @@
+schema "onto/0.1";
+namespace factory_plc_discovery;
+
+// ============================================================================
+// INDUSTRIAL PLC SAFETY CONTROLLER — DISCOVERY STAGE
+// ============================================================================
+// Problem space: who, why, what world imposes.
+
+// ============================================================================
+// STAKEHOLDERS
+// ============================================================================
+
+agent Operator {
+	identity: operatorId;
+	property operatorId: String;
+	property badgeNumber: String;
+	property trainingLevel: String;
+	invariants {
+		self.operatorId <> null;
+	}
+}
+
+agent MaintenanceTechnician {
+	identity: techId;
+	property techId: String;
+	property certification: String;
+	property shiftAssignment: String;
+	invariants {
+		self.techId <> null;
+	}
+}
+
+agent PlantManager {
+	identity: managerId;
+	property managerId: String;
+	property department: String;
+	property authorityLevel: String;
+	invariants {
+		self.managerId <> null;
+	}
+}
+
+agent SafetyRegulator {
+	identity: regulatorId;
+	property regulatorId: String;
+	property jurisdiction: String;
+	property standardBody: String;
+	invariants {
+		self.regulatorId <> null;
+	}
+}
+
+// The vendor / dev team — debitor of every stakeholder commitment
+// (the system kind does not exist yet at Discovery).
+agent PLCSafetyVendor {
+	identity: vendorId;
+	property vendorId: String;
+	property companyName: String;
+	property iso9001Certified: Boolean;
+	invariants {
+		self.vendorId <> null;
+	}
+}
+
+// ============================================================================
+// GLOSSARY TERMS (sortals with identity)
+// ============================================================================
+
+kind EStopButton {
+	identity: estopId;
+	property estopId: String;
+	property location: String;
+	property isPressed: Boolean;
+	property isLatched: Boolean;
+	invariants {
+		self.estopId <> null;
+	}
+}
+
+kind FailsafeMode {
+	identity: modeId;
+	property modeId: String;
+	property entryTime: Real;
+	property isLatched: Boolean;
+	invariants {
+		self.modeId <> null;
+	}
+}
+
+kind MotionOutput {
+	identity: outputId;
+	property outputId: String;
+	property actuatorType: String;
+	property driveEnable: Boolean;
+	property powerState: Boolean;
+	invariants {
+		self.outputId <> null;
+	}
+}
+
+kind SafetySensor {
+	identity: sensorId;
+	property sensorId: String;
+	property sensingType: String;
+	property calibratedRangeMin: Real;
+	property calibratedRangeMax: Real;
+	property currentReading: Real;
+	property isFaulted: Boolean;
+	invariants {
+		self.sensorId <> null;
+		self.calibratedRangeMin < self.calibratedRangeMax;
+	}
+}
+
+kind ScanCycle {
+	identity: cycleId;
+	property cycleId: String;
+	property cycleDurationMs: Real;
+	property cycleCount: Integer;
+	invariants {
+		self.cycleId <> null;
+		self.cycleDurationMs > 0.0;
+	}
+}
+
+// ============================================================================
+// SYSTEM KIND (declared here so commitment predicates resolve correctly)
+// ============================================================================
+// In Discovery we must declare the system kind with the properties that
+// commitment predicates reference. This avoids [S27] and [S36] errors.
+// The kind has NO events at Discovery — events are added in Requirements.
+// It will be refined as a subkind in Requirements if further properties
+// are needed.
+
+kind PLCSafetyController {
+	identity: controllerId;
+	property controllerId: String;
+	property maxEStopLatencyMs: Real;
+	property latchingEnforced: Boolean;
+	property maxSensorFaultResponseCycles: Integer;
+	property rejectionActive: Boolean;
+	property isFailsafeActive: Boolean;
+	property eStopResponseTimeMs: Real;
+	property currentScanCycleId: String;
+
+	invariants {
+		self.controllerId <> null;
+		self.maxEStopLatencyMs > 0.0;
+		self.maxEStopLatencyMs <= 50.0;
+		self.maxSensorFaultResponseCycles > 0;
+		self.maxSensorFaultResponseCycles <= 1;
+	}
+}
+
+// ============================================================================
+// HARD GOALS (commitments from vendor to stakeholder)
+// ============================================================================
+
+// GOAL-1: E-stop halt latency ≤ 50 ms
+commitment EStopLatencyCommitment
+	debitor: PLCSafetyVendor
+	creditor: Operator {
+	identity: commitmentId;
+	property commitmentId: String;
+	property maxEStopLatencyMs: Real;
+	predicate: self.maxEStopLatencyMs > 0.0 and self.maxEStopLatencyMs <= 50.0;
+}
+
+// GOAL-2: E-stop latching persists until manual reset
+commitment EStopLatchingCommitment
+	debitor: PLCSafetyVendor
+	creditor: Operator {
+	identity: commitmentId;
+	property commitmentId: String;
+	property latchingEnforced: Boolean;
+	predicate: self.latchingEnforced;
+}
+
+// GOAL-3: Sensor-fault fail-safe entered within ONE scan cycle
+commitment SensorFaultFailsafeCommitment
+	debitor: PLCSafetyVendor
+	creditor: MaintenanceTechnician {
+	identity: commitmentId;
+	property commitmentId: String;
+	property maxSensorFaultResponseCycles: Integer;
+	predicate: self.maxSensorFaultResponseCycles > 0 and self.maxSensorFaultResponseCycles <= 1;
+}
+
+// GOAL-4: Motion-command rejection in fail-safe mode
+commitment MotionCommandRejectionCommitment
+	debitor: PLCSafetyVendor
+	creditor: MaintenanceTechnician {
+	identity: commitmentId;
+	property commitmentId: String;
+	property rejectionActive: Boolean;
+	predicate: self.rejectionActive;
+}
+
+// ============================================================================
+// CONSTRAINT GOALS (categories with invariants the system kind must inherit)
+// ============================================================================
+
+category EStopHaltPerformance where bearer: PLCSafetyController {
+	invariants {
+		bearer.maxEStopLatencyMs > 0.0;
+		bearer.maxEStopLatencyMs <= 50.0;
+	}
+}
+
+category FailsafeLatching where bearer: PLCSafetyController {
+	invariants {
+		bearer.latchingEnforced;
+	}
+}
+
+category SensorFaultResponse where bearer: PLCSafetyController {
+	invariants {
+		bearer.maxSensorFaultResponseCycles > 0;
+		bearer.maxSensorFaultResponseCycles <= 1;
+	}
+}
+
+category MotionRejectionInFailsafe where bearer: PLCSafetyController {
+	invariants {
+		bearer.rejectionActive;
+	}
+}
+
+// ============================================================================
+// DOMAIN STORIES (happenings — perdurants that occur over time)
+// ============================================================================
+
+happening EStopActivationFlow {
+	identity: flowId;
+	property flowId: String;
+	property triggerCondition: String;
+	property sequenceStep: Integer;
+	property outcome: String;
+	invariants {
+		self.flowId <> null;
+		self.sequenceStep >= 0;
+	}
+}
+
+happening SensorFaultDetectionFlow {
+	identity: flowId;
+	property flowId: String;
+	property sensorId: String;
+	property faultType: String;
+	property recoveryType: String;
+	property outcome: String;
+	invariants {
+		self.flowId <> null;
+		self.sensorId <> null;
+	}
+}
+
+happening FailsafeLatchFlow {
+	identity: flowId;
+	property flowId: String;
+	property latchSet: Boolean;
+	property manualResetReceived: Boolean;
+	property outcome: String;
+	invariants {
+		self.flowId <> null;
+	}
+}

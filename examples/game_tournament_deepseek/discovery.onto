@@ -1,0 +1,152 @@
+schema "onto/0.1";
+namespace game_tournament_discovery;
+
+// ─── Stakeholders ─────────────────────────────────────────────────────
+agent Arbiter {
+  identity: arbiterId;
+  property arbiterId: String;
+  property name: String;
+  property certification: String;
+}
+
+agent Player {
+  identity: playerId;
+  property playerId: String;
+  property name: String;
+  property playerLossCount: Integer;
+}
+
+agent TournamentOrganizer {
+  identity: organizerId;
+  property organizerId: String;
+  property organizationName: String;
+}
+
+agent Spectator {
+  identity: spectatorId;
+  property spectatorId: String;
+  property name: String;
+}
+
+// The dev team / vendor — debitor of every stakeholder commitment.
+agent TournamentVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+}
+
+// ─── Glossary Terms (Sortals) ────────────────────────────────────────
+kind Match {
+  identity: matchId;
+  property matchId: String;
+  property round: Integer;
+  property slot: Integer;
+  property targetScore: Real;
+  property winnerScore: Real;
+  property loserScore: Real;
+  property matchDecided: Boolean;
+  property leftChildMatch: Match;
+  property rightChildMatch: Match;
+  property isPlayable: Boolean;
+}
+
+kind BracketSlot {
+  identity: slotId;
+  property slotId: String;
+  property depth: Integer;
+  property position: Integer;
+  property parentSlotOccupiedCount: Integer;
+  property winnerAssigned: Boolean;
+}
+
+// ─── Hard Goals (Commitments) ─────────────────────────────────────────
+// GOAL-1: Valid scores — every recorded match has winner_score = target
+// AND winner_score > loser_score.
+commitment ValidScoresCommitment
+  debitor: TournamentVendor
+  creditor: TournamentOrganizer {
+    identity: commitmentId;
+    property commitmentId: String;
+    property targetScore: Real;
+    predicate: self.targetScore > 0.0;
+  }
+
+// GOAL-2: Single elimination — no player participates in any match
+// after their first loss.
+commitment SingleEliminationCommitment
+  debitor: TournamentVendor
+  creditor: Player {
+    identity: commitmentId;
+    property commitmentId: String;
+    property playerLossCount: Integer;
+    predicate: self.playerLossCount <= 1;
+  }
+
+// GOAL-3: Correct advancement — winner fills parent slot exactly once.
+commitment CorrectAdvancementCommitment
+  debitor: TournamentVendor
+  creditor: TournamentOrganizer {
+    identity: commitmentId;
+    property commitmentId: String;
+    property parentSlotOccupiedCount: Integer;
+    predicate: self.parentSlotOccupiedCount <= 1;
+  }
+
+// GOAL-4: Parent gating — match becomes playable only when both
+// children are decided.
+commitment ParentGatingCommitment
+  debitor: TournamentVendor
+  creditor: TournamentOrganizer {
+    identity: commitmentId;
+    property commitmentId: String;
+    property isPlayable: Boolean;
+    predicate: self.isPlayable;
+  }
+
+// ─── Constraint Goals (Categories) ────────────────────────────────────
+category ValidScoresConstraints where bearer: Match {
+  invariants {
+    bearer.targetScore > 0.0;
+  }
+}
+
+category SingleEliminationConstraints where bearer: Player {
+  invariants {
+    bearer.playerLossCount <= 1;
+  }
+}
+
+category CorrectAdvancementConstraints where bearer: BracketSlot {
+  invariants {
+    bearer.parentSlotOccupiedCount <= 1;
+    bearer.parentSlotOccupiedCount >= 0;
+  }
+}
+
+category ParentGatingConstraints where bearer: Match {
+  invariants {
+    not (bearer.isPlayable) or
+      (bearer.leftChildMatch <> null and bearer.rightChildMatch <> null);
+  }
+}
+
+// ─── Domain Stories (Happenings) ────────────────────────────────────
+happening MatchReportingFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+happening BracketProgressionFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}

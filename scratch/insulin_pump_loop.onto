@@ -1,0 +1,105 @@
+schema "onto/0.1";
+namespace insulin_pump;
+
+kind InsulinPump {
+  identity: pumpId;
+
+  property pumpId: String;
+  property status: String;
+  property safeMaxDose: Real;
+  property safeZoneUpper: Real;
+  property safeZoneLower: Real;
+
+  invariants {
+    self.pumpId <> null;
+    self.safeMaxDose > 0.0;
+    self.safeZoneUpper > self.safeZoneLower;
+  }
+
+  event deliverInsulin(bloodSugar: Real, rateOfRise: Real) {
+    pre: self.status = "OPERATIONAL";
+    pre: bloodSugar > self.safeZoneUpper;
+    pre: rateOfRise > 0.0;
+
+    post: if bloodSugar <= self.safeZoneUpper then
+            true
+          else
+            let dose: Real = (rateOfRise * 0.5) in
+              if dose > self.safeMaxDose then
+                self.safeMaxDose = dose
+              else
+                true
+              endif
+            endif
+          endif;
+    post: self.status = "OPERATIONAL";
+    modifies: self.safeMaxDose, self.status;
+  }
+
+  event detectFault(faultType: String) {
+    pre: self.status = "OPERATIONAL";
+    post: self.status = "FAULT";
+    modifies: self.status;
+  }
+
+  event lowReservoir() {
+    pre: self.status = "OPERATIONAL";
+    post: self.status = "LOW_RESERVOIR";
+    modifies: self.status;
+  }
+
+  event clearAlarm() {
+    pre: self.status <> "OPERATIONAL";
+    post: self.status = "OPERATIONAL";
+    modifies: self.status;
+  }
+}
+
+kind Patient {
+  identity: patientId;
+
+  property patientId: String;
+  property name: String;
+
+  invariants {
+    self.patientId <> null;
+    self.name <> null;
+  }
+
+  event acknowledgeAlarm() {
+    pre: true;
+    post: true;
+    modifies: self;
+  }
+}
+
+happening SensorReading {
+  property bloodSugar: Real;
+  property rateOfRise: Real;
+
+  invariants {
+    self.bloodSugar > 0.0;
+  }
+}
+
+happening SelfTest {
+  property hardwareOK: Boolean;
+}
+
+happening DeliverInsulinCommand {
+  property dose: Real;
+
+  invariants {
+    self.dose >= 0.0;
+  }
+}
+
+happening Alarm {
+  property alarmType: String;
+}
+
+relation pumpPatient: <<memberOf>> from InsulinPump [1] to Patient [1];
+relation sensorReads: <<mediation>> from SensorReading [*] to InsulinPump [1];
+relation selfTestRuns: <<mediation>> from SelfTest [*] to InsulinPump [1];
+relation deliverCmd: <<mediation>> from DeliverInsulinCommand [*] to InsulinPump [1];
+relation alarmEvent: <<mediation>> from Alarm [*] to InsulinPump [1];

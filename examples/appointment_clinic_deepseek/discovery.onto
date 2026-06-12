@@ -1,0 +1,180 @@
+schema "onto/0.1";
+namespace appointment_clinic_discovery;
+
+// ─── Stakeholders ───────────────────────────────────────────────────
+agent Patient {
+  identity: patientId;
+  property patientId: String;
+  property name: String;
+  property billingRecordId: String;
+  invariants {
+    self.patientId <> null;
+    self.name <> null;
+    self.billingRecordId <> null;
+  }
+}
+
+agent Clinician {
+  identity: clinicianId;
+  property clinicianId: String;
+  property name: String;
+  invariants {
+    self.clinicianId <> null;
+    self.name <> null;
+  }
+}
+
+// Vendor/dev team — debitor of all stakeholder commitments.
+agent ClinicVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+    self.name <> null;
+  }
+}
+
+// ─── Glossary terms as kinds ────────────────────────────────────────
+kind AppointmentSlot {
+  identity: slotId;
+  property slotId: String;
+  property startTimeEpoch: Real;
+  property endTimeEpoch: Real;
+  invariants {
+    self.slotId <> null;
+    self.startTimeEpoch >= 0.0;
+    self.endTimeEpoch > self.startTimeEpoch;
+  }
+}
+
+kind AvailabilityWindow {
+  identity: windowId;
+  property windowId: String;
+  property windowStartEpoch: Real;
+  property windowEndEpoch: Real;
+  invariants {
+    self.windowId <> null;
+    self.windowStartEpoch >= 0.0;
+    self.windowEndEpoch > self.windowStartEpoch;
+  }
+}
+
+kind LateFeeEvent {
+  identity: feeEventId;
+  property feeEventId: String;
+  property amount: Real;
+  property timestampEpoch: Real;
+  property relatedAppointmentId: String;
+  invariants {
+    self.feeEventId <> null;
+    self.amount >= 0.0;
+    self.timestampEpoch >= 0.0;
+    self.relatedAppointmentId <> null;
+  }
+}
+
+// ─── Hard goals as commitments ──────────────────────────────────────
+// GOAL-1: No clinician double-booking.
+commitment NoDoubleBookingCommitment
+  debitor: ClinicVendor
+  creditor: Clinician {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxOverlappingClinicians: Integer;
+    predicate: self.maxOverlappingClinicians <= 1;
+  }
+
+// GOAL-2: Availability respect — every confirmed appointment is
+// within the clinician's window at confirmation time.
+commitment AvailabilityRespectCommitment
+  debitor: ClinicVendor
+  creditor: Clinician {
+    identity: commitmentId;
+    property commitmentId: String;
+    property minWindowEndDelta: Real;
+    predicate: self.minWindowEndDelta >= 0.0;
+  }
+
+// GOAL-3: Late-cancellation fee.
+commitment LateCancellationFeeCommitment
+  debitor: ClinicVendor
+  creditor: Patient {
+    identity: commitmentId;
+    property commitmentId: String;
+    property minLateFeeCount: Integer;
+    predicate: self.minLateFeeCount >= 0;
+  }
+
+// GOAL-4: Patient conflict prevention.
+commitment PatientConflictPreventionCommitment
+  debitor: ClinicVendor
+  creditor: Patient {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxOverlappingPatient: Integer;
+    predicate: self.maxOverlappingPatient <= 1;
+  }
+
+// ─── Constraint categories (member-quantified) ──────────────────────
+category NoDoubleBookingConstraints where bearer: AppointmentSlot {
+  invariants {
+    true;
+  }
+}
+
+category AvailabilityRespectConstraints where bearer: AppointmentSlot {
+  invariants {
+    true;
+  }
+}
+
+category LateFeeConstraints where bearer: LateFeeEvent {
+  invariants {
+    true;
+  }
+}
+
+category PatientConflictConstraints where bearer: AppointmentSlot {
+  invariants {
+    true;
+  }
+}
+
+// ─── Domain stories as happenings ───────────────────────────────────
+happening AppointmentBookingFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property patientId: String;
+  property clinicianId: String;
+  property serviceName: String;
+  property slotStartEpoch: Real;
+  property slotEndEpoch: Real;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+    self.patientId <> null;
+    self.clinicianId <> null;
+    self.slotStartEpoch >= 0.0;
+    self.slotEndEpoch > self.slotStartEpoch;
+  }
+}
+
+happening CancellationFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property appointmentId: String;
+  property isLate: Boolean;
+  property lateFeeAmount: Real;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+    self.appointmentId <> null;
+  }
+}

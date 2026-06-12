@@ -1,0 +1,16 @@
+schema "onto/0.1";
+namespace v07_parent;
+
+kind SystemKind {
+  identity: sid;
+  property sid: String;
+  property currentBloodSugar: Real;
+  property safeMaxDose: Real;
+  property reservoirUnits: Real;
+
+  event deliverInsulin(): Real {
+    pre: self.currentBloodSugar > 0.0;
+    post: self.reservoirUnits >= 0.0;
+    modifies: self.reservoirUnits, self.currentBloodSugar;
+  }
+}

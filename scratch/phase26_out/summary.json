@@ -1,0 +1,47 @@
+{
+  "results": [
+    {
+      "id": "recoverPendingTransfer",
+      "domain": "online_banking",
+      "promptTokens": 632,
+      "completionTokens": 433,
+      "syntacticallyPlausible": true,
+      "outPath": "C:\\Users\\Rene Meza\\Documents\\MisProyectos\\ontodesign\\ontodesign-experiment\\ontodls\\scratch\\phase26_out\\recoverPendingTransfer.ts"
+    },
+    {
+      "id": "addBackorder",
+      "domain": "inventory_warehouse",
+      "promptTokens": 607,
+      "completionTokens": 657,
+      "syntacticallyPlausible": true,
+      "outPath": "C:\\Users\\Rene Meza\\Documents\\MisProyectos\\ontodesign\\ontodesign-experiment\\ontodls\\scratch\\phase26_out\\addBackorder.ts"
+    },
+    {
+      "id": "bookAppointment",
+      "domain": "appointment_clinic",
+      "promptTokens": 677,
+      "completionTokens": 412,
+      "syntacticallyPlausible": true,
+      "outPath": "C:\\Users\\Rene Meza\\Documents\\MisProyectos\\ontodesign\\ontodesign-experiment\\ontodls\\scratch\\phase26_out\\bookAppointment.ts"
+    },
+    {
+      "id": "rejectMotionCommand",
+      "domain": "factory_plc",
+      "promptTokens": 570,
+      "completionTokens": 317,
+      "syntacticallyPlausible": true,
+      "outPath": "C:\\Users\\Rene Meza\\Documents\\MisProyectos\\ontodesign\\ontodesign-experiment\\ontodls\\scratch\\phase26_out\\rejectMotionCommand.ts"
+    },
+    {
+      "id": "readSoCAndReserve",
+      "domain": "delivery_drone",
+      "promptTokens": 557,
+      "completionTokens": 263,
+      "syntacticallyPlausible": true,
+      "outPath": "C:\\Users\\Rene Meza\\Documents\\MisProyectos\\ontodesign\\ontodesign-experiment\\ontodls\\scratch\\phase26_out\\readSoCAndReserve.ts"
+    }
+  ],
+  "totalPromptTokens": 3043,
+  "totalCompletionTokens": 2082,
+  "totalCost": 0.0031118100000000004
+}

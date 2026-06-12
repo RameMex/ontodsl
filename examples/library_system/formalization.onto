@@ -1,0 +1,280 @@
+schema "onto/0.1";
+namespace library_system_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =====================================================================
+// Formalization — Library Lending System
+//
+// What the WORLD imposes on the system:
+//
+//  1. Regulatory / legal anchors  — categories with documentary
+//     invariants (GDPR Article 5 data-minimisation; library-sector
+//     data-retention norms).
+//
+//  2. Active business rules       — rejection / guard events added on
+//     LibraryLendingSystemFormalized (a subkind of LibraryLendingSystem)
+//     without overriding any parent event.
+//
+//  3. Passive assumptions         — FormalAssumptionRecord kind with
+//     documentary properties; NOT events.
+//
+//  4. Domain-logical invariants   — member-quantified categories
+//     (physical / logical plausibility bounds on the domain's core
+//     kinds).
+// =====================================================================
+
+
+// =====================================================================
+// SECTION 1 — REGULATORY ANCHORS
+// Documentary categories; invariants are passive (govern the project,
+// not the runtime) except where the system must emit evidence.
+// =====================================================================
+
+// GDPR Article 5 — personal data processed lawfully, minimally,
+// accurately, and stored no longer than necessary.
+// Borrower contact data (email, name) falls under this regulation.
+category GdprArticle5Compliant {
+  property gdprControllerName: String;
+  property legalBasisForProcessing: String;
+  property dataRetentionPolicyDays: Integer;
+  invariants {
+    self.gdprControllerName <> null;
+    self.legalBasisForProcessing <> null;
+    self.dataRetentionPolicyDays > 0;
+  }
+}
+
+// ISO 27001 — information-security management; ensures borrower
+// account data and transaction logs are protected at rest and in
+// transit.  Documentary anchor; implementation evidence lives in
+// the design / code stages.
+category Iso27001Compliant {
+  property isoScope: String;
+  property certificationBody: String;
+  invariants {
+    self.isoScope <> null;
+  }
+}
+
+// Library-sector data-retention norm: transaction records (loans,
+// fees, reservations) must be retained for a minimum period to
+// support audit and dispute resolution.
+category LibraryAuditRetention {
+  property minimumRetentionYears: Integer;
+  property retentionPolicyRef: String;
+  invariants {
+    self.minimumRetentionYears > 0;
+    self.retentionPolicyRef <> null;
+  }
+}
+
+
+// =====================================================================
+// SECTION 2 — DOMAIN-LOGICAL / PHYSICAL PLAUSIBILITY CATEGORIES
+// Member-quantified; Z3 verifies S35 entailment when a kind
+// specializes one of these.
+// =====================================================================
+
+// Every BookCopy must carry a non-null status drawn from the
+// three-value lifecycle; the copy ID must be present.
+// The category quantifies over BookCopy bearers so the verifier can
+// check the entailment BookCopy.invariants ⊨ category.invariants.
+category PlausibleBookCopyState where bearer: BookCopy {
+  invariants {
+    bearer.copyId <> null;
+    bearer.status <> null;
+  }
+}
+
+// Every Loan must respect temporal ordering of its key dates.
+category TemporallyConsistentLoan where bearer: Loan {
+  invariants {
+    bearer.loanId <> null;
+    bearer.dueDate > bearer.loanDate;
+  }
+}
+
+// Every LateFee must carry positive-definite financial properties.
+category FinanciallyPlausibleFee where bearer: LateFee {
+  invariants {
+    bearer.feeId <> null;
+    bearer.dailyRate > 0.0;
+    bearer.accruedAmount >= 0.0;
+  }
+}
+
+// Every Reservation must have a positive expiry window.
+category PlausibleReservation where bearer: Reservation {
+  invariants {
+    bearer.reservationId <> null;
+    bearer.expiryDays > 0;
+  }
+}
+
+
+// =====================================================================
+// SECTION 3 — PASSIVE ASSUMPTIONS
+// FormalAssumptionRecord captures world-state assumptions the system
+// relies on but cannot verify at runtime.  Each assumption is
+// annotated with a traceability tag.
+// =====================================================================
+
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property tag: String;
+  property description: String;
+  property rationaleSummary: String;
+  invariants {
+    self.assumptionId <> null;
+    self.tag <> null;
+    self.description <> null;
+  }
+}
+
+// @assumption ASSUME-1: The system clock (used to compute reservation
+// age and overdue days) is monotonically increasing and reflects
+// real-world calendar days.  Clock skew or rollback voids the
+// temporal ordering guarantees of FR-3 / FR-5.
+
+// @assumption ASSUME-2: A Borrower's identity (borrowerId) is
+// established and verified outside this system (e.g., by the library's
+// membership registration process).  The lending system treats
+// borrowerId as a trusted opaque token.
+
+// @assumption ASSUME-3: The dailyLateRate value stored in the system
+// is set by authorised library staff and reflects any applicable
+// municipal or institutional cap on overdue charges.  The system
+// enforces the value it holds; it does not validate the value's
+// legality.
+
+// @assumption ASSUME-4: A BookCopy's physical condition is verified
+// by library staff before a check-out event is triggered.  The system
+// does not model physical condition — it models only the logical
+// lifecycle state.
+
+
+// =====================================================================
+// SECTION 4 — ACTIVE BUSINESS RULES
+// LibraryLendingSystemFormalized specializes LibraryLendingSystem
+// and ADDS guard / rejection events.  No parent event is overridden.
+// =====================================================================
+
+subkind LibraryLendingSystemFormalized
+  specializes LibraryLendingSystem {
+
+  // ===================================================================
+  // BR-1  rejectPickUpWithFees
+  // Guard: a borrower who has accumulated unpaid late fees since
+  // placing the reservation must settle them before picking up a
+  // reserved copy.  This tightens FR-6 (pickUpReservation) by making
+  // the rejection path an explicit, auditable event.
+  //
+  // Pure rejection — no state change — modifies clause omitted.
+  // ===================================================================
+  event rejectPickUpWithFees()
+    refines
+      library_system_discovery::IndebtedBorrowerBlockCommitment,
+      library_system_requirements::LibraryLendingSystem.pickUpReservation {
+
+    pre: self.currentCopyStatus = 'RESERVED';
+    pre: self.currentBorrowerOutstandingFees > self.outstandingFeeThreshold;
+
+    post: self.currentBorrowerOutstandingFees > self.outstandingFeeThreshold;
+  }
+
+  // ===================================================================
+  // BR-2  rejectReservationWithFees
+  // Guard: a borrower with outstanding fees may not place a new
+  // reservation (parallels the check-out block from GOAL-2).
+  //
+  // Pure rejection — modifies clause omitted.
+  // ===================================================================
+  event rejectReservationWithFees()
+    refines
+      library_system_discovery::IndebtedBorrowerBlockCommitment,
+      library_system_requirements::LibraryLendingSystem.placeReservation {
+
+    pre: self.currentCopyStatus = 'LOANED';
+    pre: self.currentBorrowerOutstandingFees > self.outstandingFeeThreshold;
+
+    post: self.currentBorrowerOutstandingFees > self.outstandingFeeThreshold;
+  }
+
+  // ===================================================================
+  // BR-3  rejectStaleReservationPickUp
+  // Guard: a borrower who arrives after the hold window has closed
+  // cannot pick up the copy.  The copy will transition to AVAILABLE
+  // only when expireReservation fires (FR-5); this event documents
+  // the explicit rejection of a late pick-up attempt.
+  //
+  // Pure rejection — modifies clause omitted.
+  // ===================================================================
+  event rejectStaleReservationPickUp()
+    refines
+      library_system_discovery::StaleReservationExpiryCommitment,
+      library_system_requirements::LibraryLendingSystem.pickUpReservation {
+
+    pre: self.currentCopyStatus = 'RESERVED';
+    pre: self.currentReservationAge > self.maxReservationHoldDays;
+    pre: not self.currentReservationCancelled;
+
+    post: self.currentReservationAge > self.maxReservationHoldDays;
+  }
+
+  // ===================================================================
+  // BR-4  enforceSingleActiveLoan
+  // Guard: a copy that is already LOANED cannot be checked out again
+  // (enforces the mutual-exclusion constraint from GOAL-1 as an
+  // auditable rejection event, distinct from the pre-condition check
+  // already present on checkOutCopy).
+  //
+  // Pure rejection — modifies clause omitted.
+  // ===================================================================
+  event enforceSingleActiveLoan()
+    refines
+      library_system_discovery::MutuallyExclusiveCopyStateCommitment,
+      library_system_requirements::LibraryLendingSystem.checkOutCopy {
+
+    pre: self.currentCopyStatus = 'LOANED';
+
+    post: self.currentCopyStatus = 'LOANED';
+  }
+
+  // ===================================================================
+  // BR-5  enforceLateFeeFormula
+  // Active rule: when a loan is being returned and the return date
+  // exceeds the due date, the system MUST compute the fee as
+  //   fee = (returnDate - dueDate) * dailyLateRate
+  // and post it to the borrower's balance.  This event makes the
+  // formula obligation an explicit, auditable transition rather than
+  // an implicit side-effect of returnLoan.
+  //
+  // This refines the AccurateLateFeesCommitment and the parent's
+  // returnLoan event, strengthening the post-condition by asserting
+  // the exact formula result.
+  // ===================================================================
+  event enforceLateFeeFormula(returnDate: Integer, dueDate: Integer)
+    refines
+      library_system_discovery::AccurateLateFeesCommitment,
+      library_system_requirements::LibraryLendingSystem.returnLoan {
+
+    pre: self.currentCopyStatus = 'LOANED';
+    pre: returnDate > dueDate;
+    pre: dueDate > 0;
+
+    post: self.lastFeeComputed =
+            (returnDate - dueDate) * self.dailyLateRate;
+    post: self.currentBorrowerOutstandingFees =
+            self.currentBorrowerOutstandingFees@pre + self.lastFeeComputed;
+    post: self.currentCopyStatus = 'AVAILABLE';
+    post: self.activeLoansCount = self.activeLoansCount@pre - 1;
+
+    modifies:
+      self.lastFeeComputed,
+      self.currentBorrowerOutstandingFees,
+      self.currentCopyStatus,
+      self.activeLoansCount;
+  }
+}

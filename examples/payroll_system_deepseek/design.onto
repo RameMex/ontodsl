@@ -1,0 +1,210 @@
+schema "onto/0.1";
+namespace payroll_system_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Design Stage — Biweekly Payroll Processor
+//
+// Decomposition into four cohesive components:
+//   PayPeriodManager   — authorizes & tracks open pay periods
+//   TimesheetProcessor — computes gross pay from signed timesheets
+//   DeductionEngine    — applies itemized deductions in canonical order
+//   PaystubIssuer      — generates immutable paystubs, handles adjustments
+//
+// Each component is a 'kind' (owns its own state).
+// Interfaces between components are 'relator' kinds mediating two roles.
+// =====================================================================
+
+// ─── Component 1: Pay Period Manager ────────────────────────────────────
+
+kind PayPeriodManager {
+  identity: managerId;
+  property managerId: String;
+  property openPeriods: Set<PayPeriod>;
+
+  invariants {
+    self.managerId <> null;
+    self.openPeriods->forAll(p | p.isAuthorized = true);
+  }
+
+  // Implements authorizePayPeriod from Requirements (event-level refines).
+  event authorizePeriod(period: PayPeriod)
+    refines payroll_system_requirements::PayrollSystem.authorizePayPeriod {
+    pre: period <> null;
+    pre: period.isAuthorized = false;
+    pre: not self.openPeriods->includes(period);
+    post: period.isAuthorized = true;
+    post: self.openPeriods->includes(period);
+    modifies: self.openPeriods, period.isAuthorized;
+  }
+}
+
+// ─── Component 2: Timesheet Processor ────────────────────────────────────
+
+kind TimesheetProcessor {
+  identity: processorId;
+  property processorId: String;
+  property processedTimesheets: Set<Timesheet>;
+
+  invariants {
+    self.processorId <> null;
+  }
+
+  // Implements the gross-pay computation of processTimesheet from Requirements.
+  // This is a pure query — no state change. OMIT 'modifies:' entirely.
+  event computeGross(baseRate: Real, timesheet: Timesheet, isExempt: Boolean): Real
+    refines payroll_system_requirements::PayrollSystem.processTimesheet {
+    pre: timesheet.isSigned = true;
+    pre: baseRate >= 0.0;
+    pre: timesheet.regularHours >= 0.0;
+    pre: timesheet.overtimeHours >= 0.0;
+    pre: not (not isExempt and timesheet.regularHours > 40.0) or timesheet.overtimeHours >= 0.0;
+    post: result >= 0.0;
+  }
+}
+
+// ─── Component 3: Deduction Engine ───────────────────────────────────────
+
+kind DeductionEngine {
+  identity: engineId;
+  property engineId: String;
+  property appliedDeductions: Set<Deduction>;
+
+  invariants {
+    self.engineId <> null;
+    self.appliedDeductions->forAll(d | d.amount >= 0.0);
+  }
+
+  // Implements the deduction application of applyDeductions from Requirements.
+  event applyDeductions(grossPay: Real, deductionSet: Set<Deduction>): Real
+    refines payroll_system_requirements::PayrollSystem.applyDeductions {
+    pre: grossPay >= 0.0;
+    pre: deductionSet->forAll(d | d.amount >= 0.0);
+    post: result >= 0.0;
+    post: deductionSet->forAll(d | self.appliedDeductions->includes(d));
+    modifies: self.appliedDeductions;
+  }
+}
+
+// ─── Component 4: Paystub Issuer ────────────────────────────────────────
+
+kind PaystubIssuer {
+  identity: issuerId;
+  property issuerId: String;
+  property issuedPaystubs: Set<Paystub>;
+
+  invariants {
+    self.issuerId <> null;
+    self.issuedPaystubs->forAll(ps | ps.netPay = ps.grossPay - ps.deductionSum and ps.netPay >= 0.0);
+    self.issuedPaystubs->forAll(ps | ps.isDeleted = false);
+  }
+
+  // Implements issuePaystub from Requirements.
+  // Pre-condition: ensure grossPay is non-negative and each individual deduction
+  // does not exceed grossPay (conservative check since sum() is not supported).
+  event issuePaystub(employee: Employee, period: PayPeriod, grossPay: Real, deductions: Set<Deduction>)
+    refines payroll_system_requirements::PayrollSystem.issuePaystub {
+    pre: employee <> null;
+    pre: period <> null;
+    pre: grossPay >= 0.0;
+    pre: deductions->forAll(d | d.amount >= 0.0);
+    pre: deductions->forAll(d | d.amount <= grossPay);
+    post: self.issuedPaystubs->size() = self.issuedPaystubs@pre->size() + 1;
+    post: self.issuedPaystubs@pre->forAll(ps | self.issuedPaystubs->includes(ps));
+    post: self.issuedPaystubs->exists(ps |
+      ps.grossPay = grossPay and
+      ps.adjustmentTo = null and
+      ps.isDeleted = false
+    );
+    modifies: self.issuedPaystubs;
+  }
+
+  // Implements issueAdjustment from Requirements.
+  event issueAdjustment(employee: Employee, originalPaystub: Paystub, correctionAmount: Real)
+    refines payroll_system_requirements::PayrollSystem.issueAdjustment {
+    pre: employee <> null;
+    pre: originalPaystub <> null;
+    pre: self.issuedPaystubs->includes(originalPaystub);
+    pre: correctionAmount <> 0.0;
+    post: self.issuedPaystubs->size() = self.issuedPaystubs@pre->size() + 1;
+    post: self.issuedPaystubs@pre->forAll(ps | self.issuedPaystubs->includes(ps));
+    post: self.issuedPaystubs->exists(ps |
+      ps.grossPay = correctionAmount and
+      ps.deductionSum = 0.0 and
+      ps.adjustmentTo = originalPaystub.paystubId and
+      ps.isDeleted = false
+    );
+    modifies: self.issuedPaystubs;
+  }
+}
+
+// ─── Roles for component endpoints ───────────────────────────────────────
+
+role PayPeriodEndpoint mediated-by PayrollInterface of PayPeriodManager {
+  property managerId: String;
+  property openPeriods: Set<PayPeriod>;
+}
+
+role TimesheetEndpoint mediated-by PayrollInterface of TimesheetProcessor {
+  property processorId: String;
+}
+
+role DeductionEndpoint mediated-by PayrollInterface of DeductionEngine {
+  property engineId: String;
+}
+
+role IssuerEndpoint mediated-by PayrollInterface of PaystubIssuer {
+  property issuerId: String;
+  property issuedPaystubs: Set<Paystub>;
+}
+
+// ─── Interface (relator) between all four components ─────────────────────
+
+relator PayrollInterface mediates (PayPeriodEndpoint, TimesheetEndpoint, DeductionEndpoint, IssuerEndpoint) {
+  identity: interfaceId;
+  property interfaceId: String;
+  property activeRunId: String;
+
+  invariants {
+    self.interfaceId <> null;
+    self.activeRunId <> null;
+  }
+
+  // Orchestration event: coordinates a full payroll run across components.
+  event executePayrollRun(period: PayPeriod, timesheets: Set<Timesheet>, exemptionMap: Set<String>, deductions: Set<Deduction>) {
+    pre: period <> null;
+    pre: period.isAuthorized = true;
+    pre: timesheets->forAll(t | t.isSigned = true);
+    pre: deductions->forAll(d | d.amount >= 0.0);
+    pre: exemptionMap->size() = timesheets->size();
+    pre: timesheets->forAll(t | t.regularHours + t.overtimeHours <= 168.0);
+    post: self.activeRunId <> null;
+    modifies: self.activeRunId;
+  }
+}
+
+// ─── Data Flow: End-to-End Payroll Run Happening ────────────────────────
+
+happening PayrollRunHappening {
+  identity: runId;
+  property runId: String;
+  property periodId: String;
+  property timesheetIds: Set<String>;
+  property deductionIds: Set<String>;
+  property paystubIds: Set<String>;
+  property status: String; // 'INITIATED' | 'COMPUTING' | 'DEDUCTING' | 'ISSUING' | 'COMPLETED' | 'HALTED'
+
+  invariants {
+    self.runId <> null;
+    self.periodId <> null;
+  }
+}
+
+// ─── Explicit Relations (OntoUML Stereotypes) ────────────────────────────
+
+relation payrollIterfaceMed: <<mediation>> from PayrollInterface [1] to PayPeriodEndpoint [1];
+relation payrollIterfaceMed2: <<mediation>> from PayrollInterface [1] to TimesheetEndpoint [1];
+relation payrollIterfaceMed3: <<mediation>> from PayrollInterface [1] to DeductionEndpoint [1];
+relation payrollIterfaceMed4: <<mediation>> from PayrollInterface [1] to IssuerEndpoint [1];

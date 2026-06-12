@@ -1,0 +1,131 @@
+schema "onto/0.1";
+namespace ardupilot_batt_monitor;
+
+// Represents a single battery pack being monitored.
+kind BatteryInstance {
+  identity: instanceId;
+
+  property instanceId: Integer;
+  property voltage: Real internal default 0.0;     // Volts
+  property current: Real internal default 0.0;     // Amperes
+  property consumedMah: Real internal default 0.0; // milliampere-hours
+  property consumedWh: Real internal default 0.0;  // Watt-hours
+  property capacityMah: Real internal default 0.0; // Nominal capacity in mAh
+  property cellCount: Integer internal default 0;
+  property lowThreshold: Real internal default 0.0;      // Voltage threshold for 'low' warning
+  property criticalThreshold: Real internal default 0.0; // Voltage threshold for 'critical' warning
+  property failsafeThreshold: Real internal default 0.0; // Voltage threshold for 'failsafe' action
+  property healthOk: Boolean internal default true;      // Health flag (true if healthy, false if unhealthy/failsafe)
+  property lastReadingUs: Integer internal default 0;    // Time of last reading in microseconds
+
+  invariants {
+    self.instanceId >= 0;
+    self.voltage >= 0.0;
+    self.current.isFinite(); // Current can be negative for charging, positive for discharge. Assume finite.
+    self.consumedMah >= 0.0;
+    self.consumedWh >= 0.0;
+    self.capacityMah >= 0.0;
+    self.cellCount > 0; // A battery must have at least one cell
+
+    self.lowThreshold >= 0.0;
+    self.criticalThreshold >= 0.0;
+    self.failsafeThreshold >= 0.0;
+
+    // Threshold ordering: failsafe voltage must be less than or equal to critical,
+    // and critical less than or equal to low.
+    self.failsafeThreshold <= self.criticalThreshold;
+    self.criticalThreshold <= self.lowThreshold;
+
+    // Consumed mAh does not exceed capacity if capacity is positive.
+    self.capacityMah > 0.0 implies self.consumedMah <= self.capacityMah;
+
+    // All relevant numeric properties must be finite.
+    self.voltage.isFinite();
+    self.current.isFinite();
+    self.consumedMah.isFinite();
+    self.consumedWh.isFinite();
+    self.capacityMah.isFinite();
+    self.lowThreshold.isFinite();
+    self.criticalThreshold.isFinite();
+    self.failsafeThreshold.isFinite();
+
+    // The health flag reflects the battery's state relative to its critical threshold.
+    // In a real system, this might have hysteresis or more complex logic,
+    // but for this example, it's a direct derivation.
+    self.healthOk = (self.voltage > self.criticalThreshold);
+  }
+}
+
+// Battery monitor managing multiple battery instances.
+kind AP_BattMonitor {
+  identity: monitorId;
+
+  property monitorId: String;
+  property batteries: Set<BatteryInstance>; // Set of managed battery instances
+
+  invariants {
+    self.monitorId <> null;
+    self.batteries->notEmpty(); // A monitor must manage at least one battery.
+  }
+
+  // Event to add a new battery instance to the monitor.
+  // This is a common operation for system initialization or hot-swapping.
+  event addBattery(newBattery: BatteryInstance) {
+    pre: newBattery <> null;
+    pre: self.batteries->forAll(b | b.instanceId <> newBattery.instanceId); // Instance ID must be unique.
+    post: self.batteries->includes(newBattery);
+    post: self.batteries->size() = self.batteries@pre->size() + 1;
+    modifies: self.batteries;
+  }
+
+  // Reads new voltage and current for a specific battery instance.
+  // `currentTimeUs` is the timestamp of the reading in microseconds.
+  event read(instanceId: Integer, newVoltage: Real, newCurrent: Real, currentTimeUs: Integer) {
+    pre: self.batteries->exists(b | b.instanceId = instanceId);
+    pre: newVoltage.isFinite();
+    pre: newCurrent.isFinite();
+    pre: newVoltage >= 0.0;
+    pre: currentTimeUs >= 0;
+
+    // The post-condition must apply to the *specific* battery instance.
+    // Use forAll with an if-then-else to target the correct instance.
+    post: self.batteries->forAll(b |
+            if b.instanceId = instanceId then
+              b.voltage = newVoltage and
+              b.current = newCurrent and
+              b.lastReadingUs = currentTimeUs
+            else
+              true // Other batteries are unchanged
+            endif
+          );
+
+    modifies: self.batteries;
+    effects: { HardwareRead, Telemetry, LogRecord };
+    reads: { instanceId, newVoltage, newCurrent, currentTimeUs };
+  }
+
+  // Updates consumed mAh and Wh for all managed battery instances over a given time delta.
+  // `dt` is in seconds.
+  event update(dt: Real) {
+    pre: dt > 0.0;
+    pre: dt.isFinite();
+
+    post: self.batteries->forAll(b |
+            // Convert current (A) * dt (s) to mAh. (A*s) / 3600 * 1000 = (A*s) / 3.6
+            let mah_delta = b.current@pre * dt / 3.6 in
+            // Convert voltage (V) * current (A) * dt (s) to Wh. (V*A*s) / 3600
+            let wh_delta = b.voltage@pre * b.current@pre * dt / 3600.0 in
+            b.consumedMah = b.consumedMah@pre + mah_delta and
+            b.consumedWh = b.consumedWh@pre + wh_delta
+          );
+    modifies: self.batteries;
+    effects: { Telemetry, LogRecord };
+    reads: { dt };
+  }
+
+  // Query whether any battery instance is currently below its critical threshold.
+  // This corresponds to the `has_failsafed()` operation in the problem description.
+  query has_failsafed(): Boolean {
+    body: self.batteries->exists(b | b.voltage <= b.criticalThreshold);
+  }
+}

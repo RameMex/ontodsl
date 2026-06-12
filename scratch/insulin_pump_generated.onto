@@ -1,0 +1,219 @@
+schema "onto/0.1";
+namespace insulin_pump;
+
+// =====================================================================
+// UFO-A model of an insulin pump control system.
+// Safety-critical medical device with strict dose limits, fail-safe
+// behaviour, and patient alerts.
+// =====================================================================
+
+kind BloodSugarSensor {
+  identity: sensorId;
+  property sensorId: String;
+  property reading: Real;
+  property timestamp: Integer;
+
+  invariants {
+    self.sensorId <> null;
+    self.reading >= 0.0;
+    self.timestamp > 0;
+  }
+
+  event newReading(value: Real, time: Integer) {
+    pre: value >= 0.0;
+    pre: time > 0;
+    post: self.reading = value;
+    post: self.timestamp = time;
+    modifies: self.reading, self.timestamp;
+  }
+}
+
+kind InsulinPump {
+  identity: pumpId;
+  property pumpId: String;
+  property reservoirLevel: Real;
+  property currentDose: Real;
+  property isDelivering: Boolean;
+
+  invariants {
+    self.pumpId <> null;
+    self.reservoirLevel >= 0.0;
+    self.currentDose >= 0.0;
+    self.currentDose <= 10.0; // safe maximum
+  }
+
+  event deliverDose(dose: Real) {
+    pre: dose > 0.0;
+    pre: dose <= 10.0;
+    pre: self.reservoirLevel >= dose;
+    pre: self.isDelivering = false;
+    post: self.reservoirLevel = self.reservoirLevel@pre - dose;
+    post: self.currentDose = dose;
+    post: self.isDelivering = true;
+    modifies: self.reservoirLevel, self.currentDose, self.isDelivering;
+  }
+
+  event stopDelivery() {
+    pre: self.isDelivering = true;
+    post: self.currentDose = 0.0;
+    post: self.isDelivering = false;
+    modifies: self.currentDose, self.isDelivering;
+  }
+
+  event setFaultState() {
+    pre: true;
+    post: self.isDelivering = false;
+    post: self.currentDose = 0.0;
+    modifies: self.isDelivering, self.currentDose;
+  }
+}
+
+kind SafetyMonitor {
+  identity: monitorId;
+  property monitorId: String;
+  property faultDetected: Boolean;
+  property lastSelfTestTimestamp: Integer;
+  property alarmActive: Boolean;
+
+  invariants {
+    self.monitorId <> null;
+  }
+
+  event runSelfTest(time: Integer) {
+    pre: time > 0;
+    post: self.lastSelfTestTimestamp = time;
+    post: self.faultDetected = false; // assume test passes unless fault
+    modifies: self.lastSelfTestTimestamp, self.faultDetected;
+  }
+
+  event detectFault() {
+    pre: not self.faultDetected;
+    post: self.faultDetected = true;
+    post: self.alarmActive = true;
+    modifies: self.faultDetected, self.alarmActive;
+  }
+
+  event clearFault() {
+    pre: self.faultDetected;
+    post: self.faultDetected = false;
+    post: self.alarmActive = false;
+    modifies: self.faultDetected, self.alarmActive;
+  }
+}
+
+kind PatientAlertSystem {
+  identity: alertId;
+  property alertId: String;
+  property lowReservoirAlert: Boolean;
+  property faultAlert: Boolean;
+  property alertMessage: String;
+
+  invariants {
+    self.alertId <> null;
+  }
+
+  event warnLowReservoir(level: Real) {
+    pre: level < 5.0;
+    post: self.lowReservoirAlert = true;
+    post: self.alertMessage = 'Low reservoir: refill insulin';
+    modifies: self.lowReservoirAlert, self.alertMessage;
+  }
+
+  event triggerFaultAlert() {
+    pre: not self.faultAlert;
+    post: self.faultAlert = true;
+    post: self.alertMessage = 'System fault: insulin delivery stopped';
+    modifies: self.faultAlert, self.alertMessage;
+  }
+
+  event clearAlerts() {
+    post: self.lowReservoirAlert = false;
+    post: self.faultAlert = false;
+    post: self.alertMessage = '';
+    modifies: self.lowReservoirAlert, self.faultAlert, self.alertMessage;
+  }
+}
+
+// Control system orchestrating sensor, pump, safety monitor, and alerts
+kind InsulinControlSystem {
+  identity: controllerId;
+  property controllerId: String;
+  property safeZoneMin: Real;
+  property safeZoneMax: Real;
+  property lastCheckTime: Integer;
+  property isOperating: Boolean;
+
+  invariants {
+    self.controllerId <> null;
+    self.safeZoneMin < self.safeZoneMax;
+    self.safeZoneMin >= 0.0;
+    self.safeZoneMax <= 400.0;
+  }
+
+  event assessBloodSugar(sensor: BloodSugarSensor, pump: InsulinPump, monitor: SafetyMonitor, alerts: PatientAlertSystem) {
+    pre: self.isOperating = true;
+    pre: not monitor.faultDetected;
+    post: if sensor.reading <= self.safeZoneMax then
+            pump.currentDose = 0.0
+          else
+            pump.currentDose = (sensor.reading - self.safeZoneMax) * 0.01 // proportional to rate of rise
+          endif;
+    post: if pump.currentDose > 10.0 then pump.currentDose = 10.0 else true endif; // clamp to safe max
+    modifies: pump.currentDose;
+  }
+
+  event performSafetyCheck(monitor: SafetyMonitor, pump: InsulinPump, alerts: PatientAlertSystem) {
+    pre: self.isOperating = true;
+    post: if monitor.faultDetected then
+            pump.isDelivering = false;
+            pump.currentDose = 0.0;
+            alerts.faultAlert = true;
+            alerts.alertMessage = 'System fault: insulin delivery stopped'
+          else
+            true
+          endif;
+    modifies: pump.isDelivering, pump.currentDose, alerts.faultAlert, alerts.alertMessage;
+  }
+
+  event checkReservoir(pump: InsulinPump, alerts: PatientAlertSystem) {
+    pre: self.isOperating = true;
+    post: if pump.reservoirLevel < 5.0 then
+            alerts.lowReservoirAlert = true;
+            alerts.alertMessage = 'Low reservoir: refill insulin'
+          else
+            true
+          endif;
+    modifies: alerts.lowReservoirAlert, alerts.alertMessage;
+  }
+
+  event startSystem() {
+    pre: not self.isOperating;
+    post: self.isOperating = true;
+    post: self.lastCheckTime = 0;
+    modifies: self.isOperating, self.lastCheckTime;
+  }
+
+  event stopSystem() {
+    pre: self.isOperating;
+    post: self.isOperating = false;
+    modifies: self.isOperating;
+  }
+}
+
+// Hardware fault detection (embedded in safety monitor)
+role FaultDetected by monitorId of SafetyMonitor {
+  property faultDetected: Boolean;
+  property alarmActive: Boolean;
+}
+
+role LowReservoir mediated-by PatientAlertSystem of InsulinPump {
+  property reservoirLevel: Real;
+}
+
+// Explicit relations
+relation systemHasSensor: <<composition>> from InsulinControlSystem [1] to BloodSugarSensor [1];
+relation systemHasPump: <<composition>> from InsulinControlSystem [1] to InsulinPump [1];
+relation systemHasMonitor: <<composition>> from InsulinControlSystem [1] to SafetyMonitor [1];
+relation systemHasAlerts: <<composition>> from InsulinControlSystem [1] to PatientAlertSystem [1];
+relation monitorDetectsFault: <<detection>> from SafetyMonitor [1] to FaultDetected [1];
+relation pumpHasLowReservoir: <<triggers>> from InsulinPump [1] to LowReservoir [1];

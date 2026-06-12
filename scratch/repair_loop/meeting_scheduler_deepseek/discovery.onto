@@ -1,0 +1,178 @@
+schema "onto/0.1";
+namespace meeting_scheduler_discovery;
+
+// ─── Stakeholders as Agents ─────────────────────────────────────────────────
+agent Initiator {
+  identity: initiatorId;
+  property initiatorId: String;
+  property name: String;
+
+  invariants {
+    self.initiatorId <> null;
+    self.name <> null;
+  }
+}
+
+agent Participant {
+  identity: participantId;
+  property participantId: String;
+  property name: String;
+  property email: String;
+
+  invariants {
+    self.participantId <> null;
+    self.name <> null;
+  }
+}
+
+agent SystemProvider {
+  identity: providerId;
+  property providerId: String;
+  property name: String;
+
+  invariants {
+    self.providerId <> null;
+    self.name <> null;
+  }
+}
+
+// ─── Glossary Terms as Kinds ───────────────────────────────────────────────
+kind DateRange {
+  identity: rangeId;
+  property rangeId: String;
+  property startDate: String;   // ISO date string
+  property endDate: String;     // ISO date string
+
+  invariants {
+    self.rangeId <> null;
+    self.startDate <> null;
+    self.endDate <> null;
+  }
+}
+
+kind ExclusionSet {
+  identity: exclusionId;
+  property exclusionId: String;
+  property dates: Set<String>;   // set of ISO date strings
+
+  invariants {
+    self.exclusionId <> null;
+  }
+}
+
+kind PreferenceSet {
+  identity: prefId;
+  property prefId: String;
+  property dates: Set<String>;   // set of ISO date strings
+
+  invariants {
+    self.prefId <> null;
+  }
+}
+
+// ─── Constraint Goals (Categories) ─────────────────────────────────────────
+category ConstraintRespecting {
+  // Any system kind that schedules meetings must respect participant constraints
+  invariants {
+    // Placeholder: "No meeting date shall be in any participant's exclusion set"
+    // Concrete invariants attach to system kind in Requirements stage
+    true;
+  }
+}
+
+category OutcomeReporting {
+  // The initiator must always be told the outcome
+  invariants {
+    true;
+  }
+}
+
+// ─── Hard Goals (Commitments) ─────────────────────────────────────────────
+// GOAL-1: Schedule a meeting that fits every participant's constraints
+commitment ScheduleWithinConstraints
+  debitor: SystemProvider
+  creditor: Initiator {
+    identity: commitmentId;
+    property commitmentId: String;
+    property feasibleDateCount: Integer;
+    predicate: self.feasibleDateCount > 0;
+  }
+
+// GOAL-2: Handle the case where no common date exists (report conflict)
+commitment ConflictReporting
+  debitor: SystemProvider
+  creditor: Initiator {
+    identity: commitmentId;
+    property commitmentId: String;
+    property conflictDetected: Boolean;
+    predicate: self.conflictDetected = false;
+  }
+
+// GOAL-3a: Keep participants informed on confirmation
+commitment NotifyOnConfirmation
+  debitor: SystemProvider
+  creditor: Participant {
+    identity: commitmentId;
+    property commitmentId: String;
+    property notificationSent: Boolean;
+    predicate: self.notificationSent = true;
+  }
+
+// GOAL-3b: Accept updated constraints while meeting is open
+commitment AcceptConstraintUpdates
+  debitor: SystemProvider
+  creditor: Participant {
+    identity: commitmentId;
+    property commitmentId: String;
+    property updateAccepted: Boolean;
+    predicate: self.updateAccepted = true;
+  }
+
+// ─── Domain Stories (with identity declared) ────────────────────────────────
+happening MeetingSchedulingFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;  // initiator requests meeting
+  property outcome: String;       // 'SCHEDULED' | 'CONFLICT'
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy = 'InitiatorMeetingRequest';
+  }
+}
+
+happening ConstraintCollection {
+  identity: collectionId;
+  property collectionId: String;
+  property initiator: Initiator;
+  property participants: Set<Participant>;
+  property dateRange: DateRange;
+  property exclusions: Set<ExclusionSet>;
+  property preferences: Set<PreferenceSet>;
+  property outcome: String;
+
+  invariants {
+    self.collectionId <> null;
+  }
+}
+
+happening DateProposal {
+  identity: proposalId;
+  property proposalId: String;
+  property proposedDate: String;
+  property satisfiesAll: Boolean;
+
+  invariants {
+    self.proposalId <> null;
+  }
+}
+
+happening ConflictResolution {
+  identity: conflictId;
+  property conflictId: String;
+  property reported: Boolean;
+
+  invariants {
+    self.conflictId <> null;
+  }
+}

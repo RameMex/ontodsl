@@ -1,0 +1,160 @@
+schema "onto/0.1";
+namespace traffic_light_requirements;
+import "./discovery.onto";
+
+kind TrafficLightSystem {
+  identity: systemId;
+  property systemId: String;
+
+  property approaches: Set<Approach>;
+  property phases: Set<Phase>;
+  property activePhase: Phase;
+
+  property greenApproaches: Set<Approach>;
+  property yellowIntervalSeconds: Real;
+  property preemptionResponseTimeSeconds: Real;
+  property pedestrianRequestPending: Boolean;
+  property walkSignalActive: Boolean;
+
+  property isOperating: Boolean;
+  property preemptionActive: Boolean;
+  property pedestrianRequested: Boolean;
+  property allRedActive: Boolean;
+
+  property yellowTimerElapsed: Real;
+  property preemptionTimerElapsed: Real;
+
+  invariants {
+    self.systemId <> null;
+    self.yellowIntervalSeconds >= 3.0;
+    self.preemptionResponseTimeSeconds <= 1.0;
+    self.yellowTimerElapsed >= 0.0;
+    self.preemptionTimerElapsed >= 0.0;
+    self.greenApproaches->forAll(a |
+      self.greenApproaches->forAll(b |
+        a = b or a.direction <> b.direction));
+    self.greenApproaches->size() >= 0;
+    self.greenApproaches->forAll(a | self.approaches->includes(a));
+  }
+
+  event startNormalPhase(p: Phase) {
+    pre: p <> null;
+    pre: self.isOperating;
+    pre: not self.preemptionActive;
+    pre: not self.allRedActive;
+    post: self.activePhase = p;
+    post: self.greenApproaches = p.greenApproaches;
+    post: self.preemptionActive = false;
+    post: self.allRedActive = false;
+    post: self.yellowTimerElapsed = 0.0;
+    post: self.preemptionTimerElapsed = 0.0;
+    modifies: self.activePhase, self.greenApproaches,
+              self.preemptionActive, self.allRedActive,
+              self.yellowTimerElapsed, self.preemptionTimerElapsed;
+  }
+
+  event transitionToYellow()
+    refines traffic_light_discovery::YellowIntervalCommitment {
+    pre: self.activePhase <> null;
+    pre: self.isOperating;
+    pre: not self.preemptionActive;
+    pre: not self.allRedActive;
+    pre: self.greenApproaches->notEmpty();
+    post: self.greenApproaches->isEmpty();
+    post: self.yellowTimerElapsed = 0.0;
+    post: self.yellowIntervalSeconds >= 3.0;
+    modifies: self.greenApproaches, self.yellowTimerElapsed;
+  }
+
+  event transitionToRed() {
+    pre: self.yellowTimerElapsed >= self.yellowIntervalSeconds;
+    pre: self.isOperating;
+    pre: not self.preemptionActive;
+    pre: not self.allRedActive;
+    post: self.greenApproaches->isEmpty();
+    post: self.yellowTimerElapsed = 0.0;
+    modifies: self.greenApproaches, self.yellowTimerElapsed;
+  }
+
+  event emergencyPreemption()
+    refines traffic_light_discovery::EmergencyPreemptionCommitment {
+    pre: self.isOperating;
+    pre: not self.preemptionActive;
+    post: self.preemptionActive = true;
+    post: self.allRedActive = true;
+    post: self.greenApproaches->isEmpty();
+    post: self.preemptionTimerElapsed = 0.0;
+    post: self.preemptionResponseTimeSeconds <= 1.0;
+    modifies: self.preemptionActive, self.allRedActive,
+              self.greenApproaches, self.preemptionTimerElapsed;
+  }
+
+  event clearPreemption() {
+    pre: self.preemptionActive;
+    pre: self.preemptionTimerElapsed >= self.preemptionResponseTimeSeconds;
+    post: self.preemptionActive = false;
+    post: self.allRedActive = false;
+    post: self.preemptionTimerElapsed = 0.0;
+    modifies: self.preemptionActive, self.allRedActive,
+              self.preemptionTimerElapsed;
+  }
+
+  event registerPedestrianRequest()
+    refines traffic_light_discovery::PedestrianRequestCommitment {
+    pre: not self.pedestrianRequested;
+    pre: not self.pedestrianRequestPending;
+    post: self.pedestrianRequested = true;
+    post: self.pedestrianRequestPending = true;
+    modifies: self.pedestrianRequested, self.pedestrianRequestPending;
+  }
+
+  event grantWalk() {
+    pre: self.pedestrianRequested;
+    pre: self.pedestrianRequestPending;
+    pre: self.greenApproaches->isEmpty();
+    pre: not self.preemptionActive;
+    post: self.pedestrianRequested = false;
+    post: self.pedestrianRequestPending = false;
+    post: self.walkSignalActive = true;
+    modifies: self.pedestrianRequested, self.pedestrianRequestPending,
+              self.walkSignalActive;
+  }
+
+  event clearWalk() {
+    pre: self.walkSignalActive;
+    post: self.walkSignalActive = false;
+    modifies: self.walkSignalActive;
+  }
+
+  event tickElapsedTimers(dt: Real) {
+    pre: dt >= 0.0;
+    post: self.yellowTimerElapsed = self.yellowTimerElapsed@pre + dt;
+    post: self.preemptionTimerElapsed = self.preemptionTimerElapsed@pre + dt;
+    modifies: self.yellowTimerElapsed, self.preemptionTimerElapsed;
+  }
+
+  event startSystem() {
+    pre: not self.isOperating;
+    post: self.isOperating = true;
+    post: self.preemptionActive = false;
+    post: self.allRedActive = false;
+    post: self.pedestrianRequested = false;
+    post: self.pedestrianRequestPending = false;
+    post: self.walkSignalActive = false;
+    post: self.greenApproaches->isEmpty();
+    post: self.yellowTimerElapsed = 0.0;
+    post: self.preemptionTimerElapsed = 0.0;
+    modifies: self.isOperating, self.preemptionActive, self.allRedActive,
+              self.pedestrianRequested, self.pedestrianRequestPending,
+              self.walkSignalActive, self.greenApproaches,
+              self.yellowTimerElapsed, self.preemptionTimerElapsed;
+  }
+
+  event stopSystem() {
+    pre: self.isOperating;
+    post: self.isOperating = false;
+    post: self.greenApproaches->isEmpty();
+    post: self.walkSignalActive = false;
+    modifies: self.isOperating, self.greenApproaches, self.walkSignalActive;
+  }
+}

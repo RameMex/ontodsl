@@ -1,0 +1,269 @@
+schema "onto/0.1";
+namespace meeting_scheduler;
+
+// =====================================================================
+// UFO-A model of a Meeting Scheduler system.
+//
+// The mediates() clause of a relator must list only ROLE types.
+// ConstraintSet mediates (Initiator, Invitee).
+// Participation  mediates (Attendee,  ScheduledMeetingRole).
+//
+// <<mediation>> relations must target the role types, not raw kinds.
+// =====================================================================
+
+// ─── Primitive Kinds ─────────────────────────────────────────────────
+
+kind Person {
+  identity: personId;
+  property personId: String;
+  property name: String;
+  property email: String;
+
+  invariants {
+    self.personId <> null;
+    self.name <> null;
+    self.email <> null;
+  }
+}
+
+kind Location {
+  identity: locationId;
+  property locationId: String;
+  property name: String;
+  property address: String;
+
+  invariants {
+    self.locationId <> null;
+    self.name <> null;
+  }
+}
+
+// ─── Meeting Request ─────────────────────────────────────────────────
+// Lifecycle: 'OPEN' -> 'CONFIRMED' | 'CONFLICT'
+
+kind MeetingRequest {
+  identity: requestId;
+  property requestId: String;
+  property topic: String;
+  property rangeStart: String;
+  property rangeEnd: String;
+  property status: String;
+  property proposedDate: String;
+  property conflictReason: String;
+
+  invariants {
+    self.requestId <> null;
+    self.topic <> null;
+    self.rangeStart <> null;
+    self.rangeEnd <> null;
+    self.status <> null;
+  }
+
+  event open(topic: String, rangeStart: String, rangeEnd: String) {
+    pre: topic <> null;
+    pre: rangeStart <> null;
+    pre: rangeEnd <> null;
+    post: self.topic = topic;
+    post: self.rangeStart = rangeStart;
+    post: self.rangeEnd = rangeEnd;
+    post: self.status = 'OPEN';
+    modifies: self.topic, self.rangeStart, self.rangeEnd, self.status;
+  }
+
+  event proposeDate(date: String) {
+    pre: self.status = 'OPEN';
+    pre: date <> null;
+    post: self.proposedDate = date;
+    modifies: self.proposedDate;
+  }
+
+  event confirmDate() {
+    pre: self.status = 'OPEN';
+    pre: self.proposedDate <> null;
+    post: self.status = 'CONFIRMED';
+    modifies: self.status;
+  }
+
+  event reportConflict(reason: String) {
+    pre: self.status = 'OPEN';
+    pre: reason <> null;
+    post: self.status = 'CONFLICT';
+    post: self.conflictReason = reason;
+    modifies: self.status, self.conflictReason;
+  }
+}
+
+// ─── Scheduled Meeting ───────────────────────────────────────────────
+
+kind ScheduledMeeting {
+  identity: meetingId;
+  property meetingId: String;
+  property confirmedDate: String;
+  property location: Location;
+  property topic: String;
+  property notificationSent: Boolean;
+
+  invariants {
+    self.meetingId <> null;
+    self.confirmedDate <> null;
+    self.location <> null;
+    self.topic <> null;
+  }
+
+  event notifyParticipants() {
+    pre: self.notificationSent = false;
+    post: self.notificationSent = true;
+    modifies: self.notificationSent;
+  }
+}
+
+// ─── Roles for ConstraintSet ─────────────────────────────────────────
+// Both Initiator and Invitee are roles of Person mediated by ConstraintSet.
+
+role Initiator mediated-by ConstraintSet of Person {
+  property personId: String;
+  property name: String;
+  property email: String;
+}
+
+role Invitee mediated-by ConstraintSet of Person {
+  property personId: String;
+  property name: String;
+  property email: String;
+}
+
+// ─── Role for Participation ───────────────────────────────────────────
+// Attendee is a role of Person mediated by Participation.
+
+role Attendee mediated-by Participation of Person {
+  property personId: String;
+  property name: String;
+}
+
+// ─── ConstraintSet Relator ───────────────────────────────────────────
+// Captures one participant's availability data for one MeetingRequest.
+// Mediates the Initiator and Invitee roles (both roles of Person).
+
+relator ConstraintSet mediates (Initiator, Invitee) {
+  identity: constraintId;
+  property constraintId: String;
+  property person: Person;
+  property request: MeetingRequest;
+  property exclusionDates: Set<String>;
+  property preferenceDates: Set<String>;
+  property isInitiator: Boolean;
+
+  invariants {
+    self.constraintId <> null;
+    self.person <> null;
+    self.request <> null;
+  }
+
+  // GOAL-3: accept updated constraints while request is still open
+  event updateExclusions(newExclusions: Set<String>) {
+    pre: self.request.status = 'OPEN';
+    pre: newExclusions <> null;
+    post: self.exclusionDates = newExclusions;
+    modifies: self.exclusionDates;
+  }
+
+  event updatePreferences(newPreferences: Set<String>) {
+    pre: self.request.status = 'OPEN';
+    pre: newPreferences <> null;
+    post: self.preferenceDates = newPreferences;
+    modifies: self.preferenceDates;
+  }
+
+  // GOAL-1: a candidate date is valid iff it is not in this exclusion set
+  query isDateExcluded(date: String): Boolean {
+    body: self.exclusionDates->includes(date);
+  }
+
+  // GOAL-1: a candidate date is preferred by this participant
+  query isDatePreferred(date: String): Boolean {
+    body: self.preferenceDates->includes(date);
+  }
+}
+
+// ─── Participation Relator ───────────────────────────────────────────
+// Links confirmed attendees (Attendee role) to a ScheduledMeeting.
+// Both participants in mediates() must be role types.
+// We introduce a thin ConfirmedMeeting role of ScheduledMeeting.
+
+role ConfirmedMeeting mediated-by Participation of ScheduledMeeting {
+  property meetingId: String;
+  property confirmedDate: String;
+}
+
+relator Participation mediates (Attendee, ConfirmedMeeting) {
+  identity: participationId;
+  property participationId: String;
+  property attendee: Person;
+  property meeting: ScheduledMeeting;
+  property notified: Boolean;
+
+  invariants {
+    self.participationId <> null;
+    self.attendee <> null;
+    self.meeting <> null;
+  }
+
+  // GOAL-3: individual participant notification on confirmation
+  event markNotified() {
+    pre: self.notified = false;
+    pre: self.meeting.confirmedDate <> null;
+    post: self.notified = true;
+    modifies: self.notified;
+  }
+}
+
+// ─── Scheduling Agent ─────────────────────────────────────────────────
+
+agent SchedulingAgent {
+  identity: agentId;
+  property agentId: String;
+  property name: String;
+
+  invariants {
+    self.agentId <> null;
+    self.name <> null;
+  }
+
+  // GOAL-1: propose a date that satisfies all constraints.
+  event scheduleDate(
+    request: MeetingRequest,
+    candidate: String,
+    allConstraints: Set<ConstraintSet>
+  ) {
+    pre: request.status = 'OPEN';
+    pre: candidate <> null;
+    pre: allConstraints->forAll(cs | not cs.exclusionDates->includes(candidate));
+    post: request.proposedDate = candidate;
+    modifies: request.proposedDate;
+  }
+
+  // GOAL-2: when no viable date exists, report the conflict to the initiator.
+  event flagConflict(request: MeetingRequest, reason: String) {
+    pre: request.status = 'OPEN';
+    pre: reason <> null;
+    post: request.status = 'CONFLICT';
+    post: request.conflictReason = reason;
+    modifies: request.status, request.conflictReason;
+  }
+
+  // GOAL-3: confirm the proposed date.
+  event confirmMeeting(request: MeetingRequest) {
+    pre: request.status = 'OPEN';
+    pre: request.proposedDate <> null;
+    post: request.status = 'CONFIRMED';
+    modifies: request.status;
+  }
+}
+
+// ─── Explicit Relations ───────────────────────────────────────────────
+
+relation constraintInitiatorLink: <<mediation>> from ConstraintSet [0..*] to Initiator [1];
+relation constraintInviteeLink: <<mediation>> from ConstraintSet [0..*] to Invitee [1];
+relation participationAttendeeLink: <<mediation>> from Participation [0..*] to Attendee [1];
+relation participationMeetingLink: <<mediation>> from Participation [0..*] to ConfirmedMeeting [1];
+relation meetingLocation: <<composition>> from ScheduledMeeting [0..*] to Location [1];

@@ -1,0 +1,553 @@
+schema "onto/0.1";
+namespace inventory_warehouse_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Design decomposition of WarehouseInventorySystem into components.
+//
+// Components (kinds, siblings):
+//   1. OrderManager     — handles outbound order intake + allocation logic
+//   2. StockLedger      — maintains stock-on-hand per SKU
+//   3. MovementJournal  — journal writer (append-only)
+//   4. BackorderQueue   — FIFO backorder manager
+//   5. ReconciliationEngine — nightly reconciliation
+//   6. ReceivingDock    — inbound restock scan + journal-before-stock
+//
+// Interfaces (relators):
+//   - AllocationChannel     (StockLedger ↔ OrderManager)
+//   - JournalWriteChannel   (StockLedger ↔ MovementJournal)
+//   - BackorderFulfillment  (ReceivingDock  ↔ BackorderQueue)
+//   - ReconciliationCheck   (ReconciliationEngine ↔ StockLedger)
+//
+// Data flows (happenings):
+//   - OutboundShipment      — order intake → allocation → journal → pick release
+//   - InboundRestock        — scan → journal → stock update → backorder fulfillment
+//   - NightlyReconciliation — journal replay → verify cached stock
+//
+// ★ COMMITMENT PROPERTY MIRRORING ★
+// Every component kind whose events refine a commitment must declare
+// the commitment's predicate properties. This ensures Z3 can prove
+// non-vacuous discharge.
+// =====================================================================
+
+// ─── Component: OrderManager ──────────────────────────────────────────
+// Handles incoming fulfillment orders, checks stock availability,
+// triggers allocation via StockLedger, writes journal entries via
+// MovementJournal. Owns order intake state (pending/allocated/rejected).
+kind OrderManager {
+  identity: omId;
+  property omId: String;
+
+  // ─── Commitment-predicate properties (for discharge proof) ──
+  // NonNegativeStockCommitment.predicate references stockOnHand.
+  property stockOnHand: Real;         // mirrored from StockLedger view
+  // BackorderPolicyCommitment.predicate references isBackorderable
+  property isBackorderable: Boolean;  // mirrored from SKU metadata cache
+
+  property pendingOrders: Set<FulfillmentOrder>;
+  property allocatedOrders: Set<FulfillmentOrder>;
+  property rejectedOrders: Set<FulfillmentOrder>;
+
+  invariants {
+    self.omId <> null;
+    self.stockOnHand >= 0.0;
+    self.pendingOrders->forAll(o | o.status = 'PENDING');
+    self.allocatedOrders->forAll(o | o.status = 'ALLOCATED');
+    self.rejectedOrders->forAll(o | o.status = 'REJECTED');
+
+    // No order may be in multiple sets
+    self.pendingOrders->forAll(o |
+      not self.allocatedOrders->includes(o) and
+      not self.rejectedOrders->includes(o));
+  }
+
+  // Receive a fulfillment order (incoming request from FulfillmentPartner)
+  event receiveOrder(order: FulfillmentOrder) {
+    pre: order <> null;
+    pre: order.requestedQty > 0.0;
+    pre: order.sku <> null;
+    pre: not self.pendingOrders->includes(order);
+    pre: not self.allocatedOrders->includes(order);
+    pre: not self.rejectedOrders->includes(order);
+
+    post: self.pendingOrders->includes(order);
+
+    modifies: self.pendingOrders;
+  }
+
+  // Try to allocate — consult StockLedger, then journal, then move order.
+  event tryAllocate(sku: SKU, requestedQty: Real)
+    refines inventory_warehouse_requirements::WarehouseInventorySystem.allocateStock {
+    pre: sku <> null;
+    pre: requestedQty > 0.0;
+
+    post: self.stockOnHand = self.stockOnHand@pre - requestedQty;
+
+    modifies: self.stockOnHand;
+  }
+
+  // Mark order as allocated (called after StockLedger confirms + journal written)
+  event markAllocated(order: FulfillmentOrder) {
+    pre: order <> null;
+    pre: self.pendingOrders->includes(order);
+    pre: not self.allocatedOrders->includes(order);
+    pre: not self.rejectedOrders->includes(order);
+
+    post: not self.pendingOrders->includes(order);
+    post: self.allocatedOrders->includes(order);
+
+    modifies: self.pendingOrders, self.allocatedOrders;
+  }
+
+  // Mark order as rejected (stock insufficient, not backorderable)
+  event markRejected(order: FulfillmentOrder) {
+    pre: order <> null;
+    pre: self.pendingOrders->includes(order);
+    pre: not self.allocatedOrders->includes(order);
+    pre: not self.rejectedOrders->includes(order);
+
+    post: not self.pendingOrders->includes(order);
+    post: self.rejectedOrders->includes(order);
+
+    modifies: self.pendingOrders, self.rejectedOrders;
+  }
+}
+
+// ─── Component: StockLedger ───────────────────────────────────────────
+// Owns the authoritative stock-on-hand for each SKU.
+// Provides allocation and restock operations.
+kind StockLedger {
+  identity: slId;
+  property slId: String;
+
+  // ─── Commitment-predicate properties (for discharge proof) ──
+  property stockOnHand: Real;
+  property cachedStock: Real;
+  property reconciledQty: Real;
+  property isBackorderable: Boolean;
+
+  property trackedSkus: Set<SKU>;
+  property currentStock: Set<StockOnHand>;
+
+  invariants {
+    self.slId <> null;
+    self.stockOnHand >= 0.0;
+    self.cachedStock >= 0.0;
+    self.reconciledQty >= 0.0;
+    self.trackedSkus->forAll(s | self.currentStock->exists(entry | entry.sku = s));
+  }
+
+  // Deduct stock for an outbound allocation.
+  event deductStock(sku: SKU, qty: Real)
+    refines inventory_warehouse_requirements::WarehouseInventorySystem.allocateStock {
+    pre: sku <> null;
+    pre: qty > 0.0;
+    pre: qty <= self.stockOnHand;      // sufficient stock
+
+    post: self.stockOnHand = self.stockOnHand@pre - qty;
+    post: self.cachedStock = self.stockOnHand;
+    post: self.stockOnHand >= 0.0;     // discharges NonNegativeStockCommitment
+
+    modifies: self.stockOnHand, self.cachedStock;
+  }
+
+  // Add stock for an inbound restock.
+  event addStock(sku: SKU, qty: Real)
+    refines inventory_warehouse_requirements::WarehouseInventorySystem.recordRestock {
+    pre: sku <> null;
+    pre: qty > 0.0;
+    pre: self.stockOnHand + qty >= 0.0;
+
+    post: self.stockOnHand = self.stockOnHand@pre + qty;
+    post: self.cachedStock = self.stockOnHand;
+    post: self.stockOnHand >= 0.0;
+
+    modifies: self.stockOnHand, self.cachedStock;
+  }
+
+  // Fulfill backorder by deducting stock.
+  event fulfillBackorderStock(sku: SKU, qty: Real)
+    refines inventory_warehouse_requirements::WarehouseInventorySystem.fulfillBackorder {
+    pre: sku <> null;
+    pre: qty > 0.0;
+    pre: qty <= self.stockOnHand;
+
+    post: self.stockOnHand = self.stockOnHand@pre - qty;
+    post: self.cachedStock = self.stockOnHand;
+    post: self.stockOnHand >= 0.0;
+
+    modifies: self.stockOnHand, self.cachedStock;
+  }
+}
+
+// ─── Component: MovementJournal ───────────────────────────────────────
+// Append-only journal of every stock movement.
+// Writes entry BEFORE StockLedger updates cached stock.
+kind MovementJournal {
+  identity: mjId;
+  property mjId: String;
+
+  // ─── Commitment-predicate properties (for discharge proof) ──
+  property movementJournalSize: Integer;
+  property cachedStock: Real;
+
+  property entries: Set<MovementJournalEntry>;
+
+  invariants {
+    self.mjId <> null;
+    self.movementJournalSize >= 0;
+    self.movementJournalSize = self.entries->size();
+    self.cachedStock >= 0.0;
+  }
+
+  // Write a journal entry for a stock movement (outbound or inbound).
+  event writeEntry(sku: SKU, delta: Real, reason: String)
+    refines inventory_warehouse_requirements::WarehouseInventorySystem.recordRestock {
+    pre: sku <> null;
+    pre: reason <> null;
+    pre: delta <> 0.0;
+
+    post: self.movementJournalSize = self.movementJournalSize@pre + 1;
+    post: self.entries->size() = self.entries@pre->size() + 1;
+
+    modifies: self.movementJournalSize, self.entries;
+  }
+
+  // Flush oldest N entries (e.g., to DB) — reduces in-memory size
+  event flushEntries(count: Integer) {
+    pre: count > 0;
+    pre: count <= self.movementJournalSize;
+
+    post: self.movementJournalSize = self.movementJournalSize@pre - count;
+
+    modifies: self.movementJournalSize;
+  }
+}
+
+// ─── Component: BackorderQueue ────────────────────────────────────────
+// Manages FIFO backorder queue per SKU.
+// When restock arrives, fulfills backorders in order.
+kind BackorderQueue {
+  identity: bqId;
+  property bqId: String;
+
+  // ─── Commitment-predicate properties (for discharge proof) ──
+  property stockOnHand: Real;
+  property isBackorderable: Boolean;
+
+  property backorders: Set<Backorder>;
+
+  invariants {
+    self.bqId <> null;
+    self.backorders->forAll(bo | bo.sku <> null and bo.qty > 0.0 and bo.createdAt <> null);
+  }
+
+  // Add a backorder (when allocation fails because stock = 0 and SKU is backorderable)
+  event addBackorder(sku: SKU, qty: Real)
+    refines inventory_warehouse_requirements::WarehouseInventorySystem.fulfillBackorder {
+    pre: sku <> null;
+    pre: qty > 0.0;
+    pre: not self.backorders->exists(bo | bo.sku = sku and bo.qty = qty);
+    pre: self.isBackorderable = sku.isBackorderable;
+
+    post: self.backorders->size() = self.backorders@pre->size() + 1;
+
+    modifies: self.backorders;
+  }
+
+  // Remove fulfilled backorder from the queue.
+  event removeFulfilled(bo: Backorder) {
+    pre: bo <> null;
+    pre: self.backorders->includes(bo);
+
+    post: not self.backorders->includes(bo);
+
+    modifies: self.backorders;
+  }
+}
+
+// ─── Component: ReceivingDock ─────────────────────────────────────────
+// Handles inbound restock: scan, journal FIRST, then update stock.
+kind ReceivingDock {
+  identity: rdId;
+  property rdId: String;
+
+  // ─── Commitment-predicate properties (for discharge proof) ──
+  property stockOnHand: Real;
+  property movementJournalSize: Integer;
+  property cachedStock: Real;
+
+  property inboundRecords: Set<Restock>;
+
+  invariants {
+    self.rdId <> null;
+    self.stockOnHand >= 0.0;
+    self.movementJournalSize >= 0;
+    self.cachedStock >= 0.0;
+    self.inboundRecords->forAll(r | r.receivedQty > 0.0 and r.inboundTimestamp <> null);
+  }
+
+  // Process a restock: (1) record inbound, (2) journal entry, (3) add stock.
+  event processRestock(sku: SKU, receivedQty: Real)
+    refines inventory_warehouse_requirements::WarehouseInventorySystem.recordRestock {
+    pre: sku <> null;
+    pre: receivedQty > 0.0;
+    pre: self.stockOnHand + receivedQty >= 0.0;
+
+    post: self.inboundRecords->size() = self.inboundRecords@pre->size() + 1;
+    post: self.stockOnHand = self.stockOnHand@pre + receivedQty;
+    post: self.cachedStock = self.stockOnHand;
+    post: self.movementJournalSize = self.movementJournalSize@pre + 1;
+
+    modifies: self.inboundRecords, self.stockOnHand, self.cachedStock, self.movementJournalSize;
+  }
+}
+
+// ─── Component: ReconciliationEngine ──────────────────────────────────
+// Nightly reconciliation: replay journal, compare to cached stock.
+kind ReconciliationEngine {
+  identity: reId;
+  property reId: String;
+
+  // ─── Commitment-predicate properties (for discharge proof) ──
+  property reconciledQty: Real;
+  property cachedStock: Real;
+
+  property lastReconciliationResult: Boolean;
+
+  invariants {
+    self.reId <> null;
+    self.reconciledQty >= 0.0;
+    self.cachedStock >= 0.0;
+  }
+
+  // Run reconciliation: verify cachedStock equals computed stock from journal replay.
+  event runReconciliation(computedStock: Real, cachedValue: Real)
+    refines inventory_warehouse_requirements::WarehouseInventorySystem.reconcile {
+    pre: computedStock >= 0.0;
+    pre: cachedValue >= 0.0;
+
+    post: self.reconciledQty = computedStock;
+    post: self.cachedStock = cachedValue;
+    post: self.lastReconciliationResult = (computedStock = cachedValue);
+
+    modifies: self.reconciledQty, self.cachedStock, self.lastReconciliationResult;
+  }
+
+  // Force reconciliation (when journal hits max capacity, per formalization guard)
+  event forceReconciliation(computedStock: Real, cachedValue: Real)
+    refines inventory_warehouse_formalization::WarehouseInventorySystemFormalized.guardForceReconciliation {
+    pre: computedStock >= 0.0;
+    pre: cachedValue >= 0.0;
+
+    post: self.reconciledQty = computedStock;
+    post: self.cachedStock = cachedValue;
+    post: self.lastReconciliationResult = (computedStock = cachedValue);
+
+    modifies: self.reconciledQty, self.cachedStock, self.lastReconciliationResult;
+  }
+}
+
+// =====================================================================
+// INTERFACES (Relators)
+// =====================================================================
+
+// ─── Role kinds for interfaces ────────────────────────────────────────
+role AllocationEndpoint mediated-by AllocationChannel of OrderManager {
+  property omId: String;
+  property stockOnHand: Real;
+  property isBackorderable: Boolean;
+}
+
+role LedgerEndpoint mediated-by AllocationChannel of StockLedger {
+  property slId: String;
+  property stockOnHand: Real;
+  property cachedStock: Real;
+}
+
+role JournalWriterEndpoint mediated-by JournalWriteChannel of StockLedger {
+  property slId: String;
+  property stockOnHand: Real;
+  property cachedStock: Real;
+}
+
+role JournalAppendEndpoint mediated-by JournalWriteChannel of MovementJournal {
+  property mjId: String;
+  property movementJournalSize: Integer;
+}
+
+role RestockFulfillmentEndpoint mediated-by BackorderFulfillment of ReceivingDock {
+  property rdId: String;
+  property stockOnHand: Real;
+}
+
+role BackorderEndpoint mediated-by BackorderFulfillment of BackorderQueue {
+  property bqId: String;
+  property backorders: Set<Backorder>;
+}
+
+role ReconciliationQueryEndpoint mediated-by ReconciliationCheck of ReconciliationEngine {
+  property reId: String;
+  property reconciledQty: Real;
+}
+
+role StockVerifiedEndpoint mediated-by ReconciliationCheck of StockLedger {
+  property slId: String;
+  property stockOnHand: Real;
+  property cachedStock: Real;
+}
+
+// ─── AllocationChannel: OrderManager ↔ StockLedger ───────────────────
+relator AllocationChannel mediates (AllocationEndpoint, LedgerEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property lastAllocationRequest: String;
+  property lastAllocationResult: Boolean;
+
+  invariants {
+    self.channelId <> null;
+  }
+
+  // Allocate: coordinate allocation between OrderManager and StockLedger
+  event allocate(sku: SKU, requestedQty: Real) {
+    pre: sku <> null;
+    pre: requestedQty > 0.0;
+
+    post: self.lastAllocationRequest = sku.skuId;
+    post: self.lastAllocationResult = true;
+
+    modifies: self.lastAllocationRequest, self.lastAllocationResult;
+  }
+}
+
+// ─── JournalWriteChannel: StockLedger ↔ MovementJournal ───────────────
+relator JournalWriteChannel mediates (JournalWriterEndpoint, JournalAppendEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property lastWrittenEntryId: String;
+
+  invariants {
+    self.channelId <> null;
+  }
+
+  // Write journal entry before cache update.
+  // Uses local property 'lastWrittenEntryId' — no cross-relator references.
+  event writeJournalBeforeCache(sku: SKU, delta: Real, reason: String) {
+    pre: sku <> null;
+    pre: reason <> null;
+    pre: delta <> 0.0;
+
+    post: self.lastWrittenEntryId = sku.skuId;
+
+    modifies: self.lastWrittenEntryId;
+  }
+}
+
+// ─── BackorderFulfillment: ReceivingDock ↔ BackorderQueue ─────────────
+relator BackorderFulfillment mediates (RestockFulfillmentEndpoint, BackorderEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property lastFulfilledBackorderQty: Real;
+
+  invariants {
+    self.channelId <> null;
+    self.lastFulfilledBackorderQty >= 0.0;
+  }
+
+  // After restock, fulfill matching backorders FIFO
+  event fulfillMatchingBackorders(sku: SKU, availableQty: Real) {
+    pre: sku <> null;
+    pre: availableQty > 0.0;
+
+    post: self.lastFulfilledBackorderQty = availableQty;
+
+    modifies: self.lastFulfilledBackorderQty;
+  }
+}
+
+// ─── ReconciliationCheck: ReconciliationEngine ↔ StockLedger ──────────
+relator ReconciliationCheck mediates (ReconciliationQueryEndpoint, StockVerifiedEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property lastComputedQty: Real;
+  property lastCachedQty: Real;
+  property lastMatch: Boolean;
+
+  invariants {
+    self.channelId <> null;
+    self.lastComputedQty >= 0.0;
+    self.lastCachedQty >= 0.0;
+  }
+
+  // Verify: compare computed stock (from journal replay) to cached stock
+  event verify(computedQty: Real, cachedQty: Real) {
+    pre: computedQty >= 0.0;
+    pre: cachedQty >= 0.0;
+
+    post: self.lastComputedQty = computedQty;
+    post: self.lastCachedQty = cachedQty;
+    post: self.lastMatch = (computedQty = cachedQty);
+
+    modifies: self.lastComputedQty, self.lastCachedQty, self.lastMatch;
+  }
+}
+
+// =====================================================================
+// DATA FLOWS (Happenings)
+// =====================================================================
+
+// ─── Outbound Shipment ────────────────────────────────────────────────
+happening OutboundShipment {
+  identity: flowId;
+  property flowId: String;
+  property order: FulfillmentOrder;
+  property sku: SKU;
+  property requestedQty: Real;
+  property allocatedQty: Real;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.outcome <> null;
+    self.requestedQty > 0.0;
+    self.allocatedQty >= 0.0;
+  }
+}
+
+// ─── Inbound Restock ──────────────────────────────────────────────────
+happening InboundRestock {
+  identity: flowId;
+  property flowId: String;
+  property restock: Restock;
+  property sku: SKU;
+  property receivedQty: Real;
+  property fulfilledBackorderQty: Real;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.outcome <> null;
+    self.receivedQty > 0.0;
+    self.fulfilledBackorderQty >= 0.0;
+  }
+}
+
+// ─── Nightly Reconciliation ───────────────────────────────────────────
+happening NightlyReconciliation {
+  identity: flowId;
+  property flowId: String;
+  property startAt: String;
+  property endAt: String;
+  property computedQty: Real;
+  property cachedQty: Real;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.outcome <> null;
+    self.computedQty >= 0.0;
+    self.cachedQty >= 0.0;
+  }
+}

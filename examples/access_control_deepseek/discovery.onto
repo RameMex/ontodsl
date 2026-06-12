@@ -1,0 +1,145 @@
+schema "onto/0.1";
+namespace access_control_discovery;
+
+// ─── Stakeholders (agents) ──────────────────────────────────────────
+
+agent Subject {
+  identity: subjectId;
+  property subjectId: String;
+  property token: String;
+  invariants {
+    self.subjectId <> null;
+  }
+}
+
+agent SecurityAuditor {
+  identity: auditorId;
+  property auditorId: String;
+  property complianceScope: String;
+  invariants {
+    self.auditorId <> null;
+    self.complianceScope <> null;
+  }
+}
+
+// The vendor/dev team — debitor of all stakeholder commitments.
+// The system kind (access control gateway) does not exist yet at Discovery.
+agent GatewayVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+}
+
+// ─── Glossary Terms (kinds) ─────────────────────────────────────────
+
+kind Permission {
+  identity: permissionId;
+  property permissionId: String;
+  property action: String;
+  property resource: String;
+  invariants {
+    self.permissionId <> null;
+    self.action <> null;
+    self.resource <> null;
+  }
+}
+
+kind AuditEntry {
+  identity: entryId;
+  property entryId: String;
+  property timestamp: Real;
+  property subjectId: String;
+  property permissionId: String;
+  property outcome: String;
+  property isImmutable: Boolean;
+  invariants {
+    self.entryId <> null;
+    self.timestamp >= 0.0;
+    self.isImmutable = true;
+  }
+}
+
+// ─── Commitments (stakeholder concerns / hard goals) ────────────────
+//
+// Each predicate references only properties declared on the commitment itself.
+// The system kind in Requirements will declare matching properties for discharge proof.
+
+commitment PermissionUnionCorrectness
+  debitor: GatewayVendor
+  creditor: Subject {
+    identity: commitmentId;
+    property commitmentId: String;
+    property tolerance: Real;
+    predicate: self.tolerance >= 0.0;
+  }
+
+commitment AuditedDecisions
+  debitor: GatewayVendor
+  creditor: SecurityAuditor {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxAuditLatencyMs: Real;
+    predicate: self.maxAuditLatencyMs <= 100.0;
+  }
+
+commitment StaleRoleExpiration
+  debitor: GatewayVendor
+  creditor: SecurityAuditor {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxRoleExpiryDays: Real;
+    predicate: self.maxRoleExpiryDays <= 90.0;
+  }
+
+commitment LatencyBudget
+  debitor: GatewayVendor
+  creditor: Subject {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxP99LatencyMs: Real;
+    predicate: self.maxP99LatencyMs <= 50.0;
+  }
+
+// ─── Constraint Goals (categories) ──────────────────────────────────
+//
+// Categories are defined as standalone constraints without referencing
+// the system kind (which doesn't exist at Discovery). The system kind
+// in Requirements will specialize these categories.
+
+category PermissionCorrectnessCategory {
+  invariants {
+    true;
+  }
+}
+
+category AuditComplianceCategory {
+  invariants {
+    true;
+  }
+}
+
+category StaleRoleExpiryCategory {
+  invariants {
+    true;
+  }
+}
+
+category LatencyBudgetCategory {
+  invariants {
+    true;
+  }
+}
+
+// ─── Domain Story (happening) ───────────────────────────────────────
+
+happening AuthorizationFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome = 'allow' or self.outcome = 'deny';
+  }
+}

@@ -1,0 +1,301 @@
+schema "onto/0.1";
+namespace notification_system_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Design Stage — Multi-channel Notification Dispatcher
+//
+// Decomposition into four components:
+//   1. RequestIngestor
+//   2. DeliveryOrchestrator
+//   3. RetryScheduler
+//   4. AlertManager
+//
+// FIXED (S24): A <<mediation>> relation's target ROLE MUST be listed
+// in the relator's 'mediates' clause. Roles are NOT the endpoint
+// types themselves — roles ARE the participant types.
+// Instead of declaring separate role types + mediation relations,
+// we directly declare the roles AS the participants of each relator.
+// This avoids the S24 error entirely.
+// =====================================================================
+
+// ─── Component: RequestIngestor ──────────────────────────────────────
+
+kind RequestIngestor {
+  identity: ingestorId;
+  property ingestorId: String;
+
+  property maxDeliveredPerChannel: Integer;
+  property allowedRetries: Integer;
+  property backoffBaseSeconds: Integer;
+  property alertThreshold: Integer;
+  property processedRequestCount: Integer;
+  property totalRequestsIntaken: Integer;
+
+  invariants {
+    self.ingestorId <> null;
+    self.maxDeliveredPerChannel = 1;
+    self.allowedRetries <= 5;
+    self.allowedRetries >= 1;
+    self.backoffBaseSeconds >= 1;
+    self.alertThreshold = 5;
+    self.processedRequestCount >= 0;
+    self.totalRequestsIntaken >= 0;
+  }
+
+  event receiveRequest(requestId: String, recipient: String, channels: String)
+    refines notification_system_requirements::NotificationDispatcherSystem.dispatchNotification {
+    pre: requestId <> null;
+    pre: recipient <> null;
+    pre: channels <> null;
+    pre: self.totalRequestsIntaken >= 0;
+
+    post: self.totalRequestsIntaken = self.totalRequestsIntaken@pre + 1;
+    post: self.processedRequestCount = self.processedRequestCount@pre + 1;
+
+    modifies: self.totalRequestsIntaken, self.processedRequestCount;
+  }
+}
+
+// ─── Component: DeliveryOrchestrator ─────────────────────────────────
+
+kind DeliveryOrchestrator {
+  identity: orchestratorId;
+  property orchestratorId: String;
+
+  property maxDeliveredPerChannel: Integer;
+  property allowedRetries: Integer;
+  property backoffBaseSeconds: Integer;
+  property alertThreshold: Integer;
+  property deliveredKeys: Set<String>;
+  property failedKeys: Set<String>;
+  property totalDeliveries: Integer;
+
+  invariants {
+    self.orchestratorId <> null;
+    self.maxDeliveredPerChannel = 1;
+    self.allowedRetries <= 5;
+    self.allowedRetries >= 0;
+    self.backoffBaseSeconds >= 1;
+    self.alertThreshold = 5;
+    self.totalDeliveries >= 0;
+
+    self.deliveredKeys->forAll(k | not self.failedKeys->includes(k));
+    self.failedKeys->forAll(k | not self.deliveredKeys->includes(k));
+    self.totalDeliveries = self.deliveredKeys->size();
+  }
+
+  event markDelivered(compositeKey: String)
+    refines notification_system_requirements::NotificationDispatcherSystem.attemptDelivery {
+    pre: compositeKey <> null;
+    pre: not self.deliveredKeys->includes(compositeKey);
+    pre: not self.failedKeys->includes(compositeKey);
+
+    post: self.deliveredKeys->includes(compositeKey);
+    post: self.totalDeliveries = self.totalDeliveries@pre + 1;
+
+    modifies: self.deliveredKeys, self.totalDeliveries;
+  }
+
+  event markFailed(compositeKey: String)
+    refines notification_system_requirements::NotificationDispatcherSystem.attemptDelivery {
+    pre: compositeKey <> null;
+    pre: not self.deliveredKeys->includes(compositeKey);
+    pre: not self.failedKeys->includes(compositeKey);
+
+    post: self.failedKeys->includes(compositeKey);
+
+    modifies: self.failedKeys;
+  }
+}
+
+// ─── Component: RetryScheduler ───────────────────────────────────────
+
+kind RetryScheduler {
+  identity: schedulerId;
+  property schedulerId: String;
+
+  property maxDeliveredPerChannel: Integer;
+  property allowedRetries: Integer;
+  property backoffBaseSeconds: Integer;
+  property alertThreshold: Integer;
+  property activeRetryKeys: Set<String>;
+  property activeRetryCount: Integer;
+  property currentBackoffSeconds: Integer;
+  property totalRetriesScheduled: Integer;
+
+  invariants {
+    self.schedulerId <> null;
+    self.maxDeliveredPerChannel = 1;
+    self.allowedRetries <= 5;
+    self.allowedRetries >= 0;
+    self.backoffBaseSeconds >= 1;
+    self.alertThreshold = 5;
+    self.activeRetryCount >= 0;
+    self.activeRetryCount <= self.allowedRetries;
+    self.currentBackoffSeconds >= 0;
+    self.currentBackoffSeconds <= 32;
+    self.totalRetriesScheduled >= 0;
+    self.activeRetryKeys->size() = self.activeRetryCount;
+  }
+
+  event scheduleRetry(compositeKey: String)
+    refines notification_system_discovery::ExponentialBackoff {
+    pre: compositeKey <> null;
+    pre: self.activeRetryCount < self.allowedRetries;
+
+    post: self.activeRetryKeys->includes(compositeKey);
+    post: self.activeRetryCount = self.activeRetryCount@pre + 1;
+    post: self.totalRetriesScheduled = self.totalRetriesScheduled@pre + 1;
+    post: self.currentBackoffSeconds = 2 * self.activeRetryCount;
+
+    modifies: self.activeRetryKeys, self.activeRetryCount, self.totalRetriesScheduled, self.currentBackoffSeconds;
+  }
+
+  event completeRetry(compositeKey: String)
+    refines notification_system_discovery::BoundedRetries {
+    pre: compositeKey <> null;
+    pre: self.activeRetryKeys->includes(compositeKey);
+
+    post: not self.activeRetryKeys->includes(compositeKey);
+    post: self.activeRetryCount = self.activeRetryCount@pre - 1;
+
+    modifies: self.activeRetryKeys, self.activeRetryCount;
+  }
+}
+
+// ─── Component: AlertManager ─────────────────────────────────────────
+
+kind AlertManager {
+  identity: alertManagerId;
+  property alertManagerId: String;
+
+  property maxDeliveredPerChannel: Integer;
+  property allowedRetries: Integer;
+  property backoffBaseSeconds: Integer;
+  property alertThreshold: Integer;
+  property alertCount: Integer;
+  property raisedAlerts: Set<String>;
+
+  invariants {
+    self.alertManagerId <> null;
+    self.maxDeliveredPerChannel = 1;
+    self.allowedRetries <= 5;
+    self.allowedRetries >= 0;
+    self.backoffBaseSeconds >= 1;
+    self.alertThreshold = 5;
+    self.alertCount >= 0;
+    self.raisedAlerts->size() = self.alertCount;
+  }
+
+  event raiseAlert(compositeKey: String)
+    refines notification_system_discovery::FailureEscalation {
+    pre: compositeKey <> null;
+    pre: not self.raisedAlerts->includes(compositeKey);
+
+    post: self.raisedAlerts->includes(compositeKey);
+    post: self.alertCount = self.alertCount@pre + 1;
+
+    modifies: self.raisedAlerts, self.alertCount;
+  }
+}
+
+// ─── Interfaces (Relators) ───────────────────────────────────────────
+// S24 fix: each 'relator' directly lists the component kinds as
+// participants via their own role types. Roles are defined in the
+// 'mediates' clause — NOT as standalone declarations with <<mediation>>.
+//
+// Correct pattern from playbook:
+//   relator <Name> mediates (<RoleA>, <RoleB>) { ... }
+//   role <RoleA> mediated-by <Name> of <KindA> { ... }
+//   role <RoleB> mediated-by <Name> of <KindB> { ... }
+//
+// <<mediation>> relations relate the RELATOR to each ROLE.
+// The ROLE must match exactly what the relator mediates.
+
+role IngestorRole mediated-by IngestionToDelivery of RequestIngestor {
+  property ingestorId: String;
+}
+
+role OrchestratorRoleIngestion mediated-by IngestionToDelivery of DeliveryOrchestrator {
+  property orchestratorId: String;
+}
+
+relator IngestionToDelivery mediates (IngestorRole, OrchestratorRoleIngestion) {
+  identity: bridgeId;
+  property bridgeId: String;
+  property handoffCount: Integer;
+
+  invariants {
+    self.bridgeId <> null;
+    self.handoffCount >= 0;
+  }
+}
+
+role OrchestratorRoleDelivery mediated-by DeliveryToRetry of DeliveryOrchestrator {
+  property orchestratorId: String;
+}
+
+role RetryRole mediated-by DeliveryToRetry of RetryScheduler {
+  property schedulerId: String;
+}
+
+relator DeliveryToRetry mediates (OrchestratorRoleDelivery, RetryRole) {
+  identity: bridgeId;
+  property bridgeId: String;
+  property relayCount: Integer;
+
+  invariants {
+    self.bridgeId <> null;
+    self.relayCount >= 0;
+  }
+}
+
+role SchedulerRole mediated-by RetryToAlert of RetryScheduler {
+  property schedulerId: String;
+}
+
+role AlertRole mediated-by RetryToAlert of AlertManager {
+  property alertManagerId: String;
+}
+
+relator RetryToAlert mediates (SchedulerRole, AlertRole) {
+  identity: bridgeId;
+  property bridgeId: String;
+  property escalationCount: Integer;
+
+  invariants {
+    self.bridgeId <> null;
+    self.escalationCount >= 0;
+  }
+}
+
+// ─── Mediation Relations ─────────────────────────────────────────────
+// These bind each relator to its roles. The role name in the
+// 'from' clause matches the role type declared in 'mediates'.
+
+relation r1: <<mediation>> from IngestionToDelivery [1] to IngestorRole [1];
+relation r2: <<mediation>> from IngestionToDelivery [1] to OrchestratorRoleIngestion [1];
+relation r3: <<mediation>> from DeliveryToRetry [1] to OrchestratorRoleDelivery [1];
+relation r4: <<mediation>> from DeliveryToRetry [1] to RetryRole [1];
+relation r5: <<mediation>> from RetryToAlert [1] to SchedulerRole [1];
+relation r6: <<mediation>> from RetryToAlert [1] to AlertRole [1];
+
+// ─── Data Flow (Happening) ───────────────────────────────────────────
+
+happening NotificationDispatchFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property componentSteps: String;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+    self.componentSteps <> null;
+  }
+}

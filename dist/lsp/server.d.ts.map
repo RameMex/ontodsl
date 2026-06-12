@@ -1,0 +1,1 @@
+{"version":3,"file":"server.d.ts","sourceRoot":"","sources":["../../src/lsp/server.ts"],"names":[],"mappings":";AACA;;;;;;;;;;;;;;;;;;;;;;;;;;;;;GA6BG;AAEH,OAAO,EAEL,aAAa,EAQb,UAAU,EASX,MAAM,+BAA+B,CAAC;AACvC,OAAO,EAAE,YAAY,EAAE,MAAM,oCAAoC,CAAC;AAqBlE;;;;;;;;;;;GAWG;AACH,wBAAgB,SAAS,CAAC,UAAU,EAAE,UAAU,GAAG;IACjD,SAAS,EAAE,aAAa,CAAC,YAAY,CAAC,CAAC;CACxC,CA0KA"}

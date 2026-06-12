@@ -1,0 +1,649 @@
+schema "onto/0.1";
+namespace ride_dispatch_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// ─── Roles ────────────────────────────────────────────────────────
+role DispatchEngineEndpoint mediated-by EngineToRideRegistryInterface of DispatchEngine {
+  property engineId: String;
+}
+
+role RideRegistryEndpoint mediated-by EngineToRideRegistryInterface of RideRegistry {
+  property registryId: String;
+}
+
+role EngineToOfferEndpoint mediated-by EngineToOfferInterface of DispatchEngine {
+  property engineId: String;
+}
+
+role OfferEndpoint mediated-by EngineToOfferInterface of OfferService {
+  property offerServiceId: String;
+}
+
+role EngineToDriverStateEndpoint mediated-by EngineToDriverStateInterface of DispatchEngine {
+  property engineId: String;
+}
+
+role DriverStateEndpoint mediated-by EngineToDriverStateInterface of DriverStateManager {
+  property driverStateId: String;
+}
+
+role EngineToLatencyEndpoint mediated-by EngineToLatencyInterface of DispatchEngine {
+  property engineId: String;
+}
+
+role LatencyEndpoint mediated-by EngineToLatencyInterface of LatencyMonitor {
+  property latencyMonitorId: String;
+}
+
+role EngineToGeoEndpoint mediated-by EngineToGeoInterface of DispatchEngine {
+  property engineId: String;
+}
+
+role GeoEndpoint mediated-by EngineToGeoInterface of GeoSpatialIndex {
+  property geoId: String;
+}
+
+role AppToEngineEndpoint mediated-by AppToEngineInterface of PassengerApp {
+  property passengerAppId: String;
+}
+
+role EngineToAppEndpoint mediated-by AppToEngineInterface of DispatchEngine {
+  property engineId: String;
+}
+
+role DriverAppToOfferEndpoint mediated-by DriverAppToOfferInterface of DriverApp {
+  property driverAppId: String;
+}
+
+role OfferToDriverAppEndpoint mediated-by DriverAppToOfferInterface of OfferService {
+  property offerServiceId: String;
+}
+
+role DriverAppToStateEndpoint mediated-by DriverAppToStateInterface of DriverApp {
+  property driverAppId: String;
+}
+
+role StateToDriverAppEndpoint mediated-by DriverAppToStateInterface of DriverStateManager {
+  property driverStateId: String;
+}
+
+// ─── Component 1: PassengerApp ──────────────────────────────────
+kind PassengerApp {
+  identity: passengerAppId;
+  property passengerAppId: String;
+  property rideRequestSubmitted: Boolean;
+  property requestPickupLatitude: Real;
+  property requestPickupLongitude: Real;
+  property requestDestinationLatitude: Real;
+  property requestDestinationLongitude: Real;
+  property requestPreferences: String;
+  property currentStatus: String;
+
+  invariants {
+    self.passengerAppId <> null;
+    self.currentStatus = 'idle' or self.currentStatus = 'submitted' or self.currentStatus = 'matching' or self.currentStatus = 'matched' or self.currentStatus = 'completed';
+  }
+
+  event submitRideRequest(pickupLat: Real, pickupLng: Real, destLat: Real, destLng: Real, preferences: String)
+    refines ride_dispatch_requirements::RideDispatchSystem.attemptFirstOffer {
+    pre: not self.rideRequestSubmitted;
+    pre: pickupLat >= -90.0;
+    pre: pickupLat <= 90.0;
+    pre: pickupLng >= -180.0;
+    pre: pickupLng <= 180.0;
+    pre: destLat >= -90.0;
+    pre: destLat <= 90.0;
+    pre: destLng >= -180.0;
+    pre: destLng <= 180.0;
+    post: self.rideRequestSubmitted = true;
+    post: self.requestPickupLatitude = pickupLat;
+    post: self.requestPickupLongitude = pickupLng;
+    post: self.requestDestinationLatitude = destLat;
+    post: self.requestDestinationLongitude = destLng;
+    post: self.requestPreferences = preferences;
+    post: self.currentStatus = 'submitted';
+    modifies: self.rideRequestSubmitted,
+              self.requestPickupLatitude,
+              self.requestPickupLongitude,
+              self.requestDestinationLatitude,
+              self.requestDestinationLongitude,
+              self.requestPreferences,
+              self.currentStatus;
+  }
+
+  event notifyMatchingComplete(assignedDriverId: String) {
+    pre: self.currentStatus = 'matching';
+    pre: assignedDriverId <> null;
+    post: self.currentStatus = 'matched';
+    modifies: self.currentStatus;
+  }
+
+  event notifyRideCompleted() {
+    pre: self.currentStatus = 'matched';
+    post: self.currentStatus = 'completed';
+    modifies: self.currentStatus;
+  }
+}
+
+// ─── Component 2: DriverApp ─────────────────────────────────────
+kind DriverApp {
+  identity: driverAppId;
+  property driverAppId: String;
+  property driverId: String;
+  property currentLatitude: Real;
+  property currentLongitude: Real;
+  property state: String;
+  property pendingOfferId: String;
+  property pendingOfferRideId: String;
+
+  invariants {
+    self.driverAppId <> null;
+    self.driverId <> null;
+    self.state = 'idle' or self.state = 'assigned' or self.state = 'en_route' or self.state = 'completed';
+  }
+
+  event updatePosition(lat: Real, lng: Real) {
+    pre: lat >= -90.0;
+    pre: lat <= 90.0;
+    pre: lng >= -180.0;
+    pre: lng <= 180.0;
+    post: self.currentLatitude = lat;
+    post: self.currentLongitude = lng;
+    modifies: self.currentLatitude, self.currentLongitude;
+  }
+
+  event acceptOffer(offerId: String, rideId: String)
+    refines ride_dispatch_requirements::RideDispatchSystem.assignDriver {
+    pre: offerId <> null;
+    pre: rideId <> null;
+    pre: self.state = 'idle';
+    pre: self.pendingOfferId = offerId;
+    post: self.state = 'assigned';
+    post: self.pendingOfferId = '';
+    post: self.pendingOfferRideId = rideId;
+    modifies: self.state, self.pendingOfferId, self.pendingOfferRideId;
+  }
+
+  event declineOffer(offerId: String) {
+    pre: offerId <> null;
+    pre: self.state = 'idle';
+    pre: self.pendingOfferId = offerId;
+    post: self.pendingOfferId = '';
+    modifies: self.pendingOfferId;
+  }
+
+  event beginRide()
+    refines ride_dispatch_requirements::RideDispatchSystem.driverEnRoute {
+    pre: self.state = 'assigned';
+    post: self.state = 'en_route';
+    modifies: self.state;
+  }
+
+  event completeRide()
+    refines ride_dispatch_requirements::RideDispatchSystem.completeRide {
+    pre: self.state = 'en_route';
+    post: self.state = 'completed';
+    modifies: self.state;
+  }
+
+  event returnToIdle()
+    refines ride_dispatch_requirements::RideDispatchSystem.returnToIdle {
+    pre: self.state = 'completed';
+    post: self.state = 'idle';
+    modifies: self.state;
+  }
+}
+
+// ─── Component 3: DispatchEngine ────────────────────────────────
+kind DispatchEngine {
+  identity: engineId;
+  property engineId: String;
+  property requestId: String;
+  property currentSearchRadiusKm: Real;
+  property offerAttempts: Integer;
+  property isProcessing: Boolean;
+  property timeSinceRequestMs: Integer;
+
+  invariants {
+    self.engineId <> null;
+    self.currentSearchRadiusKm = 2.0 or self.currentSearchRadiusKm = 5.0;
+    self.offerAttempts >= 0;
+    self.timeSinceRequestMs >= 0;
+  }
+
+  event handleRideRequest(requestId: String, pickupLat: Real, pickupLng: Real)
+    refines ride_dispatch_requirements::RideDispatchSystem.attemptFirstOffer {
+    pre: requestId <> null;
+    pre: not self.isProcessing;
+    post: self.requestId = requestId;
+    post: self.currentSearchRadiusKm = 2.0;
+    post: self.offerAttempts = 0;
+    post: self.isProcessing = true;
+    post: self.timeSinceRequestMs = 0;
+    modifies: self.requestId,
+              self.currentSearchRadiusKm,
+              self.offerAttempts,
+              self.isProcessing,
+              self.timeSinceRequestMs;
+  }
+
+  event rankAndOffer(requestId: String) {
+    pre: self.isProcessing;
+    pre: self.offerAttempts < 10;
+    post: self.offerAttempts = self.offerAttempts@pre + 1;
+    modifies: self.offerAttempts;
+  }
+
+  event onOfferAccepted(driverId: String, requestId: String)
+    refines ride_dispatch_requirements::RideDispatchSystem.assignDriver {
+    pre: driverId <> null;
+    pre: requestId <> null;
+    pre: self.isProcessing;
+    post: self.isProcessing = false;
+    modifies: self.isProcessing;
+  }
+
+  event onOfferExpired(driverId: String, requestId: String)
+    refines ride_dispatch_requirements::RideDispatchSystem.expireOffer {
+    pre: driverId <> null;
+    pre: requestId <> null;
+    pre: self.isProcessing;
+    post: self.offerAttempts = self.offerAttempts@pre + 1;
+    modifies: self.offerAttempts;
+  }
+
+  event escalateRadius()
+    refines ride_dispatch_requirements::RideDispatchSystem.escalateRadius {
+    pre: self.isProcessing;
+    pre: self.currentSearchRadiusKm = 2.0;
+    pre: self.timeSinceRequestMs > 30000;
+    post: self.currentSearchRadiusKm = 5.0;
+    modifies: self.currentSearchRadiusKm;
+  }
+
+  event cancelMatching(requestId: String) {
+    pre: self.isProcessing;
+    pre: requestId = self.requestId;
+    post: self.isProcessing = false;
+    post: self.requestId = '';
+    modifies: self.isProcessing, self.requestId;
+  }
+}
+
+// ─── Component 4: RideRegistry ──────────────────────────────────
+kind RideRegistry {
+  identity: registryId;
+  property registryId: String;
+  property rideRequestCount: Integer;
+  property completedRideCount: Integer;
+  property assignmentCount: Integer;
+
+  invariants {
+    self.registryId <> null;
+    self.rideRequestCount >= 0;
+    self.completedRideCount >= 0;
+    self.assignmentCount >= 0;
+    self.rideRequestCount >= self.completedRideCount;
+  }
+
+  event storeRideRequest() {
+    post: self.rideRequestCount = self.rideRequestCount@pre + 1;
+    modifies: self.rideRequestCount;
+  }
+
+  event createAssignment()
+    refines ride_dispatch_requirements::RideDispatchSystem.assignDriver {
+    post: self.assignmentCount = self.assignmentCount@pre + 1;
+    modifies: self.assignmentCount;
+  }
+
+  event completeRide(requestId: String)
+    refines ride_dispatch_requirements::RideDispatchSystem.completeRide {
+    pre: requestId <> null;
+    pre: self.completedRideCount < self.rideRequestCount;
+    post: self.completedRideCount = self.completedRideCount@pre + 1;
+    modifies: self.completedRideCount;
+  }
+}
+
+// ─── Component 5: DriverStateManager ───────────────────────────
+kind DriverStateManager {
+  identity: driverStateId;
+  property driverStateId: String;
+  property totalDrivers: Integer;
+  property idleDriverCount: Integer;
+  property assignedDriverCount: Integer;
+  property enRouteDriverCount: Integer;
+  property completedDriverCount: Integer;
+  property driverLock: Integer;
+
+  invariants {
+    self.driverStateId <> null;
+    self.driverLock = 0 or self.driverLock = 1;
+    self.idleDriverCount + self.assignedDriverCount + self.enRouteDriverCount + self.completedDriverCount = self.totalDrivers;
+  }
+
+  event transitionToAssigned(driverId: String)
+    refines ride_dispatch_requirements::RideDispatchSystem.assignDriver {
+    pre: driverId <> null;
+    pre: self.driverLock = 0;
+    pre: self.idleDriverCount > 0;
+    post: self.driverLock = 1;
+    modifies: self.driverLock;
+  }
+
+  event confirmAssigned(driverId: String) {
+    pre: driverId <> null;
+    pre: self.driverLock = 1;
+    post: self.idleDriverCount = self.idleDriverCount@pre - 1;
+    post: self.assignedDriverCount = self.assignedDriverCount@pre + 1;
+    post: self.driverLock = 0;
+    modifies: self.idleDriverCount, self.assignedDriverCount, self.driverLock;
+  }
+
+  event transitionToEnRoute(driverId: String)
+    refines ride_dispatch_requirements::RideDispatchSystem.driverEnRoute {
+    pre: driverId <> null;
+    pre: self.assignedDriverCount > 0;
+    post: self.assignedDriverCount = self.assignedDriverCount@pre - 1;
+    post: self.enRouteDriverCount = self.enRouteDriverCount@pre + 1;
+    modifies: self.assignedDriverCount, self.enRouteDriverCount;
+  }
+
+  event transitionToCompleted(driverId: String)
+    refines ride_dispatch_requirements::RideDispatchSystem.completeRide {
+    pre: driverId <> null;
+    pre: self.enRouteDriverCount > 0;
+    post: self.enRouteDriverCount = self.enRouteDriverCount@pre - 1;
+    post: self.completedDriverCount = self.completedDriverCount@pre + 1;
+    modifies: self.enRouteDriverCount, self.completedDriverCount;
+  }
+
+  event returnToIdlePool(driverId: String)
+    refines ride_dispatch_requirements::RideDispatchSystem.returnToIdle {
+    pre: driverId <> null;
+    pre: self.completedDriverCount > 0;
+    post: self.completedDriverCount = self.completedDriverCount@pre - 1;
+    post: self.idleDriverCount = self.idleDriverCount@pre + 1;
+    modifies: self.completedDriverCount, self.idleDriverCount;
+  }
+
+  event acquireLock(driverId: String, requestId: String)
+    refines ride_dispatch_formalization::RideDispatchSystemFormalized.acquireDriverLock {
+    pre: driverId <> null;
+    pre: requestId <> null;
+    pre: self.driverLock = 0;
+    post: self.driverLock = 1;
+    modifies: self.driverLock;
+  }
+
+  event releaseLock(driverId: String, requestId: String, wasSuccessful: Boolean)
+    refines ride_dispatch_formalization::RideDispatchSystemFormalized.releaseDriverLock {
+    pre: driverId <> null;
+    pre: requestId <> null;
+    pre: self.driverLock = 1;
+    post: self.driverLock = 0;
+    modifies: self.driverLock;
+  }
+
+  event rejectDoubleAssignment(driverId: String, requestId: String)
+    refines ride_dispatch_formalization::RideDispatchSystemFormalized.rejectDoubleAssignment {
+    pre: driverId <> null;
+    pre: requestId <> null;
+    pre: self.assignedDriverCount > 0 or self.enRouteDriverCount > 0;
+  }
+
+  event rejectStateSkip(driverId: String, fromState: String, toState: String)
+    refines ride_dispatch_formalization::RideDispatchSystemFormalized.rejectStateSkip {
+    pre: driverId <> null;
+    pre: fromState <> null;
+    pre: toState <> null;
+    pre: (fromState = 'idle' and toState = 'en_route') or
+         (fromState = 'idle' and toState = 'completed') or
+         (fromState = 'assigned' and toState = 'completed') or
+         (fromState = 'en_route' and toState = 'idle') or
+         (fromState = 'en_route' and toState = 'assigned') or
+         (fromState = 'completed' and toState = 'en_route') or
+         (fromState = 'completed' and toState = 'assigned');
+  }
+}
+
+// ─── Component 6: OfferService ──────────────────────────────────
+kind OfferService {
+  identity: offerServiceId;
+  property offerServiceId: String;
+  property activeOfferCount: Integer;
+  property expiredOfferCount: Integer;
+  property acceptedOfferCount: Integer;
+  property maxWaitDurationMs: Integer;
+
+  invariants {
+    self.offerServiceId <> null;
+    self.maxWaitDurationMs = 10000;
+    self.activeOfferCount >= 0;
+    self.expiredOfferCount >= 0;
+    self.acceptedOfferCount >= 0;
+  }
+
+  event createOffer(driverId: String, requestId: String, rideDesc: String) {
+    pre: driverId <> null;
+    pre: requestId <> null;
+    post: self.activeOfferCount = self.activeOfferCount@pre + 1;
+    modifies: self.activeOfferCount;
+  }
+
+  event acceptOffer(offerId: String)
+    refines ride_dispatch_requirements::RideDispatchSystem.assignDriver {
+    pre: offerId <> null;
+    pre: self.activeOfferCount > 0;
+    post: self.activeOfferCount = self.activeOfferCount@pre - 1;
+    post: self.acceptedOfferCount = self.acceptedOfferCount@pre + 1;
+    modifies: self.activeOfferCount, self.acceptedOfferCount;
+  }
+
+  event expireOffer(offerId: String)
+    refines ride_dispatch_requirements::RideDispatchSystem.expireOffer {
+    pre: offerId <> null;
+    pre: self.activeOfferCount > 0;
+    post: self.activeOfferCount = self.activeOfferCount@pre - 1;
+    post: self.expiredOfferCount = self.expiredOfferCount@pre + 1;
+    modifies: self.activeOfferCount, self.expiredOfferCount;
+  }
+
+  event rejectExcessiveLatency(timeSinceRequest: Real, requestId: String)
+    refines ride_dispatch_formalization::RideDispatchSystemFormalized.rejectExcessiveLatency {
+    pre: timeSinceRequest > 30.0;
+    pre: requestId <> null;
+  }
+}
+
+// ─── Component 7: LatencyMonitor ───────────────────────────────
+kind LatencyMonitor {
+  identity: latencyMonitorId;
+  property latencyMonitorId: String;
+  property requestStartTimeMs: Integer;
+  property firstOfferTimeMs: Integer;
+  property currentLatencyMs: Integer;
+  property maxLatencyBudgetMs: Integer;
+  property latencyBudgetExceeded: Boolean;
+
+  invariants {
+    self.latencyMonitorId <> null;
+    self.maxLatencyBudgetMs = 30000;
+    self.maxLatencyBudgetMs >= 0;
+  }
+
+  event startMonitoring(requestId: String, startTimeMs: Integer)
+    refines ride_dispatch_requirements::RideDispatchSystem.attemptFirstOffer {
+    pre: requestId <> null;
+    pre: startTimeMs >= 0;
+    post: self.requestStartTimeMs = startTimeMs;
+    post: self.firstOfferTimeMs = 0;
+    post: self.currentLatencyMs = 0;
+    post: self.latencyBudgetExceeded = false;
+    modifies: self.requestStartTimeMs,
+              self.firstOfferTimeMs,
+              self.currentLatencyMs,
+              self.latencyBudgetExceeded;
+  }
+
+  event recordFirstOffer(currentTimeMs: Integer) {
+    pre: currentTimeMs >= self.requestStartTimeMs;
+    post: self.firstOfferTimeMs = currentTimeMs;
+    post: self.currentLatencyMs = currentTimeMs - self.requestStartTimeMs;
+    modifies: self.firstOfferTimeMs, self.currentLatencyMs;
+  }
+
+  event checkLatency(currentTimeMs: Integer) {
+    pre: currentTimeMs >= 0;
+    post: self.currentLatencyMs = currentTimeMs - self.requestStartTimeMs;
+    post: if (currentTimeMs - self.requestStartTimeMs) > self.maxLatencyBudgetMs then self.latencyBudgetExceeded = true else self.latencyBudgetExceeded = false endif;
+    modifies: self.currentLatencyMs, self.latencyBudgetExceeded;
+  }
+
+  event resetMonitor() {
+    post: self.requestStartTimeMs = 0;
+    post: self.firstOfferTimeMs = 0;
+    post: self.currentLatencyMs = 0;
+    post: self.latencyBudgetExceeded = false;
+    modifies: self.requestStartTimeMs,
+              self.firstOfferTimeMs,
+              self.currentLatencyMs,
+              self.latencyBudgetExceeded;
+  }
+}
+
+// ─── Component 8: GeoSpatialIndex ──────────────────────────────
+kind GeoSpatialIndex {
+  identity: geoId;
+  property geoId: String;
+  property driverCount: Integer;
+  property currentSearchRadiusKm: Real;
+  property centerLatitude: Real;
+  property centerLongitude: Real;
+  property lastQueryResultCount: Integer;
+
+  invariants {
+    self.geoId <> null;
+    self.currentSearchRadiusKm = 2.0 or self.currentSearchRadiusKm = 5.0;
+    self.currentSearchRadiusKm > 0.0;
+    self.driverCount >= 0;
+    self.lastQueryResultCount >= 0;
+  }
+
+  event indexDriver() {
+    post: self.driverCount = self.driverCount@pre + 1;
+    modifies: self.driverCount;
+  }
+
+  event queryNearbyDrivers(centerLat: Real, centerLng: Real, radiusKm: Real) {
+    pre: centerLat >= -90.0;
+    pre: centerLat <= 90.0;
+    pre: centerLng >= -180.0;
+    pre: centerLng <= 180.0;
+    pre: radiusKm > 0.0;
+    pre: radiusKm = 2.0 or radiusKm = 5.0;
+    post: self.centerLatitude = centerLat;
+    post: self.centerLongitude = centerLng;
+    post: self.currentSearchRadiusKm = radiusKm;
+    post: self.lastQueryResultCount = self.driverCount;
+    modifies: self.centerLatitude, self.centerLongitude, self.currentSearchRadiusKm, self.lastQueryResultCount;
+  }
+}
+
+// ─── Interfaces (Relators) ──────────────────────────────────────
+relator EngineToRideRegistryInterface mediates (DispatchEngineEndpoint, RideRegistryEndpoint) {
+  identity: interfaceId;
+  property interfaceId: String;
+  property lastRequestStoreTime: Integer;
+  invariants {
+    self.interfaceId <> null;
+    self.lastRequestStoreTime >= 0;
+  }
+}
+
+relator EngineToOfferInterface mediates (EngineToOfferEndpoint, OfferEndpoint) {
+  identity: interfaceId;
+  property interfaceId: String;
+  property lastOfferTime: Integer;
+  invariants {
+    self.interfaceId <> null;
+    self.lastOfferTime >= 0;
+  }
+}
+
+relator EngineToDriverStateInterface mediates (EngineToDriverStateEndpoint, DriverStateEndpoint) {
+  identity: interfaceId;
+  property interfaceId: String;
+  property lastStateChangeTime: Integer;
+  invariants {
+    self.interfaceId <> null;
+    self.lastStateChangeTime >= 0;
+  }
+}
+
+relator EngineToLatencyInterface mediates (EngineToLatencyEndpoint, LatencyEndpoint) {
+  identity: interfaceId;
+  property interfaceId: String;
+  property lastLatencyCheckTime: Integer;
+  invariants {
+    self.interfaceId <> null;
+    self.lastLatencyCheckTime >= 0;
+  }
+}
+
+relator EngineToGeoInterface mediates (EngineToGeoEndpoint, GeoEndpoint) {
+  identity: interfaceId;
+  property interfaceId: String;
+  property lastGeoQueryTime: Integer;
+  invariants {
+    self.interfaceId <> null;
+    self.lastGeoQueryTime >= 0;
+  }
+}
+
+relator AppToEngineInterface mediates (AppToEngineEndpoint, EngineToAppEndpoint) {
+  identity: interfaceId;
+  property interfaceId: String;
+  property lastRequestTime: Integer;
+  invariants {
+    self.interfaceId <> null;
+    self.lastRequestTime >= 0;
+  }
+}
+
+relator DriverAppToOfferInterface mediates (DriverAppToOfferEndpoint, OfferToDriverAppEndpoint) {
+  identity: interfaceId;
+  property interfaceId: String;
+  property lastOfferResponseTime: Integer;
+  invariants {
+    self.interfaceId <> null;
+    self.lastOfferResponseTime >= 0;
+  }
+}
+
+relator DriverAppToStateInterface mediates (DriverAppToStateEndpoint, StateToDriverAppEndpoint) {
+  identity: interfaceId;
+  property interfaceId: String;
+  property lastStateSyncTime: Integer;
+  invariants {
+    self.interfaceId <> null;
+    self.lastStateSyncTime >= 0;
+  }
+}
+
+// ─── Explicit <<mediation>> Relations ───────────────────────────
+relation engineToRegistryMed: <<mediation>> from EngineToRideRegistryInterface [1] to DispatchEngineEndpoint [1];
+relation registryToEngineMed: <<mediation>> from EngineToRideRegistryInterface [1] to RideRegistryEndpoint [1];
+relation engineToOfferMed: <<mediation>> from EngineToOfferInterface [1] to EngineToOfferEndpoint [1];
+relation offerToEngineMed: <<mediation>> from EngineToOfferInterface [1] to OfferEndpoint [1];
+relation engineToStateMed: <<mediation>> from EngineToDriverStateInterface [1] to EngineToDriverStateEndpoint [1];
+relation stateToEngineMed: <<mediation>> from EngineToDriverStateInterface [1] to DriverStateEndpoint [1];
+relation engineToLatencyMed: <<mediation>> from EngineToLatencyInterface [1] to EngineToLatencyEndpoint [1];
+relation latencyToEngineMed: <<mediation>> from EngineToLatencyInterface [1] to LatencyEndpoint [1];
+relation engineToGeoMed: <<mediation>> from EngineToGeoInterface [1] to EngineToGeoEndpoint [1];
+relation geoToEngineMed: <<mediation>> from EngineToGeoInterface [1] to GeoEndpoint [1];
+relation appToEngineMed: <<mediation>> from AppToEngineInterface [1] to AppToEngineEndpoint [1];
+relation engineToAppMed: <<mediation>> from AppToEngineInterface [1] to EngineToAppEndpoint [1];

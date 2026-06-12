@@ -1,0 +1,516 @@
+schema "onto/0.1";
+namespace drone_delivery;
+
+// ─── Non-sortal umbrella (Phase 3 Category) ─────────────────────────────
+
+// Category: rigid non-sortal that groups multiple Kinds. Does NOT supply
+// identity — instances inherit identity from the Kind side of their
+// lineage. Useful for shared invariants across otherwise unrelated sortals.
+category PhysicalEntity {
+  property weightKg: Real;
+
+  invariants {
+    self.weightKg >= 0;
+  }
+}
+
+// Mixin: semi-rigid non-sortal. Some bearers are necessarily trackable
+// (a delivery drone), others only contingently (a loaner battery). Mixins
+// don't declare identity either.
+mixin Trackable {
+  property gpsCoords: String;
+}
+
+// ─── Physical kinds ──────────────────────────────────────────────────────
+
+// Customer: identity by email. Modeled as a physical agent in UFO-C sense.
+//
+// Phase 7 upgrade: this was `kind Customer` in Phase 2-6; the modelling
+// intent was already "agentive endurant" but we had no stereotype for
+// it. Now we do — `agent` makes the UFO-C commitment to it explicit
+// (the intent is preserved; generators produce the same identity code).
+agent Customer {
+  identity: email;
+
+  property email: String;
+  property name: String;
+  property address: String;
+
+  invariants {
+    self.email <> null;
+    self.name <> null;
+  }
+}
+
+// Package: the physical item being delivered. Identity by tracking number.
+// Specializes PhysicalEntity (rigid -> rigid; non-sortal parent is fine).
+kind Package specializes PhysicalEntity {
+  identity: trackingNumber;
+
+  property trackingNumber: String;
+
+  invariants {
+    self.weightKg > 0;
+  }
+}
+
+// BatteryPack: swappable energy source with its own identity.
+kind BatteryPack specializes PhysicalEntity {
+  identity: serialNumber;
+
+  property serialNumber: String;
+  property chargeLevel: Real;
+  property capacity: Real;
+
+  invariants {
+    self.chargeLevel >= 0;
+    self.chargeLevel <= self.capacity;
+    self.capacity > 0;
+  }
+
+  event consume(amount: Real) {
+    pre:  amount > 0;
+    pre:  self.chargeLevel >= amount;
+    post: self.chargeLevel = self.chargeLevel@pre - amount;
+    modifies: self.chargeLevel;
+  }
+
+  query isCritical(): Boolean {
+    body: self.chargeLevel / self.capacity < 0.15;
+  }
+}
+
+// Drone: the autonomous aerial vehicle. Identity by serial number.
+// Rigid sortal — a drone stays the same drone across missions, battery
+// swaps, and phase transitions. Specializes the PhysicalEntity category.
+kind Drone specializes PhysicalEntity {
+  identity: serialNumber;
+
+  property serialNumber: String;
+  property maxPayload: Real;
+  property battery: BatteryPack;
+  // Phase 5: a fleet-grade drone carries several spare battery packs
+  // alongside the primary `battery`. Modeled as a Set<BatteryPack> so
+  // OCL collection operators can reason about them.
+  property spareBatteries: Set<BatteryPack>;
+
+  invariants {
+    self.maxPayload > 0;
+    self.battery <> null;
+    self.spareBatteries->forAll(b | b.chargeLevel >= 0);
+  }
+
+  // Phase 5 note on the last invariant above: the Z3 LSP verifier
+  // leaves `forAll`-bearing clauses as W29/W30 because universal
+  // quantification over a collection isn't in the decidable fragment.
+
+  // Swap the battery pack. The drone keeps its identity across this event
+  // (Kind is rigid); only the battery reference and its residual charge
+  // change.
+  event swapBattery(newBattery: BatteryPack) {
+    pre:  newBattery <> null;
+    pre:  newBattery.chargeLevel > 0;
+    post: self.battery = newBattery;
+    modifies: self.battery;
+  }
+}
+
+// ─── Quantities and collectives (Phase 3) ───────────────────────────────
+
+// Quantity: rigid material continuum. Has identity (homeomeric bulk
+// material — you can't chop it into identity-bearing subparts).
+quantity Airframe {
+  identity: frameId;
+
+  property frameId: String;
+  property materialGradeKgPerMm3: Real;
+}
+
+// Sensor: a Kind so that a SensorSuite can collect instances of it.
+kind Sensor {
+  identity: sensorId;
+
+  property sensorId: String;
+  property model: String;
+}
+
+// Collective: rigid sortal whose identity is supplied by its membership.
+// Homeomeric — every member shares a single type (Sensor here).
+collective SensorSuite of Sensor {
+  identity: suiteId;
+
+  property suiteId: String;
+
+  invariants {
+    self.suiteId <> null;
+  }
+}
+
+// ─── Aspects (Phase 3: Mode and Quality) ────────────────────────────────
+
+// Quality: rigid aspect WITHOUT internal structure. Magnitude-shaped.
+// Bearer-dependent: identity is composed from (bearer, aspect-type) by
+// the code generator, so the DSL does not declare identity here.
+quality Temperature of Drone {
+  property celsius: Real;
+
+  invariants {
+    self.celsius > -50;
+    self.celsius < 80;
+  }
+}
+
+// Mode: rigid aspect WITH internal structure. Also bearer-dependent.
+// BatteryHealth captures an internal, structured aspect of a BatteryPack
+// that we reason about independently (cycle count, degradation curves)
+// but that cannot exist without its bearer.
+mode BatteryHealth of BatteryPack {
+  property cycleCount: Integer;
+  property healthFactor: Real;
+
+  invariants {
+    self.cycleCount >= 0;
+    self.healthFactor > 0;
+    self.healthFactor <= 1;
+  }
+}
+
+// ─── Relators ────────────────────────────────────────────────────────────
+
+// DeliveryContract mediates among Customer, Package, and Drone. As a relator
+// it has its own identity and carries commitments among its participants.
+relator DeliveryContract mediates (Customer, Package, Drone) {
+  identity: contractId;
+
+  property contractId: String;
+  property fulfilled: Boolean;
+
+  invariants {
+    self.contractId <> null;
+  }
+
+  event fulfill() {
+    pre:  self.fulfilled = false;
+    post: self.fulfilled = true;
+    modifies: self.fulfilled;
+  }
+}
+
+// FlightPlan: mediates between Drone and Package (the delivery route).
+// Separate relator from the contract so plan changes don't touch the contract.
+relator FlightPlan mediates (Drone, Package) {
+  identity: planId;
+
+  property planId: String;
+  property totalDistanceKm: Real;
+
+  invariants {
+    self.planId <> null;
+    self.totalDistanceKm > 0;
+  }
+}
+
+// ─── Roles ───────────────────────────────────────────────────────────────
+
+// Pilot is a role: anti-rigid, relationally dependent on a DeliveryContract,
+// with identity inherited from the underlying Customer (operator). The same
+// Customer can be a Pilot in one contract and not in another.
+role Pilot mediated-by DeliveryContract of Customer {
+  property licenseNumber: String;
+
+  invariants {
+    self.licenseNumber <> null;
+  }
+}
+
+// ─── Phase group ─────────────────────────────────────────────────────────
+
+// Phases of a Drone's operational lifecycle. Anti-rigid and intrinsic:
+// a drone passes through these without losing identity.
+phase-group FlightPhase of Drone {
+  phase Grounded;
+  phase TakingOff;
+  phase Flying;
+  phase Landing;
+  phase Charging;
+  phase Emergency;
+}
+
+// ─── Delivery specialization (subkind chain) ────────────────────────────
+
+subkind DeliveryDrone specializes Drone {
+  property maxDeliveryRadius: Real;
+  property currentContract: DeliveryContract;
+
+  invariants {
+    self.maxDeliveryRadius > 0;
+  }
+
+  // Assign a contract to this delivery drone. The contract must not yet
+  // be fulfilled. In Phase 3 `modifies: self.currentContract` checks out
+  // because it's declared directly on DeliveryDrone; `self.battery` would
+  // also be legal here thanks to inheritance-aware S13.
+  event assignContract(contract: DeliveryContract) {
+    pre:  contract.fulfilled = false;
+    pre:  self.currentContract = null;
+    post: self.currentContract = contract;
+    modifies: self.currentContract;
+  }
+
+  query hasActiveContract(): Boolean {
+    body: self.currentContract <> null;
+  }
+}
+
+// Phase 3: chain a subkind of a subkind. Express delivery adds its own
+// invariants and OVERRIDES the parent's swapBattery to tighten the
+// precondition.
+//
+// Phase 4 note: this override is DELIBERATELY non-Liskov — running the
+// opt-in Z3 verifier (`verifyLSPContracts(ast)`) on this file emits an
+// S29 diagnostic because `chargeLevel >= 0.8` rejects states the parent
+// accepts (e.g., chargeLevel = 0.5). The structural signature check
+// from Phase 3b still passes because the parameter list is identical.
+// Left as a canonical example of "LSP-unsound but structurally valid"
+// contracts — flip `>= 0.8` to `> 0` to make it LSP-compatible.
+subkind ExpressDeliveryDrone specializes DeliveryDrone {
+  property maxSpeedKmh: Real;
+
+  invariants {
+    self.maxSpeedKmh > 120;
+  }
+
+  // `override` is required because the parent declares swapBattery and
+  // we are redefining it. The structural signature (one parameter,
+  // named `newBattery`, of type BatteryPack) matches exactly.
+  //
+  // LSP correctness: this override strengthens the POST-condition (the
+  // ExpressDeliveryDrone guarantees the chosen battery has chargeLevel
+  // ≥ 0.8 after swap — a stronger guarantee than the parent's), and
+  // keeps the pre-condition unchanged. Strengthening pre-conditions
+  // is forbidden by S29; strengthening post-conditions is what
+  // covariance ALLOWS — clients of Drone.swapBattery can assume the
+  // parent's contract holds, and so they can assume the child's
+  // (stronger) contract holds, too.
+  override event swapBattery(newBattery: BatteryPack) {
+    pre:  newBattery <> null;
+    pre:  newBattery.chargeLevel > 0;
+    post: self.battery = newBattery;
+    post: self.battery.chargeLevel >= 0.8;
+    modifies: self.battery;
+  }
+}
+
+// ─── Phase 3.5 relations ────────────────────────────────────────────────
+//
+// Explicit OntoUML relations express taxonomic facts that would
+// otherwise be spread across multiple properties. The semantic
+// validator checks stereotype compatibility with the endpoints (S24)
+// and multiplicity validity (S25).
+
+// componentOf: a BatteryPack is a component of a Drone, and a Drone
+// has exactly one battery (multiplicity [1] on the target side).
+relation batteryPartOf: <<componentOf>> from BatteryPack [1..*] to Drone [1];
+
+// characterization: Temperature is an aspect of Drone. The target
+// MUST match the aspect's declared bearer — the validator enforces
+// that tie.
+relation droneTempChar: <<characterization>> from Temperature [1] to Drone [1];
+
+// mediation: DeliveryContract formally mediates between Customer,
+// Package, and Drone. This adds an explicit edge per participant so
+// downstream tooling can pick them up without re-parsing the relator's
+// `mediates (...)` clause.
+relation contractCustomerMed: <<mediation>> from DeliveryContract [1] to Customer [1];
+relation contractPackageMed: <<mediation>> from DeliveryContract [1] to Package [1];
+relation contractDroneMed: <<mediation>> from DeliveryContract [1] to Drone [1];
+
+// ─── Phase 6 perdurants (UFO-B happenings) ──────────────────────────────
+//
+// A `happening` is an OCCURRENT — a thing that unfolds in time, as
+// opposed to a Drone or Customer which endure AT times. UFO-B puts
+// these in a separate ontological category precisely because the
+// structural vocabulary that suits endurants (parts, properties,
+// bearers) doesn't carry over cleanly to things that have temporal
+// parts.
+//
+// In this example: the delivery mission as a whole, and the two
+// smaller occurrents that are part of it (takeoff and landing).
+// Allen's interval algebra (`before`, `meets`, `overlaps`, ...) is
+// scheduled for Phase 6.5; here we only express the type-level facts.
+
+happening DeliveryTrip {
+  identity: deliveryTripId;
+  property deliveryTripId: String;
+  property requestedAt: String;
+}
+
+happening Takeoff {
+  identity: takeoffId;
+  property takeoffId: String;
+}
+
+happening Landing {
+  identity: landingId;
+  property landingId: String;
+}
+
+// A Drone participates in a DeliveryTrip (endurant → Happening).
+relation droneInDelivery: <<participation>> from Drone [1] to DeliveryTrip [1];
+
+// The DeliveryContract also participates in its enactment. Relators
+// count as endurants for participation.
+relation contractInDelivery: <<participation>> from DeliveryContract [1] to DeliveryTrip [1];
+
+// A takeoff precedes a landing within the same trip (Happening →
+// Happening). `triggers` adds a causal commitment; `precedes` is the
+// weaker "A ends before B begins" ordering.
+relation takeoffThenLanding: <<precedes>> from Takeoff [1] to Landing [1];
+
+// ─── Phase 6.5 Allen interval-algebra ───────────────────────────────────
+//
+// Allen relations on Happening intervals. These can appear in two
+// places: as first-class structural facts via the <<relation>>
+// stereotypes, and inside OCL invariants as binary methods on
+// Happening-valued navigations.
+//
+// Important: because the DSL models intervals as integer difference
+// logic under the hood, Z3 can actually VERIFY contracts built on top
+// of Allen — `S29`/`S30` will fire on real Liskov violations between
+// Allen-using events, not just W29/W30.
+
+// Structural facts: takeoff meets the trip, landing finishes it.
+relation takeoffStartsTrip: <<starts>>   from Takeoff     [1] to DeliveryTrip [1];
+relation landingFinishesTrip: <<finishes>> from Landing   [1] to DeliveryTrip [1];
+
+// A refined happening that also specializes Takeoff — imagine the
+// pre-flight checks as a sub-happening "during" the takeoff window.
+happening PreflightCheck specializes Takeoff {
+  property passed: Boolean;
+}
+
+// Sample Allen-using OCL invariant: a FlightSchedule whose invariants
+// constrain the temporal ordering of the takeoff and landing it refers
+// to. Name kept distinct from the `FlightPlan` RELATOR above.
+happening FlightSchedule {
+  identity: scheduleId;
+  property scheduleId: String;
+  property takeoff: Takeoff;
+  property landing: Landing;
+  invariants {
+    self.takeoff.before(self.landing);
+  }
+}
+
+// ─── Phase 7 social layer (UFO-C) ───────────────────────────────────────
+//
+// Drone delivery is a textbook UFO-C scenario: a commercial agent (the
+// courier operating the drone) commits to a customer to fulfil a
+// particular delivery. The commitment is an entity in its own right —
+// breachable, fulfillable, auditable — distinct from the mechanical
+// fact that a drone flies from A to B.
+
+// Courier: the commercial agent that operates the drone fleet. Distinct
+// from Drone (the physical endurant) — a single Courier operates many
+// Drones, and only the Courier (not the Drone itself) can bear
+// commitments.
+agent Courier {
+  identity: courierId;
+  property courierId: String;
+  property legalName: String;
+}
+
+// The commitment: Courier owes Customer the delivery of a specific
+// package within an agreed window.
+//
+// Phase 7.5 upgrade: the commitment now carries a FORMAL PREDICATE —
+// a Boolean OCL clause that says what "being committed to" means in
+// verifiable terms. Here: the takeoff must occur before the landing,
+// and the landing must not be null. Generators can emit monitoring
+// code directly from this predicate; the Phase 7 `description` field
+// is kept as human-readable metadata alongside it.
+commitment DeliveryCommitment
+  debitor: Courier
+  creditor: Customer {
+    identity: commitmentId;
+    property commitmentId: String;
+    property description: String;
+    property agreedLatestDelivery: String;
+    property takeoff: Takeoff;
+    property landing: Landing;
+    predicate: self.takeoff.before(self.landing) and self.landing <> null;
+  }
+
+// Phase 7.75: a stricter express-tier commitment. Its predicate must
+// IMPLY the base commitment's — calling verifyCommitmentPredicates(ast)
+// proves the implication via Z3. `meets` is not stricter than `before`
+// (they're disjoint Allen relations), so a child that used `meets`
+// would fire S33. Here the child adds an extra conjunct on top of the
+// same `before`, which is monotonically stronger.
+commitment ExpressDeliveryCommitment specializes DeliveryCommitment
+  debitor: Courier
+  creditor: Customer {
+    predicate: self.takeoff.before(self.landing)
+             and self.landing <> null
+             and self.description <> null;
+  }
+
+// Structural fact: the courier COMMITS TO each of its customers. Less
+// specific than the DeliveryCommitment above — this is the generic
+// relational edge.
+relation courierCommitsToCustomer:
+  <<commitsTo>> from Courier [1] to Customer [1..*];
+
+// A successful Landing FULFILLS the DeliveryCommitment. This ties the
+// perdurant side to the social side: generators use this edge to
+// transition the commitment's lifecycle from pending to fulfilled.
+relation landingFulfillsDelivery:
+  <<fulfills>> from Landing [1] to DeliveryCommitment [1];
+
+// A dedicated "deadline missed" happening can VIOLATE the commitment.
+// We declare it here to show the <<violates>> relation; the predicate
+// that triggers this happening is out of DSL scope (runtime logic).
+happening DeadlineMissed {
+  identity: dmId;
+  property dmId: String;
+}
+
+relation deadlineMissedViolates:
+  <<violates>> from DeadlineMissed [1] to DeliveryCommitment [1];
+
+// ─── Phase 8 use-case ───────────────────────────────────────────────────
+//
+// A use-case stitches together everything the previous phases built.
+// The scenario "a customer receives a package by drone delivery" now
+// has a single declarative entry point that enumerates:
+//
+//   - participants (actors: the Customer and Courier agents; could
+//     also be Roles like Buyer/Seller)
+//   - the triggering occurrent (DeliveryTrip — the Happening that
+//     starts the scenario)
+//   - the happy-path outcome (DeliveryCommitment fulfilled)
+//   - the unhappy-path outcome (the same commitment violated)
+//
+// Downstream generators consume this to emit scaffolding for user
+// flows, acceptance tests, monitoring dashboards, or documentation.
+// The validator enforces S34/S35/S36: actors are Agents/Roles, the
+// trigger is a Happening/UseCase, outcomes are Commitments.
+//
+// The specialization matrix allows a use-case to refine either another
+// use-case (common) or a plain happening (rare but legal). Here we
+// leave this one unspecialized.
+
+use-case DeliverPackage
+  actors: (Customer, Courier)
+  trigger: DeliveryTrip
+  success: DeliveryCommitment
+  failure: DeliveryCommitment
+  {
+    identity: useCaseId;
+    property useCaseId: String;
+    property priority: Integer;
+    invariants {
+      self.priority >= 0;
+      self.priority <= 10;
+    }
+  }

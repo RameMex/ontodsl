@@ -1,0 +1,103 @@
+schema "onto/0.1";
+namespace ardupilot_sensors;
+
+// A specific range finder backend (e.g., a physical lidar unit or sensor slot).
+// Each backend is an identifiable entity with its own configuration and readings.
+kind RangeFinderBackend {
+  identity: backendId;
+
+  property backendId: String;
+  // Orientation enum (integer mapping):
+  // 0=Unknown, 1=Up, 2=Down, 3=Forward, 4=Back, 5=Left, 6=Right
+  property orientation: Integer;
+  property distance_cm: Real;
+  // Signal quality: 0 (worst) to 100 (best)
+  property signal_quality: Integer;
+  // Status enum (integer mapping):
+  // 0=NotConnected, 1=NoData, 2=OutOfRangeLow, 3=OutOfRangeHigh, 4=Good
+  property status: Integer;
+  property min_range_cm: Real;
+  property max_range_cm: Real;
+
+  invariants {
+    self.backendId <> null;
+    self.orientation >= 0;
+    self.orientation <= 6; // Assuming 7 distinct orientations (0 through 6)
+    self.distance_cm.isFinite();
+    self.distance_cm >= 0.0;
+    self.signal_quality >= 0;
+    self.signal_quality <= 100;
+    self.status >= 0;
+    self.status <= 4; // Assuming 5 distinct status values (0 through 4)
+    self.min_range_cm.isFinite();
+    self.min_range_cm >= 0.0;
+    self.max_range_cm.isFinite();
+    self.max_range_cm >= 0.0;
+    self.min_range_cm <= self.max_range_cm;
+  }
+
+  // Event to update the backend's readings and status.
+  // This is a helper event for the AP_RangeFinder to delegate updates.
+  event update_readings(newDistance: Real, newSignalQuality: Integer, newStatus: Integer) {
+    pre: newDistance.isFinite();
+    pre: newDistance >= 0.0;
+    pre: newSignalQuality >= 0 and newSignalQuality <= 100;
+    pre: newStatus >= 0 and newStatus <= 4;
+    post: self.distance_cm = newDistance;
+    post: self.signal_quality = newSignalQuality;
+    post: self.status = newStatus;
+    modifies: self.distance_cm, self.signal_quality, self.status;
+  }
+}
+
+// AP_RangeFinder represents the overall rangefinder subsystem,
+// which manages a fixed number of individual rangefinder backends.
+// It handles polling and provides aggregated queries.
+kind AP_RangeFinder {
+  identity: sensorSystemId;
+
+  property sensorSystemId: String;
+  // Fixed-size array for up to 10 backends. Each element represents a physical
+  // sensor slot. The 'status' property of each RangeFinderBackend instance
+  // indicates if it's connected/active.
+  property backends: Array<RangeFinderBackend, 10>;
+  // Timestamp in milliseconds of the last successful update.
+  property last_update_time_ms: Integer;
+
+  invariants {
+    self.sensorSystemId <> null;
+    self.last_update_time_ms >= 0;
+    // All backend slots must contain valid RangeFinderBackend instances.
+    self.backends->forAll(b | b <> null);
+    // For any given orientation, at most one backend can be in a 'Good' status (4).
+    // This defines what a "primary backend" means for a given orientation.
+    self.backends->forAll(b_outer |
+      self.backends->select(b_inner | b_inner.orientation = b_outer.orientation and b_inner.status = 4)->size() <= 1
+    );
+  }
+
+  // Polls all (configured) backends for updated distance, quality, and status.
+  event update(current_time_ms: Integer) {
+    pre: current_time_ms >= 0;
+    post: self.last_update_time_ms = current_time_ms;
+    // The internal state of each backend in the array may have changed as a result of the update.
+    modifies: self.backends, self.last_update_time_ms;
+    effects: { HardwareRead, Telemetry };
+  }
+
+  // Queries the distance from a primary backend (the first one found) with the specified orientation.
+  // Due to OCL limitations (no `->any()`), this query cannot return the specific `distance_cm` value
+  // but acts as a boolean check for existence, returning a placeholder Real value.
+  query get_distance_cm(orientation: Integer): Real {
+    body: if self.backends->exists(b | b.orientation = orientation and b.status = 4) then
+            1.0 // Placeholder value: actual distance cannot be extracted with allowed OCL operators.
+          else
+            0.0 // Return 0.0 if no suitable backend found, or if orientation is out of bounds for any active sensor.
+          endif;
+  }
+
+  // Checks if any backend has recently reported valid data (i.e., has a 'Good' status).
+  query has_data(): Boolean {
+    body: self.backends->exists(b | b.status = 4); // At least one backend reports 'Good' status
+  }
+}

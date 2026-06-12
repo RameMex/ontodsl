@@ -1,0 +1,112 @@
+schema "onto/0.1";
+namespace meeting_scheduler_requirements;
+import "./discovery.onto";
+
+// ─── The System Kind (black box) ─────────────────────────────────────────
+kind MeetingSchedulerSystem specializes ConstraintRespecting, OutcomeReporting {
+  identity: systemId;
+  property systemId: String;
+  property status: String;           // 'IDLE' | 'COLLECTING' | 'PROPOSED' | 'CONFIRMED'
+  property dateRange: String;        // ISO range start-end
+  property participantsCount: Integer;
+  property exclusionsCount: Integer;
+  property preferencesCount: Integer;
+
+  // NFR: latency budget (max time before conflict reported)
+  property maxProposalLatencySecs: Integer;
+
+  invariants {
+    self.systemId <> null;
+    self.maxProposalLatencySecs > 0;
+    self.participantsCount >= 0;
+    self.exclusionsCount >= 0;
+    self.preferencesCount >= 0;
+    self.status = 'IDLE'
+      or self.status = 'COLLECTING'
+      or self.status = 'PROPOSED'
+      or self.status = 'CONFIRMED';
+  }
+
+  // FR-1: Initiator requests a meeting with a date range.
+  // Refines ScheduleWithinConstraints (GOAL-1) by starting the flow.
+  event requestMeeting(initiatorId: String, rangeStr: String): Boolean
+    refines meeting_scheduler_discovery::ScheduleWithinConstraints {
+    pre: self.status = 'IDLE';
+    pre: rangeStr <> null;
+    pre: initiatorId <> null;
+    post: self.status = 'COLLECTING';
+    post: self.dateRange = rangeStr;
+    post: self.participantsCount = 0;
+    post: self.exclusionsCount = 0;
+    post: self.preferencesCount = 0;
+    modifies: self.status, self.dateRange, self.participantsCount, self.exclusionsCount, self.preferencesCount;
+  }
+
+  // FR-2: Participant provides their constraints (exclusion set + optional preference set).
+  // Refines AcceptConstraintUpdates (GOAL-3b).
+  event submitConstraints(participantId: String, excludeDatesCount: Integer, preferDatesCount: Integer)
+    refines meeting_scheduler_discovery::AcceptConstraintUpdates {
+    pre: self.status = 'COLLECTING';
+    pre: participantId <> null;
+    pre: excludeDatesCount >= 0;
+    pre: preferDatesCount >= 0;
+    post: self.participantsCount = self.participantsCount@pre + 1;
+    post: self.exclusionsCount = self.exclusionsCount@pre + excludeDatesCount;
+    post: self.preferencesCount = self.preferencesCount@pre + preferDatesCount;
+    modifies: self.participantsCount, self.exclusionsCount, self.preferencesCount;
+  }
+
+  // FR-3: System proposes a date that respects all constraints.
+  // Refines ScheduleWithinConstraints (GOAL-1) and ConflictReporting (GOAL-2).
+  event proposeDate(dateProposed: String): Boolean
+    refines meeting_scheduler_discovery::ScheduleWithinConstraints,
+            meeting_scheduler_discovery::ConflictReporting {
+    pre: self.status = 'COLLECTING';
+    pre: self.participantsCount > 0;
+    post: self.status = 'PROPOSED';
+    post: dateProposed <> null implies (
+            // result date is within range (range is stored as self.dateRange)
+            // this is a placeholder — actual OCL would parse the range string
+            true
+          );
+    post: dateProposed = null implies (
+            // conflict case: no date works for everyone
+            self.participantsCount > self.exclusionsCount
+          );
+    modifies: self.status;
+  }
+
+  // FR-4: Initiator confirms a proposed date.
+  // Refines NotifyOnConfirmation (GOAL-3a) and ScheduleWithinConstraints.
+  event confirmMeeting(proposedDate: String): Boolean
+    refines meeting_scheduler_discovery::NotifyOnConfirmation,
+            meeting_scheduler_discovery::ScheduleWithinConstraints {
+    pre: self.status = 'PROPOSED';
+    pre: proposedDate <> null;
+    post: self.status = 'CONFIRMED';
+    modifies: self.status;
+  }
+
+  // FR-5: Conflict reported to initiator when no date works.
+  // Refines ConflictReporting (GOAL-2).
+  event reportConflict(): Boolean
+    refines meeting_scheduler_discovery::ConflictReporting {
+    pre: self.status = 'PROPOSED';
+    pre: self.participantsCount > self.exclusionsCount;
+    post: self.status = 'IDLE';  // cycle back for renegotiation
+    modifies: self.status;
+  }
+
+  // FR-6: Participant updates constraints while meeting is open.
+  // Refines AcceptConstraintUpdates (GOAL-3b).
+  event updateConstraints(participantId: String, newExcludeDatesCount: Integer, newPreferDatesCount: Integer)
+    refines meeting_scheduler_discovery::AcceptConstraintUpdates {
+    pre: self.status = 'COLLECTING' or self.status = 'PROPOSED';
+    pre: participantId <> null;
+    pre: newExcludeDatesCount >= 0;
+    pre: newPreferDatesCount >= 0;
+    post: self.exclusionsCount = self.exclusionsCount@pre - (self.exclusionsCount@pre - newExcludeDatesCount);
+    post: self.preferencesCount = self.preferencesCount@pre - (self.preferencesCount@pre - newPreferDatesCount);
+    modifies: self.exclusionsCount, self.preferencesCount;
+  }
+}

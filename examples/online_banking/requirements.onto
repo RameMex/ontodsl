@@ -1,0 +1,298 @@
+schema "onto/0.1";
+namespace online_banking_requirements;
+import "./discovery.onto";
+
+// =====================================================================
+// Requirements: Online Banking Transaction Processor
+//
+// The system as a black box. Every functional requirement is an event
+// on OnlineBankingSystem. Pre/post contracts are EARS-style and
+// machine-checkable via Z3. Every event that discharges a discovery
+// commitment carries a structured 'refines:' clause.
+//
+// Properties on the system kind represent observable black-box state:
+// running balances, transfer lifecycle state, journal presence, and
+// latency bounds. Internal implementation is NOT referenced.
+// =====================================================================
+
+// ─── System Kind ─────────────────────────────────────────────────────────
+
+// OnlineBankingSystem specializes the constraint-goal categories
+// declared in discovery so all category invariants are inherited.
+// A 'kind' (not 'subkind') is used so that multi-parent category
+// specialization is legal (S21/S22).
+//
+// NOTE: The discovery categories use member-quantified bearer bindings
+// (bearer: Account, bearer: Transfer, etc.). The system kind carries
+// the analogous properties directly and its invariants imply the
+// category predicates — O3 will verify the entailment.
+kind OnlineBankingSystem {
+
+  identity: systemId;
+
+  // ── System identity ──────────────────────────────────────────────
+  property systemId: String;
+
+  // ── Observable account state ─────────────────────────────────────
+  property sourceBalance: Real;
+  property destinationBalance: Real;
+
+  // ── Transfer lifecycle state ─────────────────────────────────────
+  // Valid values: 'IDLE' | 'PENDING' | 'COMPLETED' | 'ROLLED_BACK'
+  property transferState: String;
+  property currentTransferId: String;
+  property currentAmount: Real;
+
+  // ── Journal presence flag ─────────────────────────────────────────
+  // True iff a journal entry has been written for the current transfer
+  // and was written before any customer notification was issued.
+  property journalWritten: Boolean;
+
+  // ── Notification flag ─────────────────────────────────────────────
+  // True iff the customer has been notified of the outcome of the
+  // current transfer.
+  property customerNotified: Boolean;
+
+  // ── Recovery snapshot (balances captured at PENDING entry) ────────
+  property pendingSourceBalance: Real;
+  property pendingDestinationBalance: Real;
+
+  // ── NFR: bounded latency (GOAL-4) ────────────────────────────────
+  // Maximum seconds a transfer may remain PENDING.
+  // Invariant enforces the 30-second cap from BoundedLatencyCommitment.
+  property maxResolutionSeconds: Integer;
+
+  // ─── System-wide invariants ──────────────────────────────────────
+
+  invariants {
+    self.systemId <> null;
+    self.sourceBalance >= 0.0;
+    self.destinationBalance >= 0.0;
+    self.currentAmount >= 0.0;
+    self.transferState = 'IDLE'
+      or self.transferState = 'PENDING'
+      or self.transferState = 'COMPLETED'
+      or self.transferState = 'ROLLED_BACK';
+    // NFR: latency cap — discharges BoundedLatencyCommitment predicate
+    self.maxResolutionSeconds <= 30;
+    // GOAL-3 structural guard: notification may never precede journal
+    (self.customerNotified = true) implies (self.journalWritten = true);
+  }
+
+  // ===================================================================
+  // FR-1: Initiate Transfer
+  // ===================================================================
+  // Validates input, records both balances as a recovery snapshot, and
+  // moves the transfer into PENDING state. No money has moved yet —
+  // the pending state is the atomicity anchor (GOAL-1).
+  //
+  // Refines: AtomicTransferCommitment — post guarantees the transfer
+  // is in the well-defined PENDING state, never a partial mid-flight
+  // state.
+  // ===================================================================
+  event initiateTransfer(transferId: String, amount: Real)
+    refines online_banking_discovery::AtomicTransferCommitment {
+
+    pre: self.transferState = 'IDLE';
+    pre: transferId <> null;
+    pre: amount > 0.0;
+    // GOAL-2: source must have sufficient funds before we begin
+    pre: self.sourceBalance >= amount;
+
+    post: self.transferState = 'PENDING';
+    post: self.currentTransferId = transferId;
+    post: self.currentAmount = amount;
+    // Snapshot balances for crash-recovery (GOAL-1)
+    post: self.pendingSourceBalance = self.sourceBalance@pre;
+    post: self.pendingDestinationBalance = self.destinationBalance@pre;
+    post: self.journalWritten = false;
+    post: self.customerNotified = false;
+
+    modifies:
+      self.transferState,
+      self.currentTransferId,
+      self.currentAmount,
+      self.pendingSourceBalance,
+      self.pendingDestinationBalance,
+      self.journalWritten,
+      self.customerNotified;
+  }
+
+  // ===================================================================
+  // FR-2: Execute Transfer (debit + credit atomically)
+  // ===================================================================
+  // Applies the debit to the source and the credit to the destination
+  // in a single state transition. There is NO intermediate state where
+  // one side has moved and the other has not — the two balance changes
+  // are a single post-condition conjunction (GOAL-1, GOAL-2).
+  //
+  // Refines: AtomicTransferCommitment (single-step debit+credit),
+  //          NoOverdraftCommitment    (post source balance >= 0).
+  // ===================================================================
+  event executeTransfer()
+    refines online_banking_discovery::AtomicTransferCommitment,
+            online_banking_discovery::NoOverdraftCommitment {
+
+    pre: self.transferState = 'PENDING';
+    pre: self.currentAmount > 0.0;
+    // Re-assert no-overdraft at execution time
+    pre: self.sourceBalance >= self.currentAmount;
+
+    // Both balances change atomically — no single-side intermediate.
+    post: self.sourceBalance = self.sourceBalance@pre - self.currentAmount;
+    post: self.destinationBalance = self.destinationBalance@pre + self.currentAmount;
+    // GOAL-2: source balance never goes below zero
+    post: self.sourceBalance >= 0.0;
+    // State stays PENDING until journal is written (FR-3 follows)
+    post: self.transferState = 'PENDING';
+
+    modifies:
+      self.sourceBalance,
+      self.destinationBalance;
+  }
+
+  // ===================================================================
+  // FR-3: Write Journal Entry
+  // ===================================================================
+  // Creates the immutable audit-log record capturing pre- and
+  // post-transfer balances BEFORE any customer notification is issued.
+  // This event MUST succeed before FR-4 (notifyCustomer) may fire.
+  //
+  // Refines: AuditJournalCommitment — post sets journalWritten = true;
+  // notifyCustomer's pre-condition requires it (journal-before-
+  // notification ordering is thus structurally enforced).
+  // ===================================================================
+  event writeJournalEntry()
+    refines online_banking_discovery::AuditJournalCommitment {
+
+    pre: self.transferState = 'PENDING';
+    pre: self.journalWritten = false;
+    // The debit+credit must already have been applied (FR-2 ran):
+    // source balance is strictly less than its pre-PENDING snapshot.
+    pre: self.sourceBalance < self.pendingSourceBalance;
+
+    // GOAL-3: journal entry exists and is immutable
+    post: self.journalWritten = true;
+    // Transfer advances to COMPLETED only after journal is written
+    post: self.transferState = 'COMPLETED';
+
+    modifies:
+      self.journalWritten,
+      self.transferState;
+  }
+
+  // ===================================================================
+  // FR-4: Notify Customer
+  // ===================================================================
+  // Sends the success notification to the customer. May only fire
+  // after the journal entry has been written (GOAL-3) and the transfer
+  // is in COMPLETED state (GOAL-1).
+  //
+  // Refines: AuditJournalCommitment — enforces journal-before-
+  // notification ordering as a hard pre-condition.
+  // ===================================================================
+  event notifyCustomer()
+    refines online_banking_discovery::AuditJournalCommitment {
+
+    // GOAL-3 enforcement: notification is gated on journal presence
+    pre: self.journalWritten = true;
+    pre: self.transferState = 'COMPLETED';
+    pre: self.customerNotified = false;
+
+    post: self.customerNotified = true;
+
+    modifies:
+      self.customerNotified;
+  }
+
+  // ===================================================================
+  // FR-5: Rollback Transfer
+  // ===================================================================
+  // Reverts both account balances to their pre-transfer snapshot values
+  // and marks the transfer ROLLED_BACK. May fire from PENDING state
+  // (mid-flight failure or recovery routine decision). Atomicity is
+  // guaranteed: both balances are restored in one step (GOAL-1).
+  //
+  // Refines: AtomicTransferCommitment — ROLLED_BACK is a valid terminal
+  // state and both balances are fully restored in a single transition.
+  // ===================================================================
+  event rollbackTransfer()
+    refines online_banking_discovery::AtomicTransferCommitment {
+
+    pre: self.transferState = 'PENDING';
+
+    // Restore both balances to their PENDING-snapshot values atomically
+    post: self.sourceBalance = self.pendingSourceBalance;
+    post: self.destinationBalance = self.pendingDestinationBalance;
+    post: self.transferState = 'ROLLED_BACK';
+    // GOAL-2: restored balance is non-negative (snapshot was valid)
+    post: self.sourceBalance >= 0.0;
+    post: self.destinationBalance >= 0.0;
+
+    modifies:
+      self.sourceBalance,
+      self.destinationBalance,
+      self.transferState;
+  }
+
+  // ===================================================================
+  // FR-6: Recover Pending Transfer
+  // ===================================================================
+  // On system restart the recovery routine inspects any transfer left
+  // in PENDING state and drives it to a terminal state. This event
+  // models the recovery decision: it transitions the system so the
+  // normal completion or rollback path can proceed.
+  //
+  // Refines: AtomicTransferCommitment — recovery ensures pending state
+  // always resolves to a valid terminal state.
+  //          BoundedLatencyCommitment — the maxResolutionSeconds
+  // invariant (<= 30) is preserved across this event.
+  // ===================================================================
+  event recoverPendingTransfer(shouldComplete: Boolean)
+    refines online_banking_discovery::AtomicTransferCommitment,
+            online_banking_discovery::BoundedLatencyCommitment {
+
+    pre: self.transferState = 'PENDING';
+    pre: self.pendingSourceBalance >= 0.0;
+    pre: self.pendingDestinationBalance >= 0.0;
+
+    // After recovery the transfer is in one of the two valid terminal
+    // states — never left PENDING.
+    post: self.transferState = 'COMPLETED' or self.transferState = 'ROLLED_BACK';
+    post: self.sourceBalance >= 0.0;
+    post: self.destinationBalance >= 0.0;
+
+    modifies:
+      self.sourceBalance,
+      self.destinationBalance,
+      self.transferState,
+      self.journalWritten,
+      self.customerNotified;
+  }
+
+  // ===================================================================
+  // FR-7: Reset to Idle
+  // ===================================================================
+  // Clears transient per-transfer state so the system is ready to
+  // accept the next transfer. May only fire from a terminal state
+  // (COMPLETED or ROLLED_BACK).
+  // ===================================================================
+  event resetToIdle() {
+    pre: self.transferState = 'COMPLETED' or self.transferState = 'ROLLED_BACK';
+
+    post: self.transferState = 'IDLE';
+    post: self.currentAmount = 0.0;
+    post: self.journalWritten = false;
+    post: self.customerNotified = false;
+    post: self.pendingSourceBalance = 0.0;
+    post: self.pendingDestinationBalance = 0.0;
+
+    modifies:
+      self.transferState,
+      self.currentAmount,
+      self.journalWritten,
+      self.customerNotified,
+      self.pendingSourceBalance,
+      self.pendingDestinationBalance;
+  }
+}

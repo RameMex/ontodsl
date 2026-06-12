@@ -1,0 +1,130 @@
+schema "onto/0.1";
+namespace traffic_light_requirements;
+import "./discovery.onto";
+
+kind TrafficLightSystem specializes MutualExclusionConstraints, YellowIntervalConstraints, EmergencyPreemptionConstraints, PedestrianConstraints {
+  identity: systemId;
+  property systemId: String;
+  property minYellowSeconds: Real;
+  property maxPreemptionSeconds: Real;
+  property preemptionActive: Boolean;
+  property preemptionSensorTimestamp: Real;
+  property emergencyPassed: Boolean;
+  property allRedCommanded: Boolean;
+  property pedestrianRequestPending: Boolean;
+  property pedestrianRequestApproach: String;
+  property walkActive: Boolean;
+  property walkMatchingApproach: String;
+  property normalPhaseResumed: Boolean;
+
+  invariants {
+    self.systemId <> null;
+    self.minYellowSeconds >= 3.0;
+    self.maxPreemptionSeconds <= 1.0;
+    self.preemptionActive implies (self.preemptionSensorTimestamp > 0.0);
+    self.emergencyPassed implies (self.preemptionActive = false);
+    self.walkActive implies (not self.preemptionActive);
+    self.walkActive implies (self.walkMatchingApproach <> null);
+    self.pedestrianRequestPending implies (self.pedestrianRequestApproach <> null);
+  }
+
+  // GOAL-1: Mutual exclusion of conflicting GREENs
+  // FR-1: Commit to a phase where only non-conflicting approaches are GREEN.
+  event commitPhase(greenApproach: String, crossedApproach: String): Boolean
+    refines traffic_light_discovery::MutualExclusionCommitment {
+    pre: greenApproach <> null;
+    pre: crossedApproach <> null;
+    pre: greenApproach <> crossedApproach;
+    pre: greenApproach = 'NS' or greenApproach = 'EW';
+    pre: crossedApproach = 'NS' or crossedApproach = 'EW';
+    post: result = true;
+    post: result implies (greenApproach <> crossedApproach);
+  }
+
+  // GOAL-2: Yellow interval before red (every GREEN->RED transition has YELLOW for >= 3 seconds)
+  // FR-2: Transition a single approach from GREEN to YELLOW to RED, with a minimum YELLOW duration.
+  event transitionApproachToYellow(approach: String): Real
+    refines traffic_light_discovery::YellowIntervalCommitment {
+    pre: approach <> null;
+    pre: approach = 'NS' or approach = 'EW';
+    post: result >= self.minYellowSeconds;
+    post: self.minYellowSeconds >= 3.0;
+  }
+
+  // FR-3: After the YELLOW interval expires, set the approach to RED.
+  event setApproachToRed(approach: String) {
+    pre: self.minYellowSeconds >= 3.0;
+    post: true;
+  }
+
+  // GOAL-3: Emergency preemption within 1 second
+  // FR-4: Detect emergency preemption sensor activation and command ALL-RED within 1 second.
+  event handlePreemptionSensorTriggered(sensorTimestamp: Real): Boolean
+    refines traffic_light_discovery::EmergencyPreemptionCommitment {
+    pre: sensorTimestamp > 0.0;
+    pre: not self.allRedCommanded;
+    post: self.preemptionSensorTimestamp = sensorTimestamp;
+    post: self.preemptionActive = true;
+    post: self.allRedCommanded = true;
+    post: self.allRedCommanded implies (sensorTimestamp <= self.preemptionSensorTimestamp + self.maxPreemptionSeconds);
+    post: self.maxPreemptionSeconds <= 1.0;
+    modifies: self.preemptionSensorTimestamp, self.preemptionActive, self.allRedCommanded;
+  }
+
+  // FR-5: After preemption, the emergency vehicle passes. Sensor clears.
+  event clearPreemption() {
+    pre: self.preemptionActive = true;
+    post: self.preemptionActive = false;
+    post: self.emergencyPassed = true;
+    modifies: self.preemptionActive, self.emergencyPassed;
+  }
+
+  // FR-6: Resume normal phasing after emergency preemption ends.
+  event resumeNormalPhasing() {
+    pre: self.emergencyPassed = true;
+    pre: not self.preemptionActive;
+    post: self.normalPhaseResumed = true;
+    post: self.allRedCommanded = false;
+    modifies: self.normalPhaseResumed, self.allRedCommanded;
+  }
+
+  // GOAL-4: Honour pedestrian requests (WALK granted in next compatible phase after button press)
+  // FR-7: Register a pedestrian request for a specific approach.
+  event registerPedestrianRequest(approach: String): Boolean
+    refines traffic_light_discovery::PedestrianRequestCommitment {
+    pre: approach = 'NS' or approach = 'EW';
+    pre: not self.pedestrianRequestPending;
+    post: self.pedestrianRequestPending = true;
+    post: self.pedestrianRequestApproach = approach;
+    post: result = true;
+    modifies: self.pedestrianRequestPending, self.pedestrianRequestApproach;
+  }
+
+  // FR-8: Grant WALK to the requesting approach during the next compatible phase.
+  event grantWalk(approach: String) {
+    pre: self.pedestrianRequestPending = true;
+    pre: self.pedestrianRequestApproach = approach;
+    pre: approach = 'NS' or approach = 'EW';
+    pre: not self.preemptionActive;
+    post: self.walkActive = true;
+    post: self.walkMatchingApproach = approach;
+    post: self.pedestrianRequestPending = false;
+    post: self.pedestrianRequestApproach = null;
+    modifies: self.walkActive, self.walkMatchingApproach, self.pedestrianRequestPending, self.pedestrianRequestApproach;
+  }
+
+  // FR-9: Clear WALK signal after a configured walk interval.
+  event clearWalk() {
+    pre: self.walkActive = true;
+    post: self.walkActive = false;
+    post: self.walkMatchingApproach = null;
+    modifies: self.walkActive, self.walkMatchingApproach;
+  }
+
+  // FR-10: Start a normal phase (GREEN on one approach, RED on the crossing).
+  event startPhase(greenApproach: String) {
+    pre: greenApproach = 'NS' or greenApproach = 'EW';
+    pre: not self.preemptionActive;
+    post: true;
+  }
+}

@@ -1,0 +1,160 @@
+schema "onto/0.1";
+namespace library_system_requirements;
+import "./discovery.onto";
+
+// ─── The System Kind ─────────────────────────────────────────────────────
+kind LibrarySystem specializes StateMutualExclusion, BorrowerDebtConstraint {
+  identity: systemId;
+  property systemId: String;
+
+  // ─── Book copy registry ─────────────────────────────────────────────────
+  property copies: Set<BookCopy>;
+
+  // ─── Borrower registry ──────────────────────────────────────────────────
+  property borrowers: Set<BorrowerAgent>;
+
+  // ─── Loan history (closed and active) ───────────────────────────────────
+  property loans: Set<LoanRecord>;
+
+  // ─── Active reservations ────────────────────────────────────────────────
+  property reservations: Set<ReservationEntry>;
+
+  // ─── Configuration constants (non-functional thresholds) ────────────────
+  property maxReservationWaitDays: Integer;
+  property dailyLateFeeRate: Real;
+
+  // ─── Invariants on system state ─────────────────────────────────────────
+  invariants {
+    self.systemId <> null;
+    self.maxReservationWaitDays > 0;
+    self.dailyLateFeeRate >= 0.0;
+
+    // No copy is lent to more than one borrower simultaneously.
+    self.loans->forAll(l1 |
+      self.loans->forAll(l2 |
+        l1.loanId <> l2.loanId and l1.copyId = l2.copyId
+          implies (l1.returnDate <> null or l2.returnDate <> null)
+      )
+    );
+  }
+
+  // ─── FR-1: Check out a book copy (loan creation) ─────────────────────────
+  event checkout(borrowerId: String, copyId: String): LoanRecord
+    refines library_system_discovery::MutualExclusiveCopyStateCommitment,
+            library_system_discovery::BlockIndebtedLoansCommitment,
+            library_system_discovery::TrackLateFeesCommitment {
+    pre: self.copies->exists(c | c.copyId = copyId);
+    pre: self.borrowers->exists(b | b.borrowerId = borrowerId);
+    pre: self.borrowers->forAll(b |
+      if b.borrowerId = borrowerId then b.outstandingFees = 0.0 else true endif
+    );
+    pre: self.copies->forAll(c |
+      if c.copyId = copyId then c.copyStatus = 'AVAILABLE' else true endif
+    );
+    pre: not self.loans->exists(l | l.copyId = copyId and l.returnDate = null);
+
+    post: self.copies->exists(c |
+      c.copyId = copyId and c.copyStatus = 'LOANED'
+    );
+    post: self.loans->includes(result);
+    post: result.lateFee = 0.0;
+
+    modifies: self.copies, self.loans;
+  }
+
+  // ─── FR-2: Return a book copy ───────────────────────────────────────────
+  event returnCopy(loanId: String): BookCopy
+    refines library_system_discovery::TrackLateFeesCommitment {
+    pre: self.loans->exists(l | l.loanId = loanId);
+    pre: self.loans->forAll(l |
+      if l.loanId = loanId then l.returnDate = null else true endif
+    );
+
+    post: self.loans->exists(l |
+      l.loanId = loanId and l.returnDate <> null
+    );
+    // Late fee: if overdue, apply daily rate (simplified: assume 1 day overdue)
+    post: self.loans->forAll(l |
+      if l.loanId = loanId then
+        if l.dueDate <> l.returnDate then
+          l.lateFee = self.dailyLateFeeRate
+        else
+          l.lateFee = 0.0
+        endif
+      else true endif
+    );
+
+    modifies: self.loans, self.copies;
+  }
+
+  // ─── FR-3: Place reservation ────────────────────────────────────────────
+  event placeReservation(copyId: String, borrowerId: String): ReservationEntry
+    refines library_system_discovery::MutualExclusiveCopyStateCommitment {
+    pre: self.copies->exists(c | c.copyId = copyId);
+    pre: self.borrowers->exists(b | b.borrowerId = borrowerId);
+    pre: self.loans->exists(l | l.copyId = copyId and l.returnDate = null);
+    post: result.reservationStatus = 'ACTIVE';
+    post: result.placedDate <> null;
+    post: self.reservations->includes(result);
+
+    modifies: self.reservations;
+  }
+
+  // ─── FR-4: Fulfill reservation (pickup) ────────────────────────────────
+  event fulfillReservation(reservationId: String): LoanRecord
+    refines library_system_discovery::ExpireStaleReservationsCommitment {
+    pre: self.reservations->exists(r | r.reservationId = reservationId);
+    pre: self.reservations->forAll(r |
+      if r.reservationId = reservationId then r.reservationStatus = 'ACTIVE' else true endif
+    );
+    pre: self.reservations->forAll(r |
+      if r.reservationId = reservationId then
+        self.maxReservationWaitDays > 0  // dummy: wait period assumed satisfied
+      else true endif
+    );
+    pre: self.reservations->forAll(r |
+      if r.reservationId = reservationId then
+        self.copies->exists(c | c.copyId = r.copyId and c.copyStatus = 'RESERVED')
+      else true endif
+    );
+
+    post: self.reservations->exists(r |
+      r.reservationId = reservationId and r.reservationStatus = 'FULFILLED'
+    );
+
+    modifies: self.reservations, self.loans;
+  }
+
+  // ─── FR-5: Expire stale reservations ────────────────────────────────────
+  event expireStaleReservations()
+    refines library_system_discovery::ExpireStaleReservationsCommitment {
+    pre: true;
+
+    post: self.reservations->forAll(r |
+      if r.reservationStatus = 'ACTIVE' then
+        r.reservationStatus = 'EXPIRED'
+      else
+        true
+      endif
+    );
+
+    modifies: self.reservations, self.copies;
+  }
+
+  // ─── FR-6: Pay late fees ───────────────────────────────────────────────
+  event payFees(borrowerId: String, amount: Real) {
+    pre: self.borrowers->exists(b | b.borrowerId = borrowerId);
+    pre: amount >= 0.0;
+    pre: self.borrowers->forAll(b |
+      if b.borrowerId = borrowerId then b.outstandingFees >= amount else true endif
+    );
+
+    post: self.borrowers->forAll(b |
+      if b.borrowerId = borrowerId then
+        b.outstandingFees = b.outstandingFees@pre - amount
+      else true endif
+    );
+
+    modifies: self.borrowers;
+  }
+}

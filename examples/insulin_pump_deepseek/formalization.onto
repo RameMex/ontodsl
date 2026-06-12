@@ -1,0 +1,128 @@
+schema "onto/0.1";
+namespace insulin_pump_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// Regulatory anchor: FDA pre-market notification 510(k)
+category Fda510kCleared where bearer: InsulinPumpControlSystem {
+  invariants {
+    bearer.safeMaxDoseUnits >= 0.1;
+    bearer.dosingCheckIntervalSeconds <= 600.0;
+    bearer.selfTestIntervalSeconds <= 60.0;
+  }
+}
+
+// Regulatory anchor: ISO 13485 (quality management)
+category Iso13485Compliant where bearer: InsulinPumpControlSystem {
+  invariants {
+    bearer.safeMaxDoseUnits > 0.0;
+    bearer.safeZoneUpperBound >= 0.0;
+  }
+}
+
+// Regulatory anchor: IEC 62304 Class C (software for active implantable)
+category Iec62304ClassC where bearer: InsulinPumpControlSystem {
+  invariants {
+    bearer.faultDetected implies bearer.deliveryStopped;
+    bearer.faultDetected implies bearer.alarmActive;
+  }
+}
+
+// Physical/domain-logical invariant: dose plausibility
+category DosePlausibility where bearer: InsulinPumpControlSystem {
+  invariants {
+    bearer.safeMaxDoseUnits <= 2.0;
+  }
+}
+
+// Physical/domain-logical invariant: blood sugar plausibility
+category BloodSugarPlausibility where bearer: InsulinPumpControlSystem {
+  invariants {
+    bearer.currentBloodSugar >= 0.0;
+    bearer.currentBloodSugar <= 1000.0;
+  }
+}
+
+// The formalized system subkind — extends Requirements system with active business rules
+subkind InsulinPumpSystemFormalized specializes InsulinPumpControlSystem {
+
+  // Active business rule: reject overdose before delivery
+  event rejectOverdose(requestedDose: Real) {
+    pre: self.isOperating = true;
+    pre: requestedDose > self.safeMaxDoseUnits;
+    post: self.alarmActive = true;
+    post: self.malfunctionAlarmActive = true;
+  }
+
+  // Active business rule: reject delivery when blood sugar inside safe zone
+  event rejectDeliveryInSafeZone(sugar: Real) {
+    pre: self.isOperating = true;
+    pre: sugar <= self.safeZoneUpperBound;
+    post: self.alarmActive = true;
+    post: self.malfunctionAlarmActive = true;
+  }
+
+  // Active business rule: reject delivery on hardware fault
+  event rejectDeliveryOnFault() {
+    pre: self.faultDetected = true;
+    pre: self.isOperating = false;
+    post: self.alarmActive = true;
+    post: self.malfunctionAlarmActive = true;
+  }
+
+  // Active business rule: enforce self-test interval (max 60s)
+  event enforceSelfTestInterval(lastTestTime: Real, currentTime: Real) {
+    pre: self.isOperating = true;
+    pre: (currentTime - lastTestTime) > self.selfTestIntervalSeconds;
+    post: self.faultDetected = true;
+    post: self.isOperating = false;
+    post: self.deliveryStopped = true;
+    post: self.alarmActive = true;
+    post: self.malfunctionAlarmActive = true;
+    modifies: self.faultDetected,
+              self.isOperating,
+              self.deliveryStopped,
+              self.alarmActive,
+              self.malfunctionAlarmActive;
+  }
+
+  // Active business rule: enforce dosing check interval (min 10min between doses)
+  event enforceDosingInterval(lastDoseTime: Real, currentTime: Real) {
+    pre: self.isOperating = true;
+    pre: (currentTime - lastDoseTime) < self.dosingCheckIntervalSeconds;
+    post: self.faultDetected = true;
+    post: self.isOperating = false;
+    post: self.deliveryStopped = true;
+    post: self.alarmActive = true;
+    post: self.malfunctionAlarmActive = true;
+    modifies: self.faultDetected,
+              self.isOperating,
+              self.deliveryStopped,
+              self.alarmActive,
+              self.malfunctionAlarmActive;
+  }
+
+  // Active business rule: enforce safe max dose is configured
+  event enforceSafeMaxConfigured() {
+    pre: self.safeMaxDoseUnits <= 0.0;
+    post: self.isOperating = false;
+    modifies: self.isOperating;
+  }
+}
+
+// Passive assumptions record (documentary only, not runtime enforced)
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property assumptionCode: String;
+  property description: String;
+  property domainSource: String;
+  property status: String;
+  invariants {
+    self.assumptionId <> null;
+    self.assumptionCode <> null;
+    self.description <> null;
+    self.domainSource <> null;
+    self.status <> null;
+  }
+}

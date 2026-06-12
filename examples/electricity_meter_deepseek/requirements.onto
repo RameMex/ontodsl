@@ -1,0 +1,108 @@
+schema "onto/0.1";
+namespace electricity_meter_requirements;
+import "./discovery.onto";
+
+// ─── System Kind ─────────────────────────────────────────────────────────
+// The smart electricity meter billing controller as a black-box system.
+// Specializes constraint categories from Discovery to inherit invariants.
+// Declares properties mirrored from Discovery commitment bodies (skipping
+// commitmentId) so that event post-conditions can imply the commitment
+// predicates using the same property names on the same kind.
+
+kind MeterBillingSystem specializes MonotonicConsumption, TamperHandling, ReadingImmutability {
+  identity: systemId;
+  property systemId: String;
+  property maxNegativeDeltaThreshold: Real;    // from MonotonicConsumptionCommitment
+  property tamperFreezeActive: Boolean;         // from TamperFreezeCommitment
+  property tamperCleared: Boolean;              // from TamperClearanceCommitment
+  property acceptedReadingCount: Integer;       // from ReadingImmutabilityCommitment
+
+  // ─── Invariants ──────────────────────────────────────────────────────
+  // Mirror the predicates as invariants so the system is always
+  // consistent with the commitments it must discharge.
+  invariants {
+    self.systemId <> null;
+    self.maxNegativeDeltaThreshold >= 0.0;           // MonotonicConsumptionCommitment predicate
+    not self.tamperFreezeActive;                      // TamperFreezeCommitment predicate
+    self.tamperCleared;                               // TamperClearanceCommitment predicate
+    self.acceptedReadingCount >= 0;                   // ReadingImmutabilityCommitment predicate
+    self.acceptedReadingCount >= 0;
+  }
+
+  // ─── FR-1: Process Meter Reading ──────────────────────────────────────
+  // Every 15 minutes the meter sends a reading.
+  // Compute delta against last accepted kWh.
+  // If delta >= 0 AND no tamper flags → accept + bill.
+  // If delta < 0 → reject + log anomaly.
+  // If tamper flags present → freeze billing (set tamperFreezeActive).
+  //
+  // Discharges: MonotonicConsumptionCommitment (via maxNegativeDeltaThreshold invariant)
+  //             ReadingImmutabilityCommitment (via acceptedReadingCount increment)
+  event processReading(kwh: Real, tamperFlags: String)
+    refines electricity_meter_discovery::MonotonicConsumptionCommitment,
+            electricity_meter_discovery::ReadingImmutabilityCommitment {
+    pre: kwh >= 0.0;
+    pre: tamperFlags <> null;
+    pre: self.maxNegativeDeltaThreshold >= 0.0;
+
+    // Case 1: No active tamper freeze, no tamper flags, and delta >= 0
+    // → accept, apply billing increment, increment accepted count.
+    // Case 2: No active tamper freeze, but delta < 0 → reject (anomaly).
+    // Case 3: tamperFlags not empty → freeze billing.
+    post: if not self.tamperFreezeActive@pre and tamperFlags = '' and
+               (kwh - (if self.acceptedReadingCount@pre > 0 then self.acceptedReadingCount@pre else kwh endif)) >= 0.0 then
+            self.acceptedReadingCount = self.acceptedReadingCount@pre + 1
+          else
+            self.acceptedReadingCount = self.acceptedReadingCount@pre
+          endif;
+    post: if tamperFlags <> '' and not self.tamperFreezeActive@pre then
+            self.tamperFreezeActive = true
+          else
+            self.tamperFreezeActive = self.tamperFreezeActive@pre
+          endif;
+    post: self.tamperCleared = (if tamperFlags = '' and not self.tamperFreezeActive@pre then self.tamperCleared@pre else self.tamperCleared@pre endif);
+    modifies: self.acceptedReadingCount, self.tamperFreezeActive;
+  }
+
+  // ─── FR-2: Detect Tamper Event ────────────────────────────────────────
+  // Any tampering signal raises tamper alarm and freezes billing until
+  // manual clearance. Receives tamper details from the meter.
+  event detectTamper(eventType: String, description: String)
+    refines electricity_meter_discovery::TamperFreezeCommitment {
+    pre: eventType <> null;
+    pre: description <> null;
+    pre: not self.tamperFreezeActive;
+    post: self.tamperFreezeActive = true;
+    post: self.tamperCleared = false;
+    modifies: self.tamperFreezeActive, self.tamperCleared;
+  }
+
+  // ─── FR-3: Clear Tamper (Manual Clearance) ────────────────────────────
+  // Field technician inspects, authorized operator issues clearance.
+  // Resumes billing for this meter.
+  event clearTamper(clearanceId: String)
+    refines electricity_meter_discovery::TamperClearanceCommitment {
+    pre: clearanceId <> null;
+    pre: self.tamperFreezeActive;
+    pre: not self.tamperCleared;
+    post: self.tamperFreezeActive = false;
+    post: self.tamperCleared = true;
+    modifies: self.tamperFreezeActive, self.tamperCleared;
+  }
+
+  // ─── FR-4: Compensation Event (Immutability Support) ──────────────────
+  // Accepted readings are immutable. If calibration adjustment is needed,
+  // record a compensating event, NOT a mutation of past readings.
+  // This event adjusts the current billing state without reverting history.
+  event applyCompensation(adjustmentDelta: Real)
+    refines electricity_meter_discovery::ReadingImmutabilityCommitment {
+    pre: adjustmentDelta <> 0.0;
+    // Compensation does not change the count of accepted readings;
+    // it only adjusts the billing amount via a separate mechanism.
+    pre: not self.tamperFreezeActive;
+    post: self.acceptedReadingCount = self.acceptedReadingCount@pre;
+    post: self.tamperFreezeActive = self.tamperFreezeActive@pre;
+    post: self.tamperCleared = self.tamperCleared@pre;
+    modifies: self.acceptedReadingCount, self.tamperFreezeActive, self.tamperCleared;
+  }
+}

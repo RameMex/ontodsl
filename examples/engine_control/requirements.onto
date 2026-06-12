@@ -1,0 +1,284 @@
+schema "onto/0.1";
+namespace engine_control_requirements;
+
+import "./discovery.onto";
+
+// =====================================================================
+// Requirements — Engine Control System
+//
+// The system as a black box.  Every Functional Requirement is an event
+// on EngineControlSystem.  Pre/post are written so that each event's
+// post-condition implies the predicate of the corresponding discovery
+// commitment (inter-stage refinement obligation).
+//
+// Discovery commitments referenced (by qualified comment):
+//   engine_control_discovery::OverspeedProtectionCommitment
+//   engine_control_discovery::FuelLimitOnOverspeedCommitment
+//   engine_control_discovery::ContinuousIgnitionCommitment
+//   engine_control_discovery::ThrustHoldInFlightCommitment
+//   engine_control_discovery::ThrustReverserGroundOnlyCommitment
+//   engine_control_discovery::SensorFaultToleranceCommitment
+// =====================================================================
+
+// ─── System Kind ──────────────────────────────────────────────────────
+// Specializes ALL three constraint categories from discovery so the
+// system inherits every category invariant.  (A 'kind' may specialize
+// multiple categories — S21 rule; a 'subkind' may NOT.)
+
+kind EngineControlSystem
+    specializes OverspeedSafetyConstraints,
+                SensorFaultToleranceConstraints,
+                FlightPhaseOperationalConstraints {
+
+  identity: systemId;
+
+  // ── Identity & configuration ────────────────────────────────────────
+  property systemId: String;
+  property variant: String;           // e.g. 'V1', 'V2' — determines fitted options
+  property overspeedProtectionFitted: Boolean; // not every variant has it
+
+  // ── Engine state (observable at the system boundary) ────────────────
+  property engineSpeed: Real;         // current rotational speed (rpm-equiv)
+  property maxSafeSpeed: Real;        // certified maximum (from type-cert)
+  property fuelFlow: Real;            // current commanded fuel flow
+
+  // ── Ignition & thrust ───────────────────────────────────────────────
+  property continuousIgnitionActive: Boolean;
+  property commandedThrust: Real;     // thrust level the controller holds
+  property aircraftInFlight: Boolean; // true when weight-off-wheels
+  property reverserDeploymentEnabled: Boolean;
+
+  // ── Sensor fault management ─────────────────────────────────────────
+  property sensorFaultDetected: Boolean;
+  property usingModelledValue: Boolean;   // true when control law has substituted
+  property modelledSpeedValue: Real;      // synthesised estimate for speed input
+
+  // ── NFR scalar bounds ────────────────────────────────────────────────
+  // Inline properties + invariants (simpler than 'quality of' for scalars).
+  property maxIgnitionLatencyMs: Real;    // NFR: response latency bound (ms)
+  property thrustDeviationTolerancePct: Real; // NFR: max thrust deviation (%)
+
+  // ─── Invariants ──────────────────────────────────────────────────────
+  invariants {
+    self.systemId <> null;
+    self.maxSafeSpeed > 0.0;
+    self.engineSpeed >= 0.0;
+    self.fuelFlow >= 0.0;
+    self.commandedThrust >= 0.0;
+    self.modelledSpeedValue >= 0.0;
+    self.maxIgnitionLatencyMs > 0.0;
+    self.thrustDeviationTolerancePct >= 0.0;
+
+    // CORE SAFETY INVARIANT (GOAL-1): engine speed must never exceed
+    // maximum safe speed at any observable state.
+    self.engineSpeed <= self.maxSafeSpeed;
+
+    // Thrust reverser must never be enabled while in flight (GOAL-2c).
+    not (self.aircraftInFlight and self.reverserDeploymentEnabled);
+
+    // When using a modelled value the sensor fault flag is set (GOAL-3).
+    self.usingModelledValue implies self.sensorFaultDetected;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // FR-1  Overspeed Protection — limit fuel on overspeed detection
+  //
+  // refines: engine_control_discovery::OverspeedProtectionCommitment
+  //          engine_control_discovery::FuelLimitOnOverspeedCommitment
+  //
+  // When the engine speed meets or exceeds maxSafeSpeed the controller
+  // MUST reduce fuel flow to 0 (full fuel cut) if overspeed protection
+  // is fitted, irrespective of any commanded thrust.
+  // Variants without overspeed protection fitted still satisfy
+  // GOAL-1 via the safety invariant (the invariant is always maintained
+  // but the active fuel-limit event only fires on fitted variants).
+  // ═══════════════════════════════════════════════════════════════════
+  event limitFuelOnOverspeed(detectedSpeed: Real) {
+    // pre: speed has reached or exceeded the certified maximum
+    pre: detectedSpeed >= self.maxSafeSpeed;
+    // pre: this variant has overspeed protection fitted
+    pre: self.overspeedProtectionFitted = true;
+
+    // post: fuel flow is reduced to zero — discharges
+    //       FuelLimitOnOverspeedCommitment (threshold > 0 implies
+    //       the system reacts before damage; cutting to 0 satisfies it)
+    post: self.fuelFlow = 0.0;
+    // post: engine speed must not exceed maxSafeSpeed after the action
+    //       — discharges OverspeedProtectionCommitment predicate
+    //         (certifiedMaxSpeedLimit > 0 is preserved by maxSafeSpeed > 0)
+    post: self.engineSpeed <= self.maxSafeSpeed;
+
+    modifies: self.fuelFlow, self.engineSpeed;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // FR-2  Continuous Ignition Activation
+  //
+  // refines: engine_control_discovery::ContinuousIgnitionCommitment
+  //
+  // When the controller commands continuous ignition the mode is
+  // switched on.  The latency bound is captured as maxIgnitionLatencyMs.
+  // ═══════════════════════════════════════════════════════════════════
+  event activateContinuousIgnition() {
+    // pre: continuous ignition is not yet active
+    pre: self.continuousIgnitionActive = false;
+
+    // post: continuous ignition is now on — discharges
+    //       ContinuousIgnitionCommitment (predicate: latency > 0
+    //       is preserved because maxIgnitionLatencyMs > 0 by invariant)
+    post: self.continuousIgnitionActive = true;
+
+    modifies: self.continuousIgnitionActive;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // FR-3  Continuous Ignition Deactivation
+  //
+  // refines: engine_control_discovery::ContinuousIgnitionCommitment
+  //
+  // Counterpart to FR-2: when no longer commanded, the mode is switched
+  // off.
+  // ═══════════════════════════════════════════════════════════════════
+  event deactivateContinuousIgnition() {
+    pre: self.continuousIgnitionActive = true;
+
+    post: self.continuousIgnitionActive = false;
+
+    modifies: self.continuousIgnitionActive;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // FR-4  Hold Thrust in Flight
+  //
+  // refines: engine_control_discovery::ThrustHoldInFlightCommitment
+  //
+  // While the aircraft is in flight, the controller holds commanded
+  // thrust at the specified level within the allowed deviation tolerance.
+  // ═══════════════════════════════════════════════════════════════════
+  event holdThrustInFlight(commanded: Real) {
+    // pre: aircraft is airborne
+    pre: self.aircraftInFlight = true;
+    pre: commanded >= 0.0;
+
+    // post: commanded thrust is set to the requested level — discharges
+    //       ThrustHoldInFlightCommitment
+    //       (predicate: deviationTolerancePct >= 0 satisfied by invariant)
+    post: self.commandedThrust = commanded;
+
+    modifies: self.commandedThrust;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // FR-5  Enable Thrust Reverser (ground only)
+  //
+  // refines: engine_control_discovery::ThrustReverserGroundOnlyCommitment
+  //
+  // Reverse thrust deployment is only permitted when the aircraft is
+  // confirmed on the ground.  This event enables the reverser; it is
+  // rejected (pre-condition fails) if airborne.
+  // ═══════════════════════════════════════════════════════════════════
+  event enableThrustReverser() {
+    // pre: aircraft is on the ground — the ONLY enabling condition
+    pre: self.aircraftInFlight = false;
+
+    // post: deployment is enabled — discharges
+    //       ThrustReverserGroundOnlyCommitment
+    //       (predicate: minGroundConfidence > 0 is satisfied because
+    //        the pre-condition guarantees ground state before enabling)
+    post: self.reverserDeploymentEnabled = true;
+
+    modifies: self.reverserDeploymentEnabled;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // FR-6  Disable Thrust Reverser
+  //
+  // refines: engine_control_discovery::ThrustReverserGroundOnlyCommitment
+  //
+  // Ensures reverser is disabled whenever the aircraft transitions to
+  // flight (or on any explicit disable command).
+  // ═══════════════════════════════════════════════════════════════════
+  event disableThrustReverser() {
+    pre: self.reverserDeploymentEnabled = true;
+
+    post: self.reverserDeploymentEnabled = false;
+
+    modifies: self.reverserDeploymentEnabled;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // FR-7  Sensor Fault Detection and Modelled-Value Substitution
+  //
+  // refines: engine_control_discovery::SensorFaultToleranceCommitment
+  //
+  // When a sensor fault is detected the control law substitutes the
+  // modelled (synthesised) value so control is maintained.
+  // ═══════════════════════════════════════════════════════════════════
+  event substituteModelledValue(modelledSpeed: Real) {
+    // pre: a sensor fault has been detected
+    pre: self.sensorFaultDetected = false;   // fault is newly detected
+    pre: modelledSpeed >= 0.0;
+
+    // post: fault flag raised and control law uses modelled value —
+    //       discharges SensorFaultToleranceCommitment
+    //       (predicate: maxToleratedSensorFaults >= 1.0; here we
+    //        tolerate exactly one fault by substituting the value)
+    post: self.sensorFaultDetected = true;
+    post: self.usingModelledValue = true;
+    post: self.modelledSpeedValue = modelledSpeed;
+
+    modifies: self.sensorFaultDetected, self.usingModelledValue, self.modelledSpeedValue;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // FR-8  Sensor Fault Cleared — Resume Direct Sensor Reading
+  //
+  // refines: engine_control_discovery::SensorFaultToleranceCommitment
+  //
+  // When the sensor fault is resolved, the control law reverts to the
+  // live sensor reading.
+  // ═══════════════════════════════════════════════════════════════════
+  event resumeSensorReading() {
+    pre: self.sensorFaultDetected = true;
+    pre: self.usingModelledValue = true;
+
+    post: self.sensorFaultDetected = false;
+    post: self.usingModelledValue = false;
+
+    modifies: self.sensorFaultDetected, self.usingModelledValue;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // FR-9  Flight Phase Transition — Airborne
+  //
+  // refines: engine_control_discovery::ThrustReverserGroundOnlyCommitment
+  //          engine_control_discovery::ThrustHoldInFlightCommitment
+  //
+  // When weight-off-wheels is confirmed the system transitions to
+  // in-flight mode: reverser is forcibly disabled (safety) and thrust
+  // hold becomes active.
+  // ═══════════════════════════════════════════════════════════════════
+  event transitionToFlight() {
+    pre: self.aircraftInFlight = false;
+
+    // post: in-flight flag set; reverser MUST be disabled
+    post: self.aircraftInFlight = true;
+    post: self.reverserDeploymentEnabled = false;
+
+    modifies: self.aircraftInFlight, self.reverserDeploymentEnabled;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // FR-10  Flight Phase Transition — On Ground
+  //
+  // Counterpart to FR-9: when weight-on-wheels is confirmed the system
+  // transitions back to ground mode.
+  // ═══════════════════════════════════════════════════════════════════
+  event transitionToGround() {
+    pre: self.aircraftInFlight = true;
+
+    post: self.aircraftInFlight = false;
+
+    modifies: self.aircraftInFlight;
+  }
+}

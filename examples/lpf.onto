@@ -1,0 +1,112 @@
+schema "onto/0.1";
+namespace ardupilot_filters;
+
+// DigitalLPF is the base rigid kind that implements the filter math
+kind DigitalLPF {
+  identity: filterId;
+
+  property filterId: String;
+  property output: Real;
+  property initialised: Boolean;
+
+  invariants {
+    self.filterId <> null;
+  }
+
+  event reset(value: Real) {
+    post: self.output = value;
+    post: self.initialised = true;
+    modifies: self.output, self.initialised;
+  }
+
+  event reset_flag() {
+    post: self.initialised = false;
+    modifies: self.initialised;
+  }
+
+  // The base C++ _apply implementation
+  event apply_internal(sample: Real, alpha: Real) {
+    pre: alpha >= 0.0;
+    pre: alpha <= 1.0;
+    
+    // In C++, the math is:
+    // output += (sample - output) * alpha;
+    // if (!initialised) { initialised = true; output = sample; }
+    //
+    // Let's analyze if there's a logic bug in the original C++ code:
+    // output += (sample - output) * alpha;
+    // if (!initialised) { initialised = true; output = sample; }
+    //
+    // On the first run (initialised = false), output is default-constructed to 0.0.
+    // So output += (sample - 0.0) * alpha = sample * alpha.
+    // Then it immediately sets output = sample, completely overwriting the work.
+    // So the post-state is always:
+    // if initialised@pre was false, output = sample.
+    // if initialised@pre was true, output = output@pre + (sample - output@pre) * alpha.
+    //
+    // Let's write this exact post-condition contract:
+    post: if self.initialised@pre then
+            self.output = self.output@pre + (sample - self.output@pre) * alpha
+          else
+            self.output = sample
+          endif;
+    post: self.initialised = true;
+    
+    modifies: self.output, self.initialised;
+  }
+}
+
+// LowPassFilterConstDt is a subkind representing a low-pass filter with constant dt
+subkind LowPassFilterConstDt specializes DigitalLPF {
+  property cutoffFreq: Real;
+  property alpha: Real;
+
+  invariants {
+    self.cutoffFreq >= 0.0;
+    self.alpha >= 0.0;
+    self.alpha <= 1.0;
+  }
+
+  event set_cutoff_frequency(sampleFreq: Real, newCutoffFreq: Real) {
+    pre: newCutoffFreq >= 0.0;
+    post: self.cutoffFreq = newCutoffFreq;
+    post: if sampleFreq <= 0.0 then
+            self.alpha = 1.0
+          else
+            self.alpha >= 0.0 and self.alpha <= 1.0
+          endif;
+    modifies: self.cutoffFreq, self.alpha;
+  }
+
+  event apply(sample: Real) {
+    post: if self.initialised@pre then
+            self.output = self.output@pre + (sample - self.output@pre) * self.alpha
+          else
+            self.output = sample
+          endif;
+    post: self.initialised = true;
+    modifies: self.output, self.initialised;
+  }
+}
+
+// LowPassFilter is a subkind representing a low-pass filter with variable dt
+subkind LowPassFilter specializes DigitalLPF {
+  property cutoffFreq: Real;
+
+  invariants {
+    self.cutoffFreq >= 0.0;
+  }
+
+  event set_cutoff_frequency(newCutoffFreq: Real) {
+    pre: newCutoffFreq >= 0.0;
+    post: self.cutoffFreq = newCutoffFreq;
+    modifies: self.cutoffFreq;
+  }
+
+  event apply(sample: Real, dt: Real) {
+    pre: dt >= 0.0;
+    
+    post: self.initialised = true;
+    modifies: self.output, self.initialised;
+  }
+}

@@ -1,0 +1,204 @@
+schema "onto/0.1";
+namespace meeting_scheduler_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// ─── Regulatory / Compliance Anchors ─────────────────────────────────────
+// GDPR Article 5: lawfulness, fairness, transparency; data minimization;
+// purpose limitation; storage limitation; integrity + confidentiality.
+// Meeting scheduler processes participant availability data (exclusion
+// & preference sets). This category documents the compliance posture.
+// NOTE: Categories CANNOT be specialized by subkinds per S21. Instead,
+// the base system kind (MeetingSchedulerSystem) already specializes
+// categories from Discovery; we attach additional invariants to the
+// FORMALIZED system kind directly as this subkind specializes the
+// BASE KIND only.
+category GdprArticle5Compliant where bearer: MeetingSchedulerSystem {
+  invariants {
+    // Documentary — the scheduler must explain why it collects constraints,
+    // only store them as long as the request is open, and protect their
+    // integrity.
+    bearer.systemId <> null;  // placeholder — actual invariants would check
+                              // data retention periods (not modeled here)
+  }
+}
+
+// ISO 27001: A.8.2 — Information classification; A.9.1 — Access control.
+// Meeting participants' availability data is sensitive (can infer
+// personal schedule).
+category Iso27001AccessControl where bearer: MeetingSchedulerSystem {
+  invariants {
+    // Each participant can only update their own constraints.
+    // The system must not expose one participant's constraints to another.
+    true;  // Placeholder — actual membership invariants would enforce
+           // bearer-level checks (e.g. bearer.enforcesParticipantIsolation).
+  }
+}
+
+// ─── Domain-Logical Invariants (Member-Quantified Categories) ────────────
+category AvailableDateRange where bearer: MeetingSchedulerSystem {
+  invariants {
+    bearer.dateRangeStart >= 0.0;
+    bearer.dateRangeEnd >= 0.0;
+    bearer.dateRangeEnd >= bearer.dateRangeStart;
+    // Must cover at least 1 day (represented as 1.0 in the real scale)
+    bearer.dateRangeEnd - bearer.dateRangeStart >= 1.0;
+  }
+}
+
+category ConstraintSanity where bearer: ParticipantConstraints {
+  invariants {
+    // No date can be both excluded and preferred — that would be contradictory.
+    bearer.exclusionSet->forAll(d | not bearer.preferenceSet->includes(d));
+    // Exclusion and preference sets are finite (implicitly enforced by the domain)
+    bearer.exclusionSet->size() >= 0;
+    bearer.preferenceSet->size() >= 0;
+  }
+}
+
+category NonEmptyExclusionMeaningful where bearer: ParticipantConstraints {
+  invariants {
+    // If preference set is empty, the system falls back to exclusion-only matching.
+    // This is a documentation invariant — no runtime enforcement needed.
+    true;
+  }
+}
+
+// ─── Passive Assumptions (Documentary) ───────────────────────────────────
+// @assumption ASSUME-1: The meeting scheduler operates on a shared Gregorian
+// calendar where dates are represented as Real numbers (days since epoch).
+// The representation is consistent across all participants.
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property assumptionCode: String;  // e.g., 'ASSUME-1'
+  property description: String;
+  property rationale: String;
+  property status: String;           // 'VALIDATED', 'OPEN', 'RISKY'
+  property validatedBy: String;       // ref to stakeholder or authority
+
+  invariants {
+    self.assumptionId <> null;
+    self.assumptionCode <> null;
+    self.description <> null;
+    self.rationale <> null;
+    self.status = 'OPEN' or self.status = 'VALIDATED' or self.status = 'RISKY';
+  }
+
+  // @assumption ASSUME-1: Date representation consistency
+  event recordAssumption(code: String, desc: String, rat: String) {
+    pre: code <> null;
+    pre: desc <> null;
+    pre: rat <> null;
+    post: self.assumptionCode = code;
+    post: self.description = desc;
+    post: self.rationale = rat;
+    post: self.status = 'OPEN';
+    modifies: self.assumptionCode, self.description, self.rationale, self.status;
+  }
+
+  // @assumption ASSUME-2: All participants are reachable via a notification
+  // channel (email, push, SMS). The system never needs to handle unreachable
+  // participants — that's a concern of the notification subsystem.
+
+  // @assumption ASSUME-3: The initiator's requested date range is finite
+  // and reasonable (max 365 days). The system will not perform infinite loops.
+  event setValidated(validatedBy: String) {
+    pre: self.status = 'OPEN';
+    post: self.status = 'VALIDATED';
+    post: self.validatedBy = validatedBy;
+    modifies: self.status, self.validatedBy;
+  }
+}
+
+// ─── Formalized System Subkind (Adds Active Business Rules) ──────────────
+// FIXED: Subkind can ONLY specialize Kind or Subkind (S21 rule).
+// The base kind MeetingSchedulerSystem already specializes categories
+// from Discovery (ParticipantConstraintsRespected). We add the
+// formalization-level invariants to the SYSTEM KIND (not the subkind)
+// via the categories declared above, and the formalized subkind
+// specializes ONLY the base system kind.
+// The member-quantified categories (GdprArticle5Compliant, Iso27001AccessControl,
+// AvailableDateRange) whose bearer is MeetingSchedulerSystem do NOT need
+// to be on the subkind's specializes clause — the verifier checks that
+// MEETINGSCHEDULERSYSTEM satisfies them. The subkind inherits.
+subkind MeetingSchedulerSystemFormalized specializes MeetingSchedulerSystem {
+  // Inherits all events from MeetingSchedulerSystem.
+  // Inherits all category memberships from MeetingSchedulerSystem.
+  // Adds guard events for business rules.
+
+  // ─── Active Business Rule: Reject Out-of-Range Proposal ─────────────────
+  // Physical / logical invariant: proposed date MUST be within [dateRangeStart, dateRangeEnd].
+  // This event fires when proposeDate would yield a result outside the range —
+  // but the requirements-level event's post-condition already ensures the result
+  // is in-range. This active rule is a RECOVERY guard that catches system faults
+  // or corruption (e.g., dateRangeStart mutated illegally).
+  event rejectOutOfRangeProposal(proposed: Real): Boolean {
+    pre: self.isOpen = true;
+    pre: proposed >= 0.0;
+    pre: (proposed < self.dateRangeStart) or (proposed > self.dateRangeEnd);
+    post: result = true;
+    post: self.conflictDetected = true;
+    post: self.proposedDate = -1.0;
+    modifies: self.conflictDetected, self.proposedDate;
+  }
+
+  // ─── Active Business Rule: Reject Conflicting Constraints ───────────────
+  // When a participant submits contradictory constraints (same date in both
+  // exclusion and preference sets), the system rejects the update BEFORE
+  // accepting it. This is stronger than the requirements-level event, which
+  // accepts the update and recomputes; Formalization says "no — reject
+  // contradictory data at the boundary."
+  event rejectContradictoryConstraints(constraints: Set<Real>, exclusions: Set<Real>): Boolean {
+    pre: self.isOpen = true;
+    pre: constraints->forAll(d | exclusions->includes(d));  // every preferred date is also excluded
+    post: result = true;
+    post: self.constraintsUpdated = false;
+    modifies: self.constraintsUpdated;
+  }
+
+  // ─── Active Business Rule: Reject Update After Conflict ─────────────────
+  // Once a conflict is detected (proposeDate found no valid date), no more
+  // constraint updates are accepted until the initiator is notified and the
+  // request is re-opened.
+  event rejectUpdateAfterConflict(): Boolean {
+    pre: self.isOpen = true;
+    pre: self.conflictDetected = true;
+    post: result = true;
+    post: self.constraintsUpdated = false;
+    modifies: self.constraintsUpdated;
+  }
+
+  // ─── Active Business Rule: Notify on Any Outcome ────────────────────────
+  // Regulatory / compliance rule: data subjects (participants) must be informed
+  // of the outcome of processing their personal data (GDPR Art. 13/14).
+  // Here we enforce that NOTIFICATION happens for EVERY proposal outcome,
+  // not just successful confirmation. The original requirements only notify
+  // on confirmation; Formalization adds notification on conflict too.
+  event notifyParticipantOnAnyOutcome(participantId: String, message: String) {
+    pre: self.isOpen = false;                          // meeting is no longer open (confirmed or conflicted)
+    pre: self.initiatorNotified = true;                // initiator already knows
+    pre: not self.participantsNotified;                // participants not yet notified
+    pre: message <> null;
+    post: self.participantsNotified = true;
+    modifies: self.participantsNotified;
+  }
+}
+
+// ─── Relators for Formalization-Level Constraints ─────────────────────────
+// Mediation between the system and its formal compliance obligations.
+relator GdprAuditTrail mediates (MeetingSchedulerSystemFormalized, MeetingSchedulerVendor) {
+  identity: auditId;
+  property auditId: String;
+  property lastAuditDate: String;
+  property complianceOfficer: String;
+  invariants {
+    self.auditId <> null;
+    self.lastAuditDate <> null;
+  }
+}
+
+// ─── Explicit Relations ──────────────────────────────────────────────────
+relation formalizationAssumptions: <<memberOf>> from FormalAssumptionRecord [0..*] to MeetingSchedulerSystemFormalized [1];
+relation gdprMediation: <<mediation>> from GdprAuditTrail [1] to MeetingSchedulerSystemFormalized [1];
+relation gdprVendorMediation: <<mediation>> from GdprAuditTrail [1] to MeetingSchedulerVendor [1];

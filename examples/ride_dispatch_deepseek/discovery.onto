@@ -1,0 +1,131 @@
+schema "onto/0.1";
+namespace ride_dispatch_discovery;
+
+// ─── Stakeholders ────────────────────────────────────────────────────────
+agent Passenger {
+  identity: passengerId;
+  property passengerId: String;
+  invariants {
+    self.passengerId <> null;
+  }
+}
+
+agent Driver {
+  identity: driverId;
+  property driverId: String;
+  property currentLatitude: Real;
+  property currentLongitude: Real;
+  property state: String;
+  invariants {
+    self.driverId <> null;
+    self.state = 'idle' or self.state = 'assigned' or self.state = 'en_route' or self.state = 'completed';
+  }
+}
+
+// The vendor / dev team — debitor of all stakeholder commitments.
+agent RideVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+  }
+}
+
+// ─── Glossary Terms (Sortals) ───────────────────────────────────────────
+kind RideRequest {
+  identity: requestId;
+  property requestId: String;
+  property pickupLatitude: Real;
+  property pickupLongitude: Real;
+  property destinationLatitude: Real;
+  property destinationLongitude: Real;
+  property preferences: String;
+  invariants {
+    self.requestId <> null;
+  }
+}
+
+kind Assignment {
+  identity: assignmentId;
+  property assignmentId: String;
+  property driverId: String;
+  property requestId: String;
+  property timestamp: Integer;
+  invariants {
+    self.assignmentId <> null;
+  }
+}
+
+// ─── Hard Goals (Commitments) ──────────────────────────────────────────
+// GOAL-1: Exactly one driver per ride (no ride has zero or more than one
+// driver after assignment). Predicate references system property that
+// Requirements will declare on RideDispatchSystem.
+commitment ExactlyOneDriverPerRide
+  debitor: RideVendor
+  creditor: Passenger {
+    identity: commitmentId;
+    property commitmentId: String;
+    property assignmentsPerRide: Integer;
+    predicate: self.assignmentsPerRide = 1;
+  }
+
+// GOAL-2: Valid state transitions (driver state changes follow
+// idle→assigned→en_route→completed; no skips).
+commitment ValidStateTransitions
+  debitor: RideVendor
+  creditor: Driver {
+    identity: commitmentId;
+    property commitmentId: String;
+    property driverStateTransitionValid: Boolean;
+    predicate: self.driverStateTransitionValid;
+  }
+
+// GOAL-3: Bounded assignment latency (first offer within 30 seconds or
+// radius escalation).
+commitment BoundedAssignmentLatency
+  debitor: RideVendor
+  creditor: Passenger {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxAssignmentLatencySec: Real;
+    predicate: self.maxAssignmentLatencySec <= 30.0;
+  }
+
+// GOAL-4: Driver mutual exclusion (no driver is in 'assigned' or
+// 'en_route' state for two different rides simultaneously).
+commitment DriverMutualExclusion
+  debitor: RideVendor
+  creditor: Driver {
+    identity: commitmentId;
+    property commitmentId: String;
+    property driverMutualExclusionHolds: Boolean;
+    predicate: self.driverMutualExclusionHolds;
+  }
+
+// ─── Constraint Goals (Categories) ──────────────────────────────────────
+// Category capturing the state machine invariant that driver states
+// must follow the documented pattern.
+category StateMachineConstraint {
+  invariants {
+    true;  // placeholder; actual invariant attached to system kind in Requirements
+  }
+}
+
+// Category capturing the mutual exclusion constraint.
+category MutualExclusionConstraint {
+  invariants {
+    true;  // placeholder; actual invariant attached to system kind in Requirements
+  }
+}
+
+// ─── Domain Story (Happening) ──────────────────────────────────────────
+happening RideAssignmentFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}

@@ -1,0 +1,296 @@
+schema "onto/0.1";
+namespace library_system_requirements;
+import "./discovery.onto";
+
+// =====================================================================
+// Requirements — Library Lending System
+//
+// The system as a black box.  Every Functional Requirement is an event
+// on LibraryLendingSystem.  Pre/post conditions are phrased in terms of
+// the system's own properties so the inter-stage verifier can prove
+// that each event's post implies the corresponding discovery commitment
+// predicate (Obligation 1) and that Design components refine each event
+// contract (Obligation 2 / Liskov-Wing).
+//
+// Constraint categories from Discovery are inherited via 'specializes'.
+// The 'refines:' clause on every event wires up the traceability graph.
+// =====================================================================
+
+// ─── System kind ──────────────────────────────────────────────────────────
+//
+// Specializes the four constraint categories declared in Discovery so
+// Z3 can verify invariant inheritance (Obligation 3).  A 'kind' may
+// specialise 'category', so this is legal per S21/S22.
+
+kind LibraryLendingSystem
+  specializes
+    MutuallyExclusiveCopyState,
+    IndebtedBorrowerBlock,
+    StaleReservationExpiry,
+    AccurateLateFeesConstraint {
+
+  identity: systemId;
+
+  // ── System identity ───────────────────────────────────────────────
+  property systemId: String;
+  property systemName: String;
+
+  // ── NFR thresholds (scalar bounds; bounding invariants below) ─────
+  // GOAL-2: fee threshold above which new loans are blocked (= 0.0,
+  //         i.e. any unpaid fee blocks; kept as a property so Design
+  //         can surface it as a configurable parameter).
+  property outstandingFeeThreshold: Real;
+
+  // GOAL-3: maximum days a reservation may be held post-availability
+  //         before it is auto-cancelled.
+  property maxReservationHoldDays: Integer;
+
+  // GOAL-4: daily late-fee rate applied per overdue day.
+  property dailyLateRate: Real;
+
+  // ── Loan ledger ───────────────────────────────────────────────────
+  // The system tracks the number of active (non-returned) loans so
+  // the invariant verifier can reason about exclusivity.
+  property activeLoansCount: Integer;
+
+  // ── Copy state mirror ─────────────────────────────────────────────
+  // At this stage we reason about a single representative copy
+  // whose status property is surfaced on the system for contract
+  // purposes.  Design will replace this with a proper component.
+  property currentCopyStatus: String;
+
+  // ── Borrower fee mirror ───────────────────────────────────────────
+  property currentBorrowerOutstandingFees: Real;
+
+  // ── Reservation expiry mirror ─────────────────────────────────────
+  property currentReservationAge: Integer;
+  property currentReservationCancelled: Boolean;
+
+  // ── Late-fee computation mirror ───────────────────────────────────
+  property lastFeeComputed: Real;
+
+  // ─── System-wide invariants ───────────────────────────────────────
+  invariants {
+    self.systemId <> null;
+    self.systemName <> null;
+    self.outstandingFeeThreshold >= 0.0;
+    self.maxReservationHoldDays > 0;
+    self.dailyLateRate > 0.0;
+    self.activeLoansCount >= 0;
+    self.currentBorrowerOutstandingFees >= 0.0;
+    self.currentReservationAge >= 0;
+    self.lastFeeComputed >= 0.0;
+  }
+
+  // ===================================================================
+  // FR-1  checkOutCopy
+  // Assign an AVAILABLE copy to a borrower who has no outstanding fees.
+  // Discharges:
+  //   GOAL-1 — MutuallyExclusiveCopyStateCommitment  (copy -> LOANED)
+  //   GOAL-2 — IndebtedBorrowerBlockCommitment       (fee guard)
+  // ===================================================================
+  event checkOutCopy(dueDate: Integer, loanDate: Integer)
+    refines
+      library_system_discovery::MutuallyExclusiveCopyStateCommitment,
+      library_system_discovery::IndebtedBorrowerBlockCommitment {
+
+    pre: self.currentCopyStatus = 'AVAILABLE';
+    pre: self.currentBorrowerOutstandingFees <= self.outstandingFeeThreshold;
+    pre: dueDate > loanDate;
+
+    post: self.currentCopyStatus = 'LOANED';
+    post: self.activeLoansCount = self.activeLoansCount@pre + 1;
+
+    modifies: self.currentCopyStatus, self.activeLoansCount;
+  }
+
+  // ===================================================================
+  // FR-2  returnLoan
+  // Return a LOANED copy with no active reservation:
+  //   - copy transitions to AVAILABLE
+  //   - if overdue, late fee = (returnDate - dueDate) * dailyLateRate
+  // Discharges:
+  //   GOAL-1 — MutuallyExclusiveCopyStateCommitment  (copy -> AVAILABLE)
+  //   GOAL-4 — AccurateLateFeesCommitment            (fee formula)
+  // ===================================================================
+  event returnLoan(returnDate: Integer, dueDate: Integer)
+    refines
+      library_system_discovery::MutuallyExclusiveCopyStateCommitment,
+      library_system_discovery::AccurateLateFeesCommitment {
+
+    pre: self.currentCopyStatus = 'LOANED';
+    pre: returnDate > 0;
+    pre: dueDate > 0;
+
+    post: self.currentCopyStatus = 'AVAILABLE';
+    post: self.activeLoansCount = self.activeLoansCount@pre - 1;
+    post: self.lastFeeComputed =
+            (if returnDate > dueDate
+             then (returnDate - dueDate) * self.dailyLateRate
+             else 0.0
+             endif);
+    post: self.currentBorrowerOutstandingFees =
+            self.currentBorrowerOutstandingFees@pre + self.lastFeeComputed;
+
+    modifies:
+      self.currentCopyStatus,
+      self.activeLoansCount,
+      self.lastFeeComputed,
+      self.currentBorrowerOutstandingFees;
+  }
+
+  // ===================================================================
+  // FR-3  returnLoanWithReservation
+  // Return a LOANED copy that has an active reservation waiting:
+  //   - copy transitions to RESERVED (not AVAILABLE)
+  //   - late fee logic identical to FR-2
+  //   - reservation age clock resets to 0
+  // Discharges:
+  //   GOAL-1 — MutuallyExclusiveCopyStateCommitment  (copy -> RESERVED)
+  //   GOAL-4 — AccurateLateFeesCommitment
+  // ===================================================================
+  event returnLoanWithReservation(returnDate: Integer, dueDate: Integer)
+    refines
+      library_system_discovery::MutuallyExclusiveCopyStateCommitment,
+      library_system_discovery::AccurateLateFeesCommitment {
+
+    pre: self.currentCopyStatus = 'LOANED';
+    pre: returnDate > 0;
+    pre: dueDate > 0;
+
+    post: self.currentCopyStatus = 'RESERVED';
+    post: self.activeLoansCount = self.activeLoansCount@pre - 1;
+    post: self.currentReservationAge = 0;
+    post: self.currentReservationCancelled = false;
+    post: self.lastFeeComputed =
+            (if returnDate > dueDate
+             then (returnDate - dueDate) * self.dailyLateRate
+             else 0.0
+             endif);
+    post: self.currentBorrowerOutstandingFees =
+            self.currentBorrowerOutstandingFees@pre + self.lastFeeComputed;
+
+    modifies:
+      self.currentCopyStatus,
+      self.activeLoansCount,
+      self.currentReservationAge,
+      self.currentReservationCancelled,
+      self.lastFeeComputed,
+      self.currentBorrowerOutstandingFees;
+  }
+
+  // ===================================================================
+  // FR-4  placeReservation
+  // A borrower places a reservation on a LOANED copy.
+  // Discharges:
+  //   GOAL-1 — MutuallyExclusiveCopyStateCommitment  (copy stays LOANED)
+  // ===================================================================
+  event placeReservation()
+    refines
+      library_system_discovery::MutuallyExclusiveCopyStateCommitment {
+
+    pre: self.currentCopyStatus = 'LOANED';
+    pre: self.currentBorrowerOutstandingFees <= self.outstandingFeeThreshold;
+    pre: self.currentReservationCancelled = true;
+
+    post: self.currentCopyStatus = 'LOANED';
+    post: self.currentReservationAge = 0;
+    post: self.currentReservationCancelled = false;
+
+    modifies:
+      self.currentCopyStatus,
+      self.currentReservationAge,
+      self.currentReservationCancelled;
+  }
+
+  // ===================================================================
+  // FR-5  expireReservation
+  // Auto-cancel a RESERVED copy whose reservation age exceeds the
+  // configured hold window; copy transitions back to AVAILABLE.
+  // Discharges:
+  //   GOAL-1 — MutuallyExclusiveCopyStateCommitment  (copy -> AVAILABLE)
+  //   GOAL-3 — StaleReservationExpiryCommitment       (7-day rule)
+  // ===================================================================
+  event expireReservation()
+    refines
+      library_system_discovery::MutuallyExclusiveCopyStateCommitment,
+      library_system_discovery::StaleReservationExpiryCommitment {
+
+    pre: self.currentCopyStatus = 'RESERVED';
+    pre: self.currentReservationAge > self.maxReservationHoldDays;
+    pre: not self.currentReservationCancelled;
+
+    post: self.currentCopyStatus = 'AVAILABLE';
+    post: self.currentReservationCancelled = true;
+
+    modifies:
+      self.currentCopyStatus,
+      self.currentReservationCancelled;
+  }
+
+  // ===================================================================
+  // FR-6  pickUpReservation
+  // The borrower collects a RESERVED copy within the hold window:
+  //   - copy transitions from RESERVED -> LOANED
+  //   - reservation slot is consumed
+  // Discharges:
+  //   GOAL-1 — MutuallyExclusiveCopyStateCommitment
+  //   GOAL-2 — IndebtedBorrowerBlockCommitment (fee guard at pick-up)
+  // ===================================================================
+  event pickUpReservation(dueDate: Integer, pickUpDate: Integer)
+    refines
+      library_system_discovery::MutuallyExclusiveCopyStateCommitment,
+      library_system_discovery::IndebtedBorrowerBlockCommitment {
+
+    pre: self.currentCopyStatus = 'RESERVED';
+    pre: self.currentReservationAge <= self.maxReservationHoldDays;
+    pre: not self.currentReservationCancelled;
+    pre: self.currentBorrowerOutstandingFees <= self.outstandingFeeThreshold;
+    pre: dueDate > pickUpDate;
+
+    post: self.currentCopyStatus = 'LOANED';
+    post: self.activeLoansCount = self.activeLoansCount@pre + 1;
+    post: self.currentReservationCancelled = true;
+
+    modifies:
+      self.currentCopyStatus,
+      self.activeLoansCount,
+      self.currentReservationCancelled;
+  }
+
+  // ===================================================================
+  // FR-7  payLateFees
+  // Record that a borrower has settled outstanding late fees in full.
+  // Post-condition implies outstandingFees = 0, unblocking future loans.
+  // Discharges:
+  //   GOAL-2 — IndebtedBorrowerBlockCommitment (clears the block)
+  // ===================================================================
+  event payLateFees(amount: Real)
+    refines
+      library_system_discovery::IndebtedBorrowerBlockCommitment {
+
+    pre: amount > 0.0;
+    pre: amount >= self.currentBorrowerOutstandingFees;
+
+    post: self.currentBorrowerOutstandingFees = 0.0;
+
+    modifies: self.currentBorrowerOutstandingFees;
+  }
+
+  // ===================================================================
+  // FR-8  rejectLoanDueToFees  (business-rule rejection event)
+  // Explicit rejection path when a borrower with outstanding fees
+  // attempts to check out.  Pure rejection — no state modified.
+  // Discharges:
+  //   GOAL-2 — IndebtedBorrowerBlockCommitment
+  // ===================================================================
+  event rejectLoanDueToFees()
+    refines
+      library_system_discovery::IndebtedBorrowerBlockCommitment {
+
+    pre: self.currentBorrowerOutstandingFees > self.outstandingFeeThreshold;
+
+    post: self.currentBorrowerOutstandingFees > self.outstandingFeeThreshold;
+  }
+
+}

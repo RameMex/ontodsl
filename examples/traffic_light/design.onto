@@ -1,0 +1,445 @@
+schema "onto/0.1";
+namespace traffic_light_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Design — Intersection Traffic Light Controller
+//
+// Decomposes TrafficLightControllerSystem into four cohesive
+// components, each owning a distinct slice of state:
+//
+//   PhaseScheduler       — phase sequencing, timing, phase-cycle logic
+//   SignalHeadController — per-axis signal state (GREEN/YELLOW/RED)
+//   PreemptionController — emergency preemption detection and ALL-RED
+//   PedestrianController — pedestrian button requests and WALK signal
+//
+// Components are SIBLINGS (not subkinds of the system kind).
+// Interfaces between components are relators.
+// Data flows across component boundaries are happenings.
+//
+// Every component event that implements a Requirements event carries
+// a structured 'refines:' clause for inter-stage verifier (O4/W38/W39).
+// =====================================================================
+
+// ─── Roles (one per component endpoint in each interface) ────────────
+
+role SchedulerEndpoint mediated-by PhaseSchedulerChannel of PhaseScheduler {
+  property schedulerId: String;
+}
+
+role SignalHeadEndpoint mediated-by PhaseSchedulerChannel of SignalHeadController {
+  property signalHeadId: String;
+}
+
+role SignalHeadPreemptionEndpoint mediated-by PreemptionChannel of SignalHeadController {
+  property signalHeadId: String;
+}
+
+role PreemptionEndpoint mediated-by PreemptionChannel of PreemptionController {
+  property preemptionId: String;
+}
+
+role SignalHeadPedestrianEndpoint mediated-by PedestrianChannel of SignalHeadController {
+  property signalHeadId: String;
+}
+
+role PedestrianEndpoint mediated-by PedestrianChannel of PedestrianController {
+  property pedestrianControllerId: String;
+}
+
+// ─── Component 1: PhaseScheduler ─────────────────────────────────────
+// Owns: phase sequencing, configured durations, elapsed-time counters,
+// the current phase identifier, and the all-red dwell after preemption.
+
+kind PhaseScheduler {
+  identity: schedulerId;
+  property schedulerId: String;
+
+  property currentPhaseId: String;
+  property activeGreenAxis: String;
+
+  property nsStateElapsedSeconds: Real;
+  property ewStateElapsedSeconds: Real;
+
+  property minimumYellowSeconds: Real;
+  property allRedDwellSeconds: Real;
+
+  // IDLE | GREEN | YELLOW | ALL_RED_DWELL
+  property schedulerState: String;
+
+  invariants {
+    self.schedulerId <> null;
+    self.minimumYellowSeconds >= 3.0;
+    self.allRedDwellSeconds >= 0.0;
+    self.nsStateElapsedSeconds >= 0.0;
+    self.ewStateElapsedSeconds >= 0.0;
+    (self.schedulerState = 'IDLE'         or
+     self.schedulerState = 'GREEN'        or
+     self.schedulerState = 'YELLOW'       or
+     self.schedulerState = 'ALL_RED_DWELL');
+    (self.activeGreenAxis = 'NS' or
+     self.activeGreenAxis = 'EW' or
+     self.activeGreenAxis = 'NONE');
+  }
+
+  // ── DS-SCHED-1: Activate a new green phase ──────────────────────
+  event activatePhase(phaseId: String, greenAxis: String)
+    refines traffic_light_requirements::TrafficLightControllerSystem.startPhase {
+    pre: self.schedulerState = 'IDLE';
+    pre: phaseId <> null;
+    pre: (greenAxis = 'NS' or greenAxis = 'EW');
+    post: self.currentPhaseId = phaseId;
+    post: self.activeGreenAxis = greenAxis;
+    post: self.schedulerState = 'GREEN';
+    post: self.nsStateElapsedSeconds = 0.0;
+    post: self.ewStateElapsedSeconds = 0.0;
+    modifies: self.currentPhaseId,
+              self.activeGreenAxis,
+              self.schedulerState,
+              self.nsStateElapsedSeconds,
+              self.ewStateElapsedSeconds;
+  }
+
+  // ── DS-SCHED-2: Issue yellow transition command ──────────────────
+  event issueYellowCommand(axis: String)
+    refines traffic_light_requirements::TrafficLightControllerSystem.beginYellow {
+    pre: self.schedulerState = 'GREEN';
+    pre: (axis = 'NS' or axis = 'EW');
+    pre: self.activeGreenAxis = axis;
+    post: self.schedulerState = 'YELLOW';
+    post: (axis = 'NS') implies (self.nsStateElapsedSeconds = 0.0);
+    post: (axis = 'EW') implies (self.ewStateElapsedSeconds = 0.0);
+    modifies: self.schedulerState,
+              self.nsStateElapsedSeconds,
+              self.ewStateElapsedSeconds;
+  }
+
+  // ── DS-SCHED-3: Issue red command after yellow expires ───────────
+  event issueRedAfterYellow(axis: String, elapsedYellowSeconds: Real)
+    refines traffic_light_requirements::TrafficLightControllerSystem.endYellowGoRed {
+    pre: self.schedulerState = 'YELLOW';
+    pre: (axis = 'NS' or axis = 'EW');
+    pre: elapsedYellowSeconds >= self.minimumYellowSeconds;
+    pre: self.minimumYellowSeconds >= 3.0;
+    post: self.schedulerState = 'ALL_RED_DWELL';
+    post: (axis = 'NS') implies (self.nsStateElapsedSeconds = elapsedYellowSeconds);
+    post: (axis = 'EW') implies (self.ewStateElapsedSeconds = elapsedYellowSeconds);
+    modifies: self.schedulerState,
+              self.nsStateElapsedSeconds,
+              self.ewStateElapsedSeconds;
+  }
+
+  // ── DS-SCHED-4: Complete all-red dwell, return to IDLE ──────────
+  event completeAllRedDwell() {
+    pre: self.schedulerState = 'ALL_RED_DWELL';
+    post: self.schedulerState = 'IDLE';
+    post: self.activeGreenAxis = 'NONE';
+    modifies: self.schedulerState, self.activeGreenAxis;
+  }
+
+  // ── DS-SCHED-5: Enter ALL-RED due to preemption ──────────────────
+  event enterPreemptionAllRed()
+    refines traffic_light_requirements::TrafficLightControllerSystem.commandAllRedPreemption {
+    pre: (self.schedulerState = 'GREEN' or self.schedulerState = 'YELLOW');
+    post: self.schedulerState = 'IDLE';
+    post: self.activeGreenAxis = 'NONE';
+    modifies: self.schedulerState, self.activeGreenAxis;
+  }
+
+  // ── DS-SCHED-6: Advance elapsed-time counters (clock tick) ───────
+  event tickElapsed(deltaNs: Real, deltaEw: Real)
+    refines traffic_light_requirements::TrafficLightControllerSystem.clockTick {
+    pre: deltaNs >= 0.0;
+    pre: deltaEw >= 0.0;
+    post: self.nsStateElapsedSeconds = self.nsStateElapsedSeconds@pre + deltaNs;
+    post: self.ewStateElapsedSeconds = self.ewStateElapsedSeconds@pre + deltaEw;
+    modifies: self.nsStateElapsedSeconds, self.ewStateElapsedSeconds;
+  }
+}
+
+// ─── Component 2: SignalHeadController ───────────────────────────────
+// Owns: the per-axis signal state (nsSignalState, ewSignalState) and
+// the mutual-exclusion enforcement.  Single authority writing to
+// hardware signal heads.
+
+kind SignalHeadController {
+  identity: signalHeadId;
+  property signalHeadId: String;
+
+  property nsSignalState: String;
+  property ewSignalState: String;
+
+  invariants {
+    self.signalHeadId <> null;
+    (self.nsSignalState = 'GREEN' or
+     self.nsSignalState = 'YELLOW' or
+     self.nsSignalState = 'RED');
+    (self.ewSignalState = 'GREEN' or
+     self.ewSignalState = 'YELLOW' or
+     self.ewSignalState = 'RED');
+    not (self.nsSignalState = 'GREEN' and self.ewSignalState = 'GREEN');
+  }
+
+  // ── DS-SHC-1: Set one axis GREEN, crossing axis RED ─────────────
+  event setAxisGreen(greenAxis: String)
+    refines traffic_light_requirements::TrafficLightControllerSystem.startPhase {
+    pre: (greenAxis = 'NS' or greenAxis = 'EW');
+    pre: (greenAxis = 'NS') implies (self.ewSignalState = 'RED');
+    pre: (greenAxis = 'EW') implies (self.nsSignalState = 'RED');
+    post: (greenAxis = 'NS') implies (self.nsSignalState = 'GREEN');
+    post: (greenAxis = 'NS') implies (self.ewSignalState = 'RED');
+    post: (greenAxis = 'EW') implies (self.ewSignalState = 'GREEN');
+    post: (greenAxis = 'EW') implies (self.nsSignalState = 'RED');
+    post: not (self.nsSignalState = 'GREEN' and self.ewSignalState = 'GREEN');
+    modifies: self.nsSignalState, self.ewSignalState;
+  }
+
+  // ── DS-SHC-2: Transition one axis from GREEN to YELLOW ───────────
+  event setAxisYellow(axis: String)
+    refines traffic_light_requirements::TrafficLightControllerSystem.beginYellow {
+    pre: (axis = 'NS' or axis = 'EW');
+    pre: (axis = 'NS') implies (self.nsSignalState = 'GREEN');
+    pre: (axis = 'EW') implies (self.ewSignalState = 'GREEN');
+    post: (axis = 'NS') implies (self.nsSignalState = 'YELLOW');
+    post: (axis = 'EW') implies (self.ewSignalState = 'YELLOW');
+    modifies: self.nsSignalState, self.ewSignalState;
+  }
+
+  // ── DS-SHC-3: Transition one axis from YELLOW to RED ────────────
+  event setAxisRed(axis: String)
+    refines traffic_light_requirements::TrafficLightControllerSystem.endYellowGoRed {
+    pre: (axis = 'NS' or axis = 'EW');
+    pre: (axis = 'NS') implies (self.nsSignalState = 'YELLOW');
+    pre: (axis = 'EW') implies (self.ewSignalState = 'YELLOW');
+    post: (axis = 'NS') implies (self.nsSignalState = 'RED');
+    post: (axis = 'EW') implies (self.ewSignalState = 'RED');
+    modifies: self.nsSignalState, self.ewSignalState;
+  }
+
+  // ── DS-SHC-4: Set ALL-RED (preemption or all-red dwell) ──────────
+  event setAllRed()
+    refines traffic_light_requirements::TrafficLightControllerSystem.commandAllRedPreemption {
+    post: self.nsSignalState = 'RED';
+    post: self.ewSignalState = 'RED';
+    modifies: self.nsSignalState, self.ewSignalState;
+  }
+}
+
+// ─── Component 3: PreemptionController ───────────────────────────────
+// Owns: preemptionActive flag, allRedCommandedAt timestamp,
+// maxPreemptionResponseSeconds budget, and the response-time gate.
+
+kind PreemptionController {
+  identity: preemptionControllerId;
+  property preemptionControllerId: String;
+
+  property preemptionActive: Boolean;
+  property allRedCommandedAt: Real;
+  property maxPreemptionResponseSeconds: Real;
+
+  invariants {
+    self.preemptionControllerId <> null;
+    self.maxPreemptionResponseSeconds <= 1.0;
+    self.maxPreemptionResponseSeconds > 0.0;
+    self.allRedCommandedAt >= 0.0;
+  }
+
+  // ── DS-PMP-1: Receive preemption sensor activation ───────────────
+  event handlePreemptionSensor(responseTimeSeconds: Real)
+    refines traffic_light_requirements::TrafficLightControllerSystem.commandAllRedPreemption {
+    pre: self.preemptionActive = false;
+    pre: responseTimeSeconds >= 0.0;
+    pre: responseTimeSeconds <= self.maxPreemptionResponseSeconds;
+    post: self.preemptionActive = true;
+    post: self.allRedCommandedAt = responseTimeSeconds;
+    post: responseTimeSeconds <= self.maxPreemptionResponseSeconds;
+    post: self.maxPreemptionResponseSeconds <= 1.0;
+    modifies: self.preemptionActive, self.allRedCommandedAt;
+  }
+
+  // ── DS-PMP-2: Clear preemption after vehicle passes ──────────────
+  event handlePreemptionClear()
+    refines traffic_light_requirements::TrafficLightControllerSystem.clearPreemption {
+    pre: self.preemptionActive = true;
+    post: self.preemptionActive = false;
+    modifies: self.preemptionActive;
+  }
+
+  // ── DS-PMP-3: Reject over-budget preemption response (BR-5) ─────
+  event rejectLateResponse(responseTimeSeconds: Real)
+    refines traffic_light_formalization::TrafficLightControllerSystemFormalized.rejectLatePreemptionResponse {
+    pre: self.preemptionActive = false;
+    pre: responseTimeSeconds > self.maxPreemptionResponseSeconds;
+  }
+}
+
+// ─── Component 4: PedestrianController ───────────────────────────────
+// Owns: pedestrian request state (pending flag, approach axis) and the
+// WALK signal active flag.
+
+kind PedestrianController {
+  identity: pedestrianControllerId;
+  property pedestrianControllerId: String;
+
+  property pedestrianRequestPending: Boolean;
+  property pedestrianRequestApproach: String;
+  property pedestrianWalkActive: Boolean;
+
+  invariants {
+    self.pedestrianControllerId <> null;
+    (self.pedestrianRequestApproach = 'NS' or
+     self.pedestrianRequestApproach = 'EW' or
+     self.pedestrianRequestApproach = 'NONE');
+  }
+
+  // ── DS-PED-1: Register pedestrian button press ───────────────────
+  event receiveButtonPress(approachAxis: String)
+    refines traffic_light_requirements::TrafficLightControllerSystem.registerPedestrianRequest {
+    pre: (approachAxis = 'NS' or approachAxis = 'EW');
+    pre: self.pedestrianRequestPending = false;
+    post: self.pedestrianRequestPending = true;
+    post: self.pedestrianRequestApproach = approachAxis;
+    modifies: self.pedestrianRequestPending, self.pedestrianRequestApproach;
+  }
+
+  // ── DS-PED-2: Grant WALK when compatible phase is active ─────────
+  event grantWalk(nsState: String, ewState: String)
+    refines traffic_light_requirements::TrafficLightControllerSystem.activateWalk {
+    pre: self.pedestrianRequestPending = true;
+    pre: (nsState = 'GREEN' or nsState = 'YELLOW' or nsState = 'RED');
+    pre: (ewState = 'GREEN' or ewState = 'YELLOW' or ewState = 'RED');
+    pre: (self.pedestrianRequestApproach = 'NS') implies (nsState = 'GREEN');
+    pre: (self.pedestrianRequestApproach = 'EW') implies (ewState = 'GREEN');
+    pre: (self.pedestrianRequestApproach = 'NS') implies (not (ewState = 'GREEN'));
+    pre: (self.pedestrianRequestApproach = 'EW') implies (not (nsState = 'GREEN'));
+    post: self.pedestrianWalkActive = true;
+    post: self.pedestrianRequestPending = false;
+    modifies: self.pedestrianWalkActive, self.pedestrianRequestPending;
+  }
+
+  // ── DS-PED-3: Deactivate WALK (approach leaves GREEN) ────────────
+  event revokeWalk()
+    refines traffic_light_requirements::TrafficLightControllerSystem.deactivateWalk {
+    pre: self.pedestrianWalkActive = true;
+    post: self.pedestrianWalkActive = false;
+    modifies: self.pedestrianWalkActive;
+  }
+
+  // ── DS-PED-4: Reject unsafe WALK activation (BR-4) ──────────────
+  event rejectConflictingWalk(nsState: String, ewState: String)
+    refines traffic_light_formalization::TrafficLightControllerSystemFormalized.rejectUnsafeWalkActivation {
+    pre: self.pedestrianRequestPending = true;
+    pre: (self.pedestrianRequestApproach = 'NS') implies (ewState = 'GREEN');
+    pre: (self.pedestrianRequestApproach = 'EW') implies (nsState = 'GREEN');
+  }
+
+  // ── DS-PED-5: Clear walk on preemption ALL-RED ───────────────────
+  event clearWalkOnPreemption()
+    refines traffic_light_requirements::TrafficLightControllerSystem.commandAllRedPreemption {
+    pre: self.pedestrianWalkActive = true;
+    post: self.pedestrianWalkActive = false;
+    modifies: self.pedestrianWalkActive;
+  }
+}
+
+// ─── Interface Relators ───────────────────────────────────────────────
+
+// PhaseSchedulerChannel: carries phase-activation and signal-state
+// commands from PhaseScheduler to SignalHeadController.
+relator PhaseSchedulerChannel mediates (SchedulerEndpoint, SignalHeadEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property lastCommandType: String;
+  property lastCommandAxis: String;
+  invariants {
+    self.channelId <> null;
+    (self.lastCommandType = 'ACTIVATE_GREEN' or
+     self.lastCommandType = 'BEGIN_YELLOW'   or
+     self.lastCommandType = 'GO_RED'         or
+     self.lastCommandType = 'ALL_RED_DWELL'  or
+     self.lastCommandType = 'NONE');
+  }
+}
+
+// PreemptionChannel: carries ALL-RED command from PreemptionController
+// to SignalHeadController.
+relator PreemptionChannel mediates (PreemptionEndpoint, SignalHeadPreemptionEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property commandIssuedAt: Real;
+  property responseTimeSeconds: Real;
+  invariants {
+    self.channelId <> null;
+    self.responseTimeSeconds >= 0.0;
+    self.responseTimeSeconds <= 1.0;
+  }
+}
+
+// PedestrianChannel: carries signal-state query results from
+// SignalHeadController to PedestrianController.
+relator PedestrianChannel mediates (PedestrianEndpoint, SignalHeadPedestrianEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property queriedNsState: String;
+  property queriedEwState: String;
+  invariants {
+    self.channelId <> null;
+    (self.queriedNsState = 'GREEN' or
+     self.queriedNsState = 'YELLOW' or
+     self.queriedNsState = 'RED');
+    (self.queriedEwState = 'GREEN' or
+     self.queriedEwState = 'YELLOW' or
+     self.queriedEwState = 'RED');
+    not (self.queriedNsState = 'GREEN' and self.queriedEwState = 'GREEN');
+  }
+}
+
+// ─── Explicit Component Relations ────────────────────────────────────
+
+relation schedToChannel: <<mediation>> from PhaseSchedulerChannel [1] to SchedulerEndpoint [1];
+relation channelToSignal: <<mediation>> from PhaseSchedulerChannel [1] to SignalHeadEndpoint [1];
+relation preemptToChannel: <<mediation>> from PreemptionChannel [1] to PreemptionEndpoint [1];
+relation channelToSignalPreempt: <<mediation>> from PreemptionChannel [1] to SignalHeadPreemptionEndpoint [1];
+relation pedToChannel: <<mediation>> from PedestrianChannel [1] to PedestrianEndpoint [1];
+relation channelToSignalPed: <<mediation>> from PedestrianChannel [1] to SignalHeadPedestrianEndpoint [1];
+
+// ─── Cross-Component Data Flow Happenings ────────────────────────────
+
+// Normal phase cycle: Scheduler → SignalHead → (tick loop) → Scheduler.
+happening NormalPhaseCycleDesignFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+// Emergency preemption flow: Preemption → SignalHead + Scheduler.
+happening EmergencyPreemptionDesignFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property responseTimeSeconds: Real;
+  invariants {
+    self.flowId <> null;
+    self.responseTimeSeconds >= 0.0;
+    self.responseTimeSeconds <= 1.0;
+  }
+}
+
+// Pedestrian walk grant flow: Pedestrian → PedestrianChannel query →
+// PedestrianController grants WALK.
+happening PedestrianWalkDesignFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}

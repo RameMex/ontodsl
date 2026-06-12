@@ -1,0 +1,149 @@
+schema "onto/0.1";
+namespace patient_monitoring_requirements;
+import "./discovery.onto";
+
+// The discovery.onto already declares BedsideMonitorSystem with the
+// base properties (implausibleThresholdLower, implausibleThresholdUpper,
+// maxAlarmLatencyMs, etc.). We cannot redeclare them in a subkind.
+//
+// The correct approach: since the base kind already has the mirrored
+// properties, we only add the NEW properties that did NOT appear in
+// discovery.onto (currentHeartRate, heartRatePlausible, rejectionCount,
+// sensorConnected, sensorLastSignalTimestamp, alarmActive, alarmSilenced,
+// alarmSilenceTimestamp, alarmType) plus the events.
+//
+// We declare the subkind with ONLY new members to avoid shadowing errors.
+
+subkind BedsideMonitorSystemRequirements specializes BedsideMonitorSystem {
+  property currentHeartRate: Real;
+  property heartRatePlausible: Boolean;
+  property rejectionCount: Integer;
+  property sensorConnected: Boolean;
+  property sensorLastSignalTimestamp: Real;
+  property alarmActive: Boolean;
+  property alarmSilenced: Boolean;
+  property alarmSilenceTimestamp: Real;
+  property alarmType: String;
+
+  invariants {
+    self.currentHeartRate >= 0.0;
+    self.rejectionCount >= 0;
+    self.sensorLastSignalTimestamp >= 0.0;
+    self.alarmSilenceTimestamp >= 0.0;
+  }
+
+  event deliverHeartRateReading(newValue: Real, timestamp: Real): Real {
+    pre: timestamp >= 0.0;
+    pre: self.sensorConnected = true;
+    post: if newValue >= self.implausibleThresholdLower and newValue <= self.implausibleThresholdUpper then
+            self.currentHeartRate = newValue and
+            self.heartRatePlausible = true and
+            self.rejectionCount = self.rejectionCount@pre and
+            self.sensorLastSignalTimestamp = timestamp
+          else
+            self.currentHeartRate = self.currentHeartRate@pre and
+            self.heartRatePlausible = false and
+            self.rejectionCount = self.rejectionCount@pre + 1 and
+            self.sensorLastSignalTimestamp = self.sensorLastSignalTimestamp@pre
+          endif;
+    post: result = if newValue >= self.implausibleThresholdLower and newValue <= self.implausibleThresholdUpper then newValue else -1.0 endif;
+    modifies: self.currentHeartRate, self.heartRatePlausible, self.rejectionCount, self.sensorLastSignalTimestamp;
+  }
+
+  event raiseThresholdAlarm(vitalType: String, actualValue: Real, thresholdUpper: Real, thresholdLower: Real, crossTimestamp: Real) {
+    pre: crossTimestamp >= 0.0;
+    pre: (actualValue > thresholdUpper) or (actualValue < thresholdLower);
+    pre: self.alarmActive = false;
+    pre: not self.alarmSilenced;
+    post: self.alarmActive = true;
+    post: self.alarmSilenced = false;
+    post: self.alarmType = if actualValue > thresholdUpper then 'high_hr' else 'low_hr' endif;
+    modifies: self.alarmActive, self.alarmSilenced, self.alarmType;
+  }
+
+  event detectSensorDisconnect(lossDetectedAt: Real) {
+    pre: self.sensorConnected = true;
+    pre: lossDetectedAt - self.sensorLastSignalTimestamp > self.maxSignalLossMsBeforeAlarm;
+    pre: self.alarmActive = false;
+    post: self.sensorConnected = false;
+    post: self.alarmActive = true;
+    post: self.alarmSilenced = false;
+    post: self.alarmType = 'disconnect';
+    modifies: self.sensorConnected, self.alarmActive, self.alarmSilenced, self.alarmType;
+  }
+
+  event silenceAlarm(silenceTimestamp: Real) {
+    pre: self.alarmActive = true;
+    pre: not self.alarmSilenced;
+    pre: silenceTimestamp >= self.sensorLastSignalTimestamp;
+    post: self.alarmSilenced = true;
+    post: self.alarmSilenceTimestamp = silenceTimestamp;
+    post: self.alarmActive = true;
+    post: self.alarmType = self.alarmType@pre;
+    modifies: self.alarmSilenced, self.alarmSilenceTimestamp;
+  }
+
+  event autoRearmAlarm(rearmTimestamp: Real) {
+    pre: self.alarmSilenced = true;
+    pre: rearmTimestamp - self.alarmSilenceTimestamp >= self.silenceAutoRearmMs;
+    post: self.alarmSilenced = false;
+    post: self.alarmActive = true;
+    post: self.alarmSilenceTimestamp = self.alarmSilenceTimestamp@pre;
+    modifies: self.alarmSilenced;
+  }
+
+  event clearAlarm() {
+    pre: self.alarmActive = true;
+    post: self.alarmActive = false;
+    post: self.alarmSilenced = false;
+    post: self.alarmType = 'none';
+    modifies: self.alarmActive, self.alarmSilenced, self.alarmType;
+  }
+
+  event restoreSensorConnection(newValue: Real, timestamp: Real) {
+    pre: self.sensorConnected = false;
+    pre: timestamp >= 0.0;
+    post: self.sensorConnected = true;
+    post: self.sensorLastSignalTimestamp = timestamp;
+    post: if newValue >= self.implausibleThresholdLower and newValue <= self.implausibleThresholdUpper then
+            self.currentHeartRate = newValue and
+            self.heartRatePlausible = true and
+            self.rejectionCount = self.rejectionCount@pre
+          else
+            self.currentHeartRate = self.currentHeartRate@pre and
+            self.heartRatePlausible = false and
+            self.rejectionCount = self.rejectionCount@pre + 1
+          endif;
+    post: if self.alarmActive = true and self.alarmType = 'disconnect' then
+            self.alarmActive = false and
+            self.alarmSilenced = false and
+            self.alarmType = 'none'
+          else
+            self.alarmActive = self.alarmActive@pre and
+            self.alarmSilenced = self.alarmSilenced@pre and
+            self.alarmType = self.alarmType@pre
+          endif;
+    modifies: self.sensorConnected, self.sensorLastSignalTimestamp, self.currentHeartRate, self.heartRatePlausible, self.rejectionCount, self.alarmActive, self.alarmSilenced, self.alarmType;
+  }
+
+  event setAlarmThresholds(
+    implausibleLower: Real,
+    implausibleUpper: Real,
+    alarmLatencyMs: Real,
+    signalLossMs: Real,
+    silenceRearmMs: Real
+  ) {
+    pre: implausibleLower >= 0.0;
+    pre: implausibleUpper > implausibleLower;
+    pre: alarmLatencyMs > 0.0;
+    pre: signalLossMs > 0.0;
+    pre: silenceRearmMs > 0.0;
+    post: self.implausibleThresholdLower = implausibleLower;
+    post: self.implausibleThresholdUpper = implausibleUpper;
+    post: self.maxAlarmLatencyMs = alarmLatencyMs;
+    post: self.maxSignalLossMsBeforeAlarm = signalLossMs;
+    post: self.silenceAutoRearmMs = silenceRearmMs;
+    post: self.alarmThresholdsConfigured = true;
+    modifies: self.implausibleThresholdLower, self.implausibleThresholdUpper, self.maxAlarmLatencyMs, self.maxSignalLossMsBeforeAlarm, self.silenceAutoRearmMs, self.alarmThresholdsConfigured;
+  }
+}

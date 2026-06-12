@@ -1,0 +1,240 @@
+schema "onto/0.1";
+namespace insulin_pump;
+
+kind Patient {
+  identity: patientId;
+  property patientId: String;
+  property name: String;
+
+  invariants {
+    self.patientId <> null;
+    self.name <> null;
+  }
+}
+
+kind InsulinPump {
+  identity: pumpId;
+
+  property pumpId: String;
+  property status: String;
+  property reservoirLevelIU: Real;
+  property safeMaxDoseIU: Real;
+  property lowReservoirThresholdIU: Real;
+  property safeZoneLowMgDl: Real;
+  property safeZoneHighMgDl: Real;
+  property lastReadingMgDl: Real;
+  property prevReadingMgDl: Real;
+  property totalDeliveredIU: Real;
+  property alarmSounding: Boolean;
+  property lowReservoirAlarm: Boolean;
+
+  invariants {
+    self.pumpId <> null;
+    self.safeMaxDoseIU > 0.0;
+    self.lowReservoirThresholdIU >= 0.0;
+    self.safeZoneLowMgDl > 0.0;
+    self.safeZoneHighMgDl > self.safeZoneLowMgDl;
+    self.reservoirLevelIU >= 0.0;
+    self.totalDeliveredIU >= 0.0;
+    (self.status = 'OPERATIONAL') or (self.status = 'FAULT') or (self.status = 'SUSPENDED');
+    (self.status = 'FAULT') = (self.alarmSounding = true);
+  }
+
+  event configure(maxDoseIU: Real, lowResThr: Real, zoneLow: Real, zoneHigh: Real) {
+    pre: maxDoseIU > 0.0;
+    pre: lowResThr >= 0.0;
+    pre: zoneLow > 0.0;
+    pre: zoneHigh > zoneLow;
+    post: self.safeMaxDoseIU = maxDoseIU;
+    post: self.lowReservoirThresholdIU = lowResThr;
+    post: self.safeZoneLowMgDl = zoneLow;
+    post: self.safeZoneHighMgDl = zoneHigh;
+    modifies: self.safeMaxDoseIU, self.lowReservoirThresholdIU, self.safeZoneLowMgDl, self.safeZoneHighMgDl;
+  }
+
+  event recordReading(bgMgDl: Real) {
+    pre: self.status = 'OPERATIONAL';
+    pre: bgMgDl > 0.0;
+    post: self.prevReadingMgDl = self.lastReadingMgDl@pre;
+    post: self.lastReadingMgDl = bgMgDl;
+    modifies: self.prevReadingMgDl, self.lastReadingMgDl;
+  }
+
+  event deliverInsulin(doseIU: Real) {
+    pre: self.status = 'OPERATIONAL';
+    pre: doseIU > 0.0;
+    pre: self.reservoirLevelIU > 0.0;
+    post: self.reservoirLevelIU = self.reservoirLevelIU@pre - (if doseIU <= self.safeMaxDoseIU then doseIU else self.safeMaxDoseIU endif);
+    post: self.totalDeliveredIU = self.totalDeliveredIU@pre + (if doseIU <= self.safeMaxDoseIU then doseIU else self.safeMaxDoseIU endif);
+    post: self.lowReservoirAlarm = (self.reservoirLevelIU <= self.lowReservoirThresholdIU);
+    modifies: self.reservoirLevelIU, self.totalDeliveredIU, self.lowReservoirAlarm;
+  }
+
+  event declareFault() {
+    pre: self.status = 'OPERATIONAL';
+    post: self.status = 'FAULT';
+    post: self.alarmSounding = true;
+    modifies: self.status, self.alarmSounding;
+  }
+
+  event suspend() {
+    pre: self.status = 'OPERATIONAL';
+    post: self.status = 'SUSPENDED';
+    modifies: self.status;
+  }
+
+  event resume() {
+    pre: self.status = 'SUSPENDED';
+    post: self.status = 'OPERATIONAL';
+    modifies: self.status;
+  }
+
+  event clearFault(newReservoirLevelIU: Real) {
+    pre: self.status = 'FAULT';
+    pre: newReservoirLevelIU > self.lowReservoirThresholdIU;
+    post: self.status = 'OPERATIONAL';
+    post: self.alarmSounding = false;
+    post: self.lowReservoirAlarm = false;
+    post: self.reservoirLevelIU = newReservoirLevelIU;
+    post: self.totalDeliveredIU = 0.0;
+    modifies: self.status, self.alarmSounding, self.lowReservoirAlarm, self.reservoirLevelIU, self.totalDeliveredIU;
+  }
+
+  event refillReservoir(addedIU: Real) {
+    pre: self.status <> 'FAULT';
+    pre: addedIU > 0.0;
+    post: self.reservoirLevelIU = self.reservoirLevelIU@pre + addedIU;
+    post: self.lowReservoirAlarm = (self.reservoirLevelIU <= self.lowReservoirThresholdIU);
+    modifies: self.reservoirLevelIU, self.lowReservoirAlarm;
+  }
+}
+
+subkind ChildInsulinPump specializes InsulinPump {
+  property paediatricAbsMaxIU: Real;
+
+  invariants {
+    self.paediatricAbsMaxIU > 0.0;
+    self.safeMaxDoseIU <= self.paediatricAbsMaxIU;
+  }
+
+  event setPaediatricMax(absMax: Real) {
+    pre: absMax > 0.0;
+    post: self.paediatricAbsMaxIU = absMax;
+    modifies: self.paediatricAbsMaxIU;
+  }
+}
+
+kind BloodSugarReading {
+  identity: readingId;
+
+  property readingId: String;
+  property valueMgDl: Real;
+  property intervalMinutes: Real;
+  property rateOfRiseMgDlPerMin: Real;
+  property safeZoneLowAtRead: Real;
+  property safeZoneHighAtRead: Real;
+
+  invariants {
+    self.readingId <> null;
+    self.valueMgDl > 0.0;
+    self.intervalMinutes > 0.0;
+    self.safeZoneLowAtRead > 0.0;
+    self.safeZoneHighAtRead > self.safeZoneLowAtRead;
+  }
+
+  query inSafeZone(): Boolean {
+    body: (self.valueMgDl >= self.safeZoneLowAtRead) and (self.valueMgDl <= self.safeZoneHighAtRead);
+  }
+}
+
+kind SelfTestResult {
+  identity: testId;
+
+  property testId: String;
+  property outcome: String;
+  property sensorOk: Boolean;
+  property pumpMechanismOk: Boolean;
+  property needleOk: Boolean;
+  property reservoirSensorOk: Boolean;
+
+  invariants {
+    self.testId <> null;
+    (self.outcome = 'PASS') or (self.outcome = 'FAIL');
+    (self.outcome = 'PASS') = (self.sensorOk and self.pumpMechanismOk and self.needleOk and self.reservoirSensorOk);
+  }
+}
+
+role MonitoredPatient mediated-by DeliverySession of Patient {
+  property patientId: String;
+  property name: String;
+}
+
+role DeliveringPump mediated-by DeliverySession of InsulinPump {
+  property pumpId: String;
+  property status: String;
+  property safeMaxDoseIU: Real;
+}
+
+relator DeliverySession mediates (MonitoredPatient, DeliveringPump) {
+  identity: sessionId;
+
+  property sessionId: String;
+  property patient: MonitoredPatient;
+  property pump: DeliveringPump;
+  property reading: BloodSugarReading;
+  property requestedDoseIU: Real;
+  property actualDoseIU: Real;
+  property sessionOutcome: String;
+
+  invariants {
+    self.sessionId <> null;
+    self.patient <> null;
+    self.pump <> null;
+    self.reading <> null;
+    self.requestedDoseIU >= 0.0;
+    self.actualDoseIU >= 0.0;
+    self.actualDoseIU <= self.pump.safeMaxDoseIU;
+    (self.sessionOutcome = 'NO_ACTION') or (self.sessionOutcome = 'DOSE_DELIVERED') or (self.sessionOutcome = 'DOSE_CAPPED') or (self.sessionOutcome = 'FAULT_SUSPENDED');
+  }
+
+  event decideDose(reqDoseIU: Real) {
+    pre: self.pump.status = 'OPERATIONAL';
+    pre: reqDoseIU >= 0.0;
+    post: self.requestedDoseIU = reqDoseIU;
+    post: self.actualDoseIU = if reqDoseIU = 0.0 then 0.0 else if reqDoseIU <= self.pump.safeMaxDoseIU then reqDoseIU else self.pump.safeMaxDoseIU endif endif;
+    post: self.sessionOutcome = if reqDoseIU = 0.0 then 'NO_ACTION' else if reqDoseIU <= self.pump.safeMaxDoseIU then 'DOSE_DELIVERED' else 'DOSE_CAPPED' endif endif;
+    modifies: self.requestedDoseIU, self.actualDoseIU, self.sessionOutcome;
+  }
+
+  event suspendOnFault() {
+    pre: self.pump.status = 'FAULT';
+    post: self.sessionOutcome = 'FAULT_SUSPENDED';
+    post: self.actualDoseIU = 0.0;
+    modifies: self.sessionOutcome, self.actualDoseIU;
+  }
+}
+
+kind AlarmEvent {
+  identity: alarmId;
+
+  property alarmId: String;
+  property alarmType: String;
+  property pumpId: String;
+  property acknowledged: Boolean;
+
+  invariants {
+    self.alarmId <> null;
+    self.pumpId <> null;
+    (self.alarmType = 'HARDWARE_FAULT') or (self.alarmType = 'LOW_RESERVOIR');
+  }
+
+  event acknowledge() {
+    pre: self.acknowledged = false;
+    post: self.acknowledged = true;
+    modifies: self.acknowledged;
+  }
+}
+
+relation pumpOwnership: <<memberOf>> from InsulinPump [1] to Patient [1];
+relation sessionPatientMed: <<mediation>> from DeliverySession [1] to MonitoredPatient [1];
+relation sessionPumpMed: <<mediation>> from DeliverySession [1] to DeliveringPump [1];

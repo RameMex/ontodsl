@@ -1,0 +1,59 @@
+{
+  "name": "ontodsl",
+  "version": "0.11.0",
+  "description": "Ontology-Contract-OCL DSL: UFO-A/B/C modeling with OCL invariants, Z3-backed LSP verification, Mermaid diagrams, React Flow data, and TypeScript code generation (interfaces, factories, runtime validators, sync+async event wrappers, commitment lifecycle registries).",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "ontodsl": "dist/cli/gen.js",
+    "ontodsl-lsp": "dist/lsp/server.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "audit:unused": "tsc --noEmit --noUnusedLocals --noUnusedParameters"
+  },
+  "keywords": [
+    "ontology",
+    "ufo",
+    "ontouml",
+    "dsl",
+    "ocl",
+    "design-by-contract",
+    "code-generation",
+    "z3",
+    "lsp"
+  ],
+  "dependencies": {
+    "chevrotain": "^11.0.3",
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.12",
+    "z3-solver": "^4.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0",
+    "@google/genai": "^2.4.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "FSL-1.1-MIT",
+  "author": "Rene Meza Escamilla <renemeza.escamilla@gmail.com>"
+}

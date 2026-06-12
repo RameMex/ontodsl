@@ -1,0 +1,172 @@
+schema "onto/0.1";
+namespace patient_monitoring_discovery;
+
+// ─── Stakeholders ───────────────────────────────────────────────────────
+agent Clinician {
+  identity: clinicianId;
+  property clinicianId: String;
+  property name: String;
+  property certificationNumber: String;
+  invariants {
+    self.clinicianId <> null;
+  }
+}
+
+agent Patient {
+  identity: patientId;
+  property patientId: String;
+  property medicalRecordNumber: String;
+  property isBeingMonitored: Boolean;
+  invariants {
+    self.patientId <> null;
+  }
+}
+
+agent HospitalAdministration {
+  identity: adminId;
+  property adminId: String;
+  property facilityName: String;
+  invariants {
+    self.adminId <> null;
+  }
+}
+
+// The vendor/dev team that owes commitments to stakeholders.
+agent MonitorVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  property regulatoryRegistration: String;
+  invariants {
+    self.vendorId <> null;
+  }
+}
+
+// ─── Stakeholder Concerns (Commitments) ─────────────────────────────────
+// GOAL-1: Reject implausible readings (outside [20,250] bpm).
+commitment RejectImplausibleCommitment
+  debitor: MonitorVendor
+  creditor: Clinician {
+    identity: commitmentId;
+    property commitmentId: String;
+    property plausibleMin: Real;
+    property plausibleMax: Real;
+    property rejectionCounter: Integer;
+    predicate: self.plausibleMin = 20.0 and self.plausibleMax = 250.0 and self.rejectionCounter >= 0;
+  }
+
+// GOAL-2: Threshold alarm latency (alarm raised within 2 seconds of crossing).
+commitment AlarmLatencyCommitment
+  debitor: MonitorVendor
+  creditor: Clinician {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxLatencySeconds: Real;
+    property alarmRaised: Boolean;
+    predicate: self.maxLatencySeconds <= 2.0;
+  }
+
+// GOAL-3: Sensor-disconnect detection (alarm raised after >5 seconds of no signal).
+commitment SensorDisconnectCommitment
+  debitor: MonitorVendor
+  creditor: Clinician {
+    identity: commitmentId;
+    property commitmentId: String;
+    property disconnectThresholdSeconds: Real;
+    property disconnectAlarmRaised: Boolean;
+    predicate: self.disconnectThresholdSeconds = 5.0;
+  }
+
+// GOAL-4: Silence with auto-rearm (silenced alarm auto-re-arms after 2 minutes).
+commitment SilenceAutoRearmCommitment
+  debitor: MonitorVendor
+  creditor: Clinician {
+    identity: commitmentId;
+    property commitmentId: String;
+    property autoRearmSeconds: Real;
+    predicate: self.autoRearmSeconds = 120.0;
+  }
+
+// ─── Domain Story ───────────────────────────────────────────────────────
+happening VitalSignMonitoringFlow {
+  identity: flowId;
+  property flowId: String;
+  property stepSequence: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.stepSequence = 'SENSOR_READING_DELIVERED -> PLAUSIBILITY_CHECK -> DISPLAY_OR_REJECT -> THRESHOLD_COMPARISON -> ALARM_RAISE -> CLINICIAN_ACKNOWLEDGE -> POTENTIAL_SENSOR_DISCONNECT';
+  }
+}
+
+// ─── Glossary Terms ─────────────────────────────────────────────────────
+kind HeartRateReading {
+  identity: readingId;
+  property readingId: String;
+  property valueBpm: Real;
+  property timestamp: Real;
+  property isImplausible: Boolean;
+  property sourceSensorId: String;
+  invariants {
+    self.readingId <> null;
+    self.valueBpm >= 0.0;
+    self.timestamp >= 0.0;
+    self.isImplausible = (self.valueBpm < 20.0 or self.valueBpm > 250.0);
+  }
+}
+
+kind AlarmThreshold {
+  identity: thresholdId;
+  property thresholdId: String;
+  property vitalType: String;
+  property lowBound: Real;
+  property highBound: Real;
+  property enabled: Boolean;
+  invariants {
+    self.thresholdId <> null;
+    self.lowBound >= 0.0;
+    self.highBound > self.lowBound;
+  }
+}
+
+kind AlarmEvent {
+  identity: alarmId;
+  property alarmId: String;
+  property alarmType: String;
+  property raisedAt: Real;
+  property acknowledgedAt: Real;
+  property isSilenced: Boolean;
+  property autoRearmAt: Real;
+  invariants {
+    self.alarmId <> null;
+    self.raisedAt >= 0.0;
+    not self.isSilenced implies self.autoRearmAt = 0.0;
+  }
+}
+
+kind SensorStatus {
+  identity: statusId;
+  property statusId: String;
+  property sensorId: String;
+  property lastSignalAt: Real;
+  property isConnected: Boolean;
+  property disconnectAlarmRaised: Boolean;
+  invariants {
+    self.statusId <> null;
+    self.lastSignalAt >= 0.0;
+    self.isConnected = (self.disconnectAlarmRaised = false);
+  }
+}
+
+kind RejectionCounter {
+  identity: counterId;
+  property counterId: String;
+  property count: Integer;
+  property lastRejectedAt: Real;
+  invariants {
+    self.counterId <> null;
+    self.count >= 0;
+  }
+}

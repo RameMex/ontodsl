@@ -1,0 +1,304 @@
+schema "onto/0.1";
+namespace meeting_scheduler_requirements;
+import "./discovery.onto";
+
+// =====================================================================
+// Requirements — Meeting Scheduler
+//
+// The system as a black box.  One kind (MeetingSchedulerSystem)
+// specializes both constraint categories from Discovery.  Each
+// Functional Requirement is an event with pre/post/modifies.
+// Post-conditions are written so that the inter-stage refinement
+// verifier can prove they imply the corresponding discovery commitment
+// predicates.
+//
+// FR-1  requestMeeting      — initiator opens a scheduling request
+// FR-2  submitConstraints   — participant submits exclusion/preference sets
+// FR-3  proposeDate         — system selects and proposes a feasible date
+// FR-4  reportConflict      — system reports when no common date exists
+// FR-5  confirmMeeting      — system confirms the date and notifies all
+// FR-6  updateConstraints   — participant updates constraints while OPEN
+//
+// Fix applied: ->union() is not supported by this OCL dialect.
+// Set-growing post-conditions are rewritten to ->includes() assertions
+// over the new members, which is the supported idiom for expressing
+// that a set has grown to contain a new element.
+// =====================================================================
+
+// ─── External Actors ─────────────────────────────────────────────────
+
+relator SchedulingSession mediates (InitiatorRole, ParticipantRole) {
+  identity: sessionId;
+  property sessionId: String;
+  property requestId: String;
+  property status: String;
+  invariants {
+    self.sessionId <> null;
+    self.requestId <> null;
+    self.status <> null;
+    self.status = 'OPEN' or self.status = 'CONFIRMED' or self.status = 'CONFLICT';
+  }
+}
+
+role InitiatorRole mediated-by SchedulingSession of Initiator {
+  property initiatorId: String;
+  property email: String;
+}
+
+role ParticipantRole mediated-by SchedulingSession of Participant {
+  property participantId: String;
+  property email: String;
+}
+
+// ─── System Kind ──────────────────────────────────────────────────────
+
+kind MeetingSchedulerSystem specializes ExclusionRespected, InitiatorAlwaysInformed {
+  identity: systemId;
+  // negative-test injection: structurally present on the kind
+  property zzzImaginary: Real;
+  property systemId: String;
+
+  // ── Scheduling state ──────────────────────────────────────────────
+  property currentRequestId: String;
+  property requestStatus: String;      // 'IDLE' | 'OPEN' | 'CONFIRMED' | 'CONFLICT'
+  property rangeEarliest: String;      // ISO-8601 date string
+  property rangeLatest: String;        // ISO-8601 date string
+  property proposedDate: String;       // ISO-8601 date string; empty when none
+  property location: String;
+
+  // ── Constraint aggregates ─────────────────────────────────────────
+  property allExcludedDates: Set<String>;
+  property commonPreferredDates: Set<String>;
+  property constraintSubmissionCount: Integer;
+  property invitedParticipantCount: Integer;
+  property allConstraintsCollected: Boolean;
+  property initiatorInformed: Boolean;
+  property participantsNotified: Boolean;
+
+  // ── NFR scalar bounds ─────────────────────────────────────────────
+  property maxConflictResponseHours: Real;
+  property maxNotificationDelayHours: Real;
+  property minCandidateDates: Integer;
+
+  // ── Invariants ────────────────────────────────────────────────────
+  invariants {
+    self.zzzImaginary >= 0.0;
+    self.systemId <> null;
+    self.requestStatus = 'IDLE'
+      or self.requestStatus = 'OPEN'
+      or self.requestStatus = 'CONFIRMED'
+      or self.requestStatus = 'CONFLICT';
+    self.invitedParticipantCount >= 0;
+    self.constraintSubmissionCount >= 0;
+    self.constraintSubmissionCount <= self.invitedParticipantCount;
+    self.maxConflictResponseHours > 0.0;
+    self.maxNotificationDelayHours > 0.0;
+    self.minCandidateDates > 0;
+    // CONSTRAINT-1 (ExclusionRespected): a proposed date must never
+    // fall inside any participant's exclusion set.
+    (self.proposedDate <> '') implies (not self.allExcludedDates->includes(self.proposedDate));
+    // CONSTRAINT-2 (InitiatorAlwaysInformed): in any terminal state the
+    // initiator must have been informed.
+    (self.requestStatus = 'CONFIRMED' or self.requestStatus = 'CONFLICT')
+      implies self.initiatorInformed = true;
+  }
+
+  // ================================================================
+  // FR-1 — requestMeeting
+  // The initiator opens a new scheduling request with a date range and
+  // the count of invited participants.
+  // refines: meeting_scheduler_discovery::ScheduleFeasibleDateCommitment
+  // ================================================================
+  event requestMeeting(
+    reqId: String,
+    earliest: String,
+    latest: String,
+    participantCount: Integer
+  ) {
+    pre: self.zzzImaginary >= 0.0;
+    pre: self.requestStatus = 'IDLE';
+    pre: reqId <> null;
+    pre: earliest <> null;
+    pre: latest <> null;
+    pre: participantCount > 0;
+
+    post: self.requestStatus = 'OPEN';
+    post: self.currentRequestId = reqId;
+    post: self.rangeEarliest = earliest;
+    post: self.rangeLatest = latest;
+    post: self.invitedParticipantCount = participantCount;
+    post: self.constraintSubmissionCount = 0;
+    post: self.allConstraintsCollected = false;
+    post: self.initiatorInformed = false;
+    post: self.participantsNotified = false;
+    post: self.proposedDate = '';
+
+    modifies:
+      self.requestStatus,
+      self.currentRequestId,
+      self.rangeEarliest,
+      self.rangeLatest,
+      self.invitedParticipantCount,
+      self.constraintSubmissionCount,
+      self.allConstraintsCollected,
+      self.initiatorInformed,
+      self.participantsNotified,
+      self.proposedDate;
+  }
+
+  // ================================================================
+  // FR-2 — submitConstraints
+  // A participant submits their exclusion set and (optionally) a
+  // preference set.  The system records that the submission was
+  // accepted and updates the submission count.
+  //
+  // Set-growth post-condition idiom: because ->union() is not
+  // supported, we assert that every element of the supplied sets is
+  // now included in the aggregate (->includes / ->forAll pattern).
+  // This is equivalent to "post-set ⊇ pre-set ∪ supplied-set" and
+  // is checkable by the supported OCL operators.
+  //
+  // refines: meeting_scheduler_discovery::ConstraintUpdateAcceptedCommitment
+  //   predicate: self.minUpdatesAccepted > 0
+  //   discharge: constraintSubmissionCount@post > constraintSubmissionCount@pre
+  //              AND minCandidateDates invariant (> 0) holds throughout.
+  // ================================================================
+  event submitConstraints(
+    participantId: String,
+    excluded: Set<String>,
+    preferred: Set<String>
+  ) {
+    pre: self.requestStatus = 'OPEN';
+    pre: participantId <> null;
+    pre: self.constraintSubmissionCount < self.invitedParticipantCount;
+
+    // Every date the participant said to exclude is now in the aggregate.
+    post: excluded->forAll(d | self.allExcludedDates->includes(d));
+    // Every date the participant said to prefer is now in the aggregate.
+    post: preferred->forAll(d | self.commonPreferredDates->includes(d));
+    // Dates that were already excluded before remain excluded (monotone).
+    post: self.allExcludedDates@pre->forAll(d | self.allExcludedDates->includes(d));
+    // Submission counter advances by exactly one.
+    post: self.constraintSubmissionCount = self.constraintSubmissionCount@pre + 1;
+    // allConstraintsCollected flips to true once every participant has submitted.
+    post: self.allConstraintsCollected =
+            (self.constraintSubmissionCount = self.invitedParticipantCount);
+
+    modifies:
+      self.allExcludedDates,
+      self.commonPreferredDates,
+      self.constraintSubmissionCount,
+      self.allConstraintsCollected;
+  }
+
+  // ================================================================
+  // FR-3 — proposeDate
+  // The system selects a feasible date: inside the range, outside all
+  // exclusion sets, preferring dates in the common preference set.
+  //
+  // refines: meeting_scheduler_discovery::ScheduleFeasibleDateCommitment
+  //   predicate: self.minCandidateDates > 0
+  //   discharge: minCandidateDates invariant (> 0) holds; proposed date
+  //              is not in allExcludedDates (CONSTRAINT-1 pre enforces it).
+  // ================================================================
+  event proposeDate(candidate: String) {
+    pre: self.requestStatus = 'OPEN';
+    pre: self.allConstraintsCollected = true;
+    pre: candidate <> null;
+    pre: candidate <> '';
+    pre: not self.allExcludedDates->includes(candidate);
+
+    post: self.proposedDate = candidate;
+
+    modifies: self.proposedDate;
+  }
+
+  // ================================================================
+  // FR-4 — reportConflict
+  // When no feasible date exists the system records the conflict and
+  // informs the initiator.
+  //
+  // refines: meeting_scheduler_discovery::ConflictReportedCommitment
+  //   predicate: self.maxResponseHours > 0.0
+  //   discharge: maxConflictResponseHours invariant (> 0.0) holds;
+  //              initiatorInformed = true in post-state.
+  // ================================================================
+  event reportConflict() {
+    pre: self.requestStatus = 'OPEN';
+    pre: self.allConstraintsCollected = true;
+
+    post: self.requestStatus = 'CONFLICT';
+    post: self.initiatorInformed = true;
+    post: self.proposedDate = '';
+
+    modifies:
+      self.requestStatus,
+      self.initiatorInformed,
+      self.proposedDate;
+  }
+
+  // ================================================================
+  // FR-5 — confirmMeeting
+  // The system confirms the proposed date, records the location, and
+  // notifies all participants and the initiator.
+  //
+  // refines: meeting_scheduler_discovery::ParticipantNotificationCommitment
+  //   predicate: self.maxNotificationDelayHours > 0.0
+  //   discharge: maxNotificationDelayHours invariant (> 0.0) holds;
+  //              participantsNotified = true in post-state.
+  // refines: meeting_scheduler_discovery::ScheduleFeasibleDateCommitment
+  //   discharge: proposedDate <> '' confirms a feasible date exists.
+  // ================================================================
+  event confirmMeeting(loc: String) {
+    pre: self.requestStatus = 'OPEN';
+    pre: self.proposedDate <> '';
+    pre: not self.allExcludedDates->includes(self.proposedDate);
+    pre: loc <> null;
+
+    post: self.requestStatus = 'CONFIRMED';
+    post: self.location = loc;
+    post: self.participantsNotified = true;
+    post: self.initiatorInformed = true;
+
+    modifies:
+      self.requestStatus,
+      self.location,
+      self.participantsNotified,
+      self.initiatorInformed;
+  }
+
+  // ================================================================
+  // FR-6 — updateConstraints
+  // A participant may resubmit constraints while the request is OPEN.
+  // The aggregate exclusion set grows monotonically; proposedDate is
+  // cleared so the system must re-run date selection.
+  //
+  // refines: meeting_scheduler_discovery::ConstraintUpdateAcceptedCommitment
+  //   predicate: self.minUpdatesAccepted > 0
+  //   discharge: update is accepted (exclusion set grows) while OPEN;
+  //              minCandidateDates invariant (> 0) is preserved.
+  // ================================================================
+  event updateConstraints(
+    participantId: String,
+    newExcluded: Set<String>,
+    newPreferred: Set<String>
+  ) {
+    pre: self.requestStatus = 'OPEN';
+    pre: participantId <> null;
+
+    // Every newly excluded date is now in the aggregate.
+    post: newExcluded->forAll(d | self.allExcludedDates->includes(d));
+    // Every newly preferred date is now in the aggregate.
+    post: newPreferred->forAll(d | self.commonPreferredDates->includes(d));
+    // Previously excluded dates remain excluded (monotone growth).
+    post: self.allExcludedDates@pre->forAll(d | self.allExcludedDates->includes(d));
+    // proposedDate is cleared: date selection must be re-run to
+    // maintain CONSTRAINT-1 after the exclusion set has grown.
+    post: self.proposedDate = '';
+
+    modifies:
+      self.allExcludedDates,
+      self.commonPreferredDates,
+      self.proposedDate;
+  }
+}

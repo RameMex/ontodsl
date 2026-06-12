@@ -1,0 +1,164 @@
+schema "onto/0.1";
+namespace smart_thermostat_requirements;
+import "./discovery.onto";
+
+// =============================================================================
+// Requirements stage — system as black box
+//
+// OCL dialect limitations (confirmed by parser):
+// - No @pre operator
+// - No 'iff' operator
+// - No nested if/then/else/endif inside event post-conditions
+// - Only simple expressions in post-conditions
+// =============================================================================
+
+kind ThermostatSystem
+  specializes SafeTemperatureConstraints,
+              PlausibleSensorReading,
+              CycleLimitConstraint {
+
+  identity: systemId;
+
+  // ─── Properties (only system-specific, NOT inherited) ─────────────────
+
+  property systemId: String;
+
+  property currentTemperature: Real;
+  property sensorReading: Real;
+  property sensorIsPlausible: Boolean;
+
+  property requestedSetpoint: Real;
+  property clampedSetpoint: Real;
+
+  property actuatorCommand: String;
+  property lastTransitionTime: Integer;
+  property minCycleIntervalMs: Integer;
+
+  property alertActive: Boolean;
+  property isSafeHalt: Boolean;
+
+  property displayTemperature: Real;
+  property displaySetpoint: Real;
+  property displayActuatorState: String;
+
+  // ─── Invariants ─────────────────────────────────────────────────────
+
+  invariants {
+    self.systemId <> null;
+
+    self.clampedSetpoint >= self.safeMin;
+    self.clampedSetpoint <= self.safeMax;
+    self.sensorIsPlausible = (self.sensorReading >= self.plausibleMin and self.sensorReading <= self.plausibleMax);
+    self.actuatorCommand = 'HEAT' or self.actuatorCommand = 'COOL' or self.actuatorCommand = 'OFF';
+    self.displayTemperature = self.currentTemperature;
+    self.displaySetpoint = self.clampedSetpoint;
+    self.displayActuatorState = self.actuatorCommand;
+    self.lastTransitionTime >= 0;
+    self.minCycleIntervalMs = self.minIntervalSeconds * 1000;
+
+    (not self.sensorIsPlausible) implies (self.alertActive = true and self.actuatorCommand = 'OFF' and self.isSafeHalt = true);
+    (self.sensorIsPlausible) implies (not self.alertActive or self.actuatorCommand <> 'OFF' or not self.isSafeHalt);
+    self.isSafeHalt = true implies (self.alertActive = true and self.actuatorCommand = 'OFF');
+    (self.alertActive = true and self.actuatorCommand = 'OFF') implies self.isSafeHalt = true;
+  }
+
+  // ─── FR-1: Request Setpoint ─────────────────────────────────────────
+
+  event requestSetpoint(requestedTemperature: Real)
+    refines smart_thermostat_discovery::SafeRangeCommitment {
+    pre: self.actuatorCommand = 'OFF' or self.actuatorCommand = 'HEAT' or self.actuatorCommand = 'COOL';
+    pre: not self.isSafeHalt;
+    post: self.requestedSetpoint = requestedTemperature;
+    post: self.clampedSetpoint = if requestedTemperature < self.safeMin then self.safeMin
+                                 else if requestedTemperature > self.safeMax then self.safeMax
+                                 else requestedTemperature
+                                 endif endif;
+    post: self.clampedSetpoint >= self.safeMin;
+    post: self.clampedSetpoint <= self.safeMax;
+    post: self.displaySetpoint = self.clampedSetpoint;
+    modifies: self.requestedSetpoint, self.clampedSetpoint, self.displaySetpoint;
+  }
+
+  // ─── FR-2: Process Sensor Reading ───────────────────────────────────
+
+  event processSensorReading(rawValue: Real)
+    refines smart_thermostat_discovery::SafeHaltCommitment {
+    pre: true;
+    post: self.sensorReading = rawValue;
+    post: self.sensorIsPlausible = (rawValue >= self.plausibleMin and rawValue <= self.plausibleMax);
+    post: if not self.sensorIsPlausible then
+            self.isSafeHalt = true and self.actuatorCommand = 'OFF' and self.alertActive = true
+          else
+            self.isSafeHalt = false and
+            self.alertActive = false and
+            self.currentTemperature = rawValue and
+            self.displayTemperature = self.currentTemperature
+          endif;
+    post: not self.sensorIsPlausible implies
+            (self.actuatorCommand = 'OFF' and self.alertActive = true and self.isSafeHalt = true);
+    post: self.clampedSetpoint >= self.safeMin and self.clampedSetpoint <= self.safeMax;
+    modifies: self.sensorReading, self.sensorIsPlausible, self.currentTemperature,
+              self.displayTemperature, self.alertActive, self.actuatorCommand, self.isSafeHalt;
+  }
+
+  // ─── FR-3: Regulate Temperature ─────────────────────────────────────
+  // SIMPLIFIED: No nested if/then/else in post-condition.
+  // Use separate events for each transition decision, or simplify the post
+  // to just declare the invariant without describing the full control logic.
+  // Here we model the post as a simple equality update plus invariants,
+  // relying on the fact that the system kind's invariants enforce the safety.
+
+  event regulateTemperature(now: Integer)
+    refines smart_thermostat_discovery::CycleLimitCommitment {
+    pre: not self.isSafeHalt;
+    pre: self.sensorIsPlausible;
+    pre: now >= 0;
+    // Simplified post: actuator command is set based on simple comparison
+    // with cycle limit enforced at the invariant level.
+    post: if self.currentTemperature < self.clampedSetpoint then self.actuatorCommand = 'HEAT'
+          else if self.currentTemperature > self.clampedSetpoint then self.actuatorCommand = 'COOL'
+          else self.actuatorCommand = 'OFF'
+          endif endif;
+    post: self.displayActuatorState = self.actuatorCommand;
+    post: self.clampedSetpoint >= self.safeMin and self.clampedSetpoint <= self.safeMax;
+    post: self.sensorIsPlausible = true;
+    post: self.lastTransitionTime = now;
+    modifies: self.actuatorCommand, self.lastTransitionTime, self.displayActuatorState;
+  }
+
+  // ─── FR-4: Display Update ───────────────────────────────────────────
+
+  event updateDisplay()
+    refines smart_thermostat_discovery::DisplayVisibilityCommitment {
+    pre: true;
+    post: self.displayTemperature = self.currentTemperature;
+    post: self.displaySetpoint = self.clampedSetpoint;
+    post: self.displayActuatorState = self.actuatorCommand;
+    modifies: self.displayTemperature, self.displaySetpoint, self.displayActuatorState;
+  }
+
+  // ─── FR-5: Enter Safe Halt ──────────────────────────────────────────
+
+  event enterSafeHalt()
+    refines smart_thermostat_discovery::SafeHaltCommitment {
+    pre: not self.isSafeHalt;
+    post: self.isSafeHalt = true;
+    post: self.actuatorCommand = 'OFF';
+    post: self.alertActive = true;
+    post: self.displayActuatorState = 'OFF';
+    modifies: self.isSafeHalt, self.actuatorCommand, self.alertActive, self.displayActuatorState;
+  }
+
+  // ─── FR-6: Resume from Safe Halt ────────────────────────────────────
+
+  event resumeOperation()
+    refines smart_thermostat_discovery::SafeHaltCommitment {
+    pre: self.isSafeHalt;
+    pre: self.sensorIsPlausible;
+    post: self.isSafeHalt = false;
+    post: self.alertActive = false;
+    post: self.actuatorCommand = 'OFF';
+    post: self.displayActuatorState = 'OFF';
+    modifies: self.isSafeHalt, self.alertActive, self.actuatorCommand, self.displayActuatorState;
+  }
+}

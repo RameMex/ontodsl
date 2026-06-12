@@ -1,0 +1,32 @@
+schema "onto/0.1";
+namespace v07_child_noren;
+import "./parent.onto";
+
+// SAME child kinds but WITHOUT the renames clause — should produce
+// W38/W39 false-positives because currentBloodSugar/reservoirUnits
+// don't appear as own properties.
+kind BloodSugarSensor {
+  identity: cid;
+  property cid: String;
+  property lastReadingMgDl: Real;
+
+  event takeReading(value: Real)
+    refines v07_parent::SystemKind.deliverInsulin {
+    pre: value >= 0.0;
+    post: self.lastReadingMgDl = value;
+    modifies: self.lastReadingMgDl;
+  }
+}
+
+kind PumpActuator {
+  identity: pid;
+  property pid: String;
+  property tankCharge: Real;
+
+  event drainTank(amount: Real)
+    refines v07_parent::SystemKind.deliverInsulin {
+    pre: amount >= 0.0;
+    post: self.tankCharge = self.tankCharge@pre - amount;
+    modifies: self.tankCharge;
+  }
+}

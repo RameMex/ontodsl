@@ -1,0 +1,213 @@
+schema "onto/0.1";
+namespace ardupilot_ekf;
+
+// AP_NavEKF3 models the Extended Kalman Filter for inertial navigation
+// in ArduPilot, maintaining a state vector (attitude quaternion, velocity,
+// position, IMU biases) and a state covariance matrix.
+kind AP_NavEKF3 {
+  identity: ekfId;
+
+  property ekfId: String;
+
+  // Attitude quaternion (q0, q1, q2, q3)
+  property q0: Real;
+  property q1: Real;
+  property q2: Real;
+  property q3: Real;
+
+  // Velocity (X, Y, Z)
+  property velX: Real;
+  property velY: Real;
+  property velZ: Real;
+
+  // Position (X, Y, Z)
+  property posX: Real;
+  property posY: Real;
+  property posZ: Real;
+
+  // Gyro biases (X, Y, Z)
+  property gyroBiasX: Real;
+  property gyroBiasY: Real;
+  property gyroBiasZ: Real;
+
+  // Accelerometer biases (X, Y, Z)
+  property accelBiasX: Real;
+  property accelBiasY: Real;
+  property accelBiasZ: Real;
+
+  // State covariance matrix diagonal elements (simplified representation)
+  // These must remain non-negative for the filter to be stable.
+  property P_q0_q0: Real;
+  property P_q1_q1: Real;
+  property P_q2_q2: Real;
+  property P_q3_q3: Real;
+
+  property P_velX_velX: Real;
+  property P_velY_velY: Real;
+  property P_velZ_velZ: Real;
+
+  property P_posX_posX: Real;
+  property P_posY_posY: Real;
+  property P_posZ_posZ: Real;
+
+  property P_gyroBiasX_gyroBiasX: Real;
+  property P_gyroBiasY_gyroBiasY: Real;
+  property P_gyroBiasZ_gyroBiasZ: Real;
+
+  property P_accelBiasX_accelBiasX: Real;
+  property P_accelBiasY_accelBiasY: Real;
+  property P_accelBiasZ_accelBiasZ: Real;
+
+  invariants {
+    self.ekfId <> null;
+
+    // Attitude quaternion magnitude must stay near 1.0
+    self.q0*self.q0 + self.q1*self.q1 + self.q2*self.q2 + self.q3*self.q3 >= 0.99;
+    self.q0*self.q0 + self.q1*self.q1 + self.q2*self.q2 + self.q3*self.q3 <= 1.01;
+
+    // All state estimates must remain finite (no NaN/Inf propagation)
+    self.q0.isFinite();
+    self.q1.isFinite();
+    self.q2.isFinite();
+    self.q3.isFinite();
+    self.velX.isFinite();
+    self.velY.isFinite();
+    self.velZ.isFinite();
+    self.posX.isFinite();
+    self.posY.isFinite();
+    self.posZ.isFinite();
+    self.gyroBiasX.isFinite();
+    self.gyroBiasY.isFinite();
+    self.gyroBiasZ.isFinite();
+    self.accelBiasX.isFinite();
+    self.accelBiasY.isFinite();
+    self.accelBiasZ.isFinite();
+
+    // Covariance diagonals must stay non-negative and finite
+    self.P_q0_q0 >= 0.0; self.P_q0_q0.isFinite();
+    self.P_q1_q1 >= 0.0; self.P_q1_q1.isFinite();
+    self.P_q2_q2 >= 0.0; self.P_q2_q2.isFinite();
+    self.P_q3_q3 >= 0.0; self.P_q3_q3.isFinite();
+
+    self.P_velX_velX >= 0.0; self.P_velX_velX.isFinite();
+    self.P_velY_velY >= 0.0; self.P_velY_velY.isFinite();
+    self.P_velZ_velZ >= 0.0; self.P_velZ_velZ.isFinite();
+
+    self.P_posX_posX >= 0.0; self.P_posX_posX.isFinite();
+    self.P_posY_posY >= 0.0; self.P_posY_posY.isFinite();
+    self.P_posZ_posZ >= 0.0; self.P_posZ_posZ.isFinite();
+
+    self.P_gyroBiasX_gyroBiasX >= 0.0; self.P_gyroBiasX_gyroBiasX.isFinite();
+    self.P_gyroBiasY_gyroBiasY >= 0.0; self.P_gyroBiasY_gyroBiasY.isFinite();
+    self.P_gyroBiasZ_gyroBiasZ >= 0.0; self.P_gyroBiasZ_gyroBiasZ.isFinite();
+
+    self.P_accelBiasX_accelBiasX >= 0.0; self.P_accelBiasX_accelBiasX.isFinite();
+    self.P_accelBiasY_accelBiasY >= 0.0; self.P_accelBiasY_accelBiasY.isFinite();
+    self.P_accelBiasZ_accelBiasZ >= 0.0; self.P_accelBiasZ_accelBiasZ.isFinite();
+  }
+
+  // Propagates the EKF state and covariance using IMU measurements over a time step.
+  event predict(dt: Real,
+                gyroX: Real, gyroY: Real, gyroZ: Real,
+                accelX: Real, accelY: Real, accelZ: Real) {
+    pre: dt > 0.0;
+    pre: dt.isFinite();
+    pre: gyroX.isFinite(); pre: gyroY.isFinite(); pre: gyroZ.isFinite();
+    pre: accelX.isFinite(); pre: accelY.isFinite(); pre: accelZ.isFinite();
+
+    // After prediction, all invariants related to state and covariance must hold.
+    post: self.q0*self.q0 + self.q1*self.q1 + self.q2*self.q2 + self.q3*self.q3 >= 0.99;
+    post: self.q0*self.q0 + self.q1*self.q1 + self.q2*self.q2 + self.q3*self.q3 <= 1.01;
+    post: self.q0.isFinite(); post: self.q1.isFinite(); post: self.q2.isFinite(); post: self.q3.isFinite();
+    post: self.velX.isFinite(); post: self.velY.isFinite(); post: self.velZ.isFinite();
+    post: self.posX.isFinite(); post: self.posY.isFinite(); post: self.posZ.isFinite();
+    post: self.gyroBiasX.isFinite(); post: self.gyroBiasY.isFinite(); post: self.gyroBiasZ.isFinite();
+    post: self.accelBiasX.isFinite(); post: self.accelBiasY.isFinite(); post: self.accelBiasZ.isFinite();
+
+    post: self.P_q0_q0 >= 0.0; post: self.P_q0_q0.isFinite();
+    post: self.P_q1_q1 >= 0.0; post: self.P_q1_q1.isFinite();
+    post: self.P_q2_q2 >= 0.0; post: self.P_q2_q2.isFinite();
+    post: self.P_q3_q3 >= 0.0; post: self.P_q3_q3.isFinite();
+
+    post: self.P_velX_velX >= 0.0; post: self.P_velX_velX.isFinite();
+    post: self.P_velY_velY >= 0.0; post: self.P_velY_velY.isFinite();
+    post: self.P_velZ_velZ >= 0.0; post: self.P_velZ_velZ.isFinite();
+
+    post: self.P_posX_posX >= 0.0; post: self.P_posX_posX.isFinite();
+    post: self.P_posY_posY >= 0.0; post: self.P_posY_posY.isFinite();
+    post: self.P_posZ_posZ >= 0.0; post: self.P_posZ_posZ.isFinite();
+
+    post: self.P_gyroBiasX_gyroBiasX >= 0.0; post: self.P_gyroBiasX_gyroBiasX.isFinite();
+    post: self.P_gyroBiasY_gyroBiasY >= 0.0; post: self.P_gyroBiasY_gyroBiasY.isFinite();
+    post: self.P_gyroBiasZ_gyroBiasZ >= 0.0; post: self.P_gyroBiasZ_gyroBiasZ.isFinite();
+
+    post: self.P_accelBiasX_accelBiasX >= 0.0; post: self.P_accelBiasX_accelBiasX.isFinite();
+    post: self.P_accelBiasY_accelBiasY >= 0.0; post: self.P_accelBiasY_accelBiasY.isFinite();
+    post: self.P_accelBiasZ_accelBiasZ >= 0.0; post: self.P_accelBiasZ_accelBiasZ.isFinite();
+
+    modifies: self.q0, self.q1, self.q2, self.q3,
+              self.velX, self.velY, self.velZ,
+              self.posX, self.posY, self.posZ,
+              self.gyroBiasX, self.gyroBiasY, self.gyroBiasZ,
+              self.accelBiasX, self.accelBiasY, self.accelBiasZ,
+              self.P_q0_q0, self.P_q1_q1, self.P_q2_q2, self.P_q3_q3,
+              self.P_velX_velX, self.P_velY_velY, self.P_velZ_velZ,
+              self.P_posX_posX, self.P_posY_posY, self.P_posZ_posZ,
+              self.P_gyroBiasX_gyroBiasX, self.P_gyroBiasY_gyroBiasY, self.P_gyroBiasZ_gyroBiasZ,
+              self.P_accelBiasX_accelBiasX, self.P_accelBiasY_accelBiasY, self.P_accelBiasZ_accelBiasZ;
+    effects: { Telemetry, LogRecord };
+  }
+
+  // Performs a Kalman update (fusion) of the EKF state using GPS measurements.
+  event fuse_gps(posX_gps: Real, posY_gps: Real, posZ_gps: Real,
+                 velX_gps: Real, velY_gps: Real, velZ_gps: Real,
+                 posErrM: Real, velErrM: Real) {
+    pre: posErrM >= 0.0;
+    pre: velErrM >= 0.0;
+    pre: posX_gps.isFinite(); pre: posY_gps.isFinite(); pre: posZ_gps.isFinite();
+    pre: velX_gps.isFinite(); pre: velY_gps.isFinite(); pre: velZ_gps.isFinite();
+    pre: posErrM.isFinite(); pre: velErrM.isFinite();
+
+    // After fusion, all invariants related to state and covariance must hold.
+    post: self.q0*self.q0 + self.q1*self.q1 + self.q2*self.q2 + self.q3*self.q3 >= 0.99;
+    post: self.q0*self.q0 + self.q1*self.q1 + self.q2*self.q2 + self.q3*self.q3 <= 1.01;
+    post: self.q0.isFinite(); post: self.q1.isFinite(); post: self.q2.isFinite(); post: self.q3.isFinite();
+    post: self.velX.isFinite(); post: self.velY.isFinite(); post: self.velZ.isFinite();
+    post: self.posX.isFinite(); post: self.posY.isFinite(); post: self.posZ.isFinite();
+    post: self.gyroBiasX.isFinite(); post: self.gyroBiasY.isFinite(); post: self.gyroBiasZ.isFinite();
+    post: self.accelBiasX.isFinite(); post: self.accelBiasY.isFinite(); post: self.accelBiasZ.isFinite();
+
+    post: self.P_q0_q0 >= 0.0; post: self.P_q0_q0.isFinite();
+    post: self.P_q1_q1 >= 0.0; post: self.P_q1_q1.isFinite();
+    post: self.P_q2_q2 >= 0.0; post: self.P_q2_q2.isFinite();
+    post: self.P_q3_q3 >= 0.0; post: self.P_q3_q3.isFinite();
+
+    post: self.P_velX_velX >= 0.0; post: self.P_velX_velX.isFinite();
+    post: self.P_velY_velY >= 0.0; post: self.P_velY_velY.isFinite();
+    post: self.P_velZ_velZ >= 0.0; post: self.P_velZ_velZ.isFinite();
+
+    post: self.P_posX_posX >= 0.0; post: self.P_posX_posX.isFinite();
+    post: self.P_posY_posY >= 0.0; post: self.P_posY_posY.isFinite();
+    post: self.P_posZ_posZ >= 0.0; post: self.P_posZ_posZ.isFinite();
+
+    post: self.P_gyroBiasX_gyroBiasX >= 0.0; post: self.P_gyroBiasX_gyroBiasX.isFinite();
+    post: self.P_gyroBiasY_gyroBiasY >= 0.0; post: self.P_gyroBiasY_gyroBiasY.isFinite();
+    post: self.P_gyroBiasZ_gyroBiasZ >= 0.0; post: self.P_gyroBiasZ_gyroBiasZ.isFinite();
+
+    post: self.P_accelBiasX_accelBiasX >= 0.0; post: self.P_accelBiasX_accelBiasX.isFinite();
+    post: self.P_accelBiasY_accelBiasY >= 0.0; post: self.P_accelBiasY_accelBiasY.isFinite();
+    post: self.P_accelBiasZ_accelBiasZ >= 0.0; post: self.P_accelBiasZ_accelBiasZ.isFinite();
+
+    modifies: self.q0, self.q1, self.q2, self.q3,
+              self.velX, self.velY, self.velZ,
+              self.posX, self.posY, self.posZ,
+              self.gyroBiasX, self.gyroBiasY, self.gyroBiasZ,
+              self.accelBiasX, self.accelBiasY, self.accelBiasZ,
+              self.P_q0_q0, self.P_q1_q1, self.P_q2_q2, self.P_q3_q3,
+              self.P_velX_velX, self.P_velY_velY, self.P_velZ_velZ,
+              self.P_posX_posX, self.P_posY_posY, self.P_posZ_posZ,
+              self.P_gyroBiasX_gyroBiasX, self.P_gyroBiasY_gyroBiasY, self.P_gyroBiasZ_gyroBiasZ,
+              self.P_accelBiasX_accelBiasX, self.P_accelBiasY_accelBiasY, self.P_accelBiasZ_accelBiasZ;
+    effects: { Telemetry, LogRecord };
+  }
+}

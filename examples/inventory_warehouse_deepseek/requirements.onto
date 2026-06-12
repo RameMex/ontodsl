@@ -1,0 +1,111 @@
+schema "onto/0.1";
+namespace inventory_warehouse_requirements;
+import "./discovery.onto";
+
+// ─── The System Kind ─────────────────────────────────────────────────────
+kind WarehouseInventorySystem
+  specializes NonNegativeStockConstraint,
+               JournalBeforeMovement,
+               BackorderDiscipline,
+               ReconciliationConvergent {
+  identity: systemId;
+  property systemId: String;
+
+  property stockOnHand: Real;
+  property movementJournalSize: Integer;
+  property cachedStock: Real;
+  property isBackorderable: Boolean;
+  property reconciledQty: Real;
+
+  property lowStockAlertThreshold: Real;
+  property maxJournalEntriesPerCycle: Integer;
+
+  invariants {
+    self.systemId <> null;
+    self.stockOnHand >= 0.0;
+    self.movementJournalSize >= 0;
+    self.cachedStock >= 0.0;
+    self.reconciledQty >= 0.0;
+    self.lowStockAlertThreshold >= 0.0;
+    self.maxJournalEntriesPerCycle > 0;
+
+    // Enforce JournalBeforeMovement category invariants
+    (if self.cachedStock > 0.0 then self.movementJournalSize > 0 else true endif);
+
+    // Enforce BackorderDiscipline category invariants
+    (if self.stockOnHand = 0.0 then self.isBackorderable = true else true endif);
+
+    // Enforce ReconciliationConvergent category invariants
+    self.reconciledQty = self.cachedStock;
+  }
+
+  // FR-1: Allocate stock for outbound shipment
+  event allocateStock(sku: SKU, requestedQty: Real)
+    refines inventory_warehouse_discovery::NonNegativeStockCommitment,
+            inventory_warehouse_discovery::BackorderPolicyCommitment {
+    pre: sku <> null;
+    pre: requestedQty > 0.0;
+
+    post: if self.stockOnHand@pre >= requestedQty then
+            self.stockOnHand = self.stockOnHand@pre - requestedQty and
+            self.cachedStock = self.stockOnHand and
+            self.movementJournalSize = self.movementJournalSize@pre + 1
+          else if sku.isBackorderable then
+            self.stockOnHand = self.stockOnHand@pre and
+            self.cachedStock = self.stockOnHand and
+            self.movementJournalSize = self.movementJournalSize@pre
+          else
+            self.stockOnHand = self.stockOnHand@pre and
+            self.cachedStock = self.stockOnHand and
+            self.movementJournalSize = self.movementJournalSize@pre
+          endif endif;
+
+    modifies: self.stockOnHand, self.cachedStock, self.movementJournalSize;
+  }
+
+  // FR-2: Record inbound restock
+  event recordRestock(sku: SKU, receivedQty: Real)
+    refines inventory_warehouse_discovery::JournaledMovementCommitment {
+    pre: sku <> null;
+    pre: receivedQty > 0.0;
+
+    post: self.movementJournalSize = self.movementJournalSize@pre + 1;
+    post: self.stockOnHand = self.stockOnHand@pre + receivedQty;
+    post: self.cachedStock = self.stockOnHand;
+
+    modifies: self.movementJournalSize, self.stockOnHand, self.cachedStock;
+  }
+
+  // FR-3: Backorder fulfillment (from restock)
+  event fulfillBackorder(sku: SKU, backorderQty: Real)
+    refines inventory_warehouse_discovery::NonNegativeStockCommitment,
+            inventory_warehouse_discovery::BackorderPolicyCommitment {
+    pre: sku <> null;
+    pre: backorderQty > 0.0;
+
+    post: self.stockOnHand = self.stockOnHand@pre - backorderQty;
+    post: self.cachedStock = self.stockOnHand;
+    post: self.movementJournalSize = self.movementJournalSize@pre + 1;
+
+    modifies: self.stockOnHand, self.cachedStock, self.movementJournalSize;
+  }
+
+  // FR-4: Nightly reconciliation
+  event reconcile()
+    refines inventory_warehouse_discovery::ReconciliationConvergenceCommitment {
+    pre: self.cachedStock >= 0.0;
+
+    post: self.reconciledQty = self.cachedStock;
+
+    modifies: self.reconciledQty;
+  }
+
+  // FR-5: Reject allocation (backorder not allowed)
+  event rejectAllocation(sku: SKU, requestedQty: Real)
+    refines inventory_warehouse_discovery::BackorderPolicyCommitment {
+    pre: sku <> null;
+    pre: requestedQty > 0.0;
+    pre: requestedQty > self.stockOnHand;
+    pre: not sku.isBackorderable;
+  }
+}

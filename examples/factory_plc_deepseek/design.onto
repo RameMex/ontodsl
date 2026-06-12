@@ -1,0 +1,406 @@
+schema "onto/0.1";
+namespace factory_plc_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// ============================================================================
+// INDUSTRIAL PLC SAFETY CONTROLLER — DESIGN STAGE
+// ============================================================================
+
+kind EStopInterruptHandler {
+  identity: handlerId;
+  property handlerId: String;
+  property eStopSignalActive: Boolean;
+  property signalTimestampMs: Real;
+  property responseLatencyUs: Real;
+  property maxResponseLatencyUs: Real;
+  property maxEStopLatencyMs: Real;
+  property latchingEnforced: Boolean;
+
+  invariants {
+    self.handlerId <> null;
+    self.maxResponseLatencyUs > 0.0;
+    self.maxResponseLatencyUs <= 1000.0;
+    self.maxEStopLatencyMs > 0.0;
+    self.maxEStopLatencyMs <= 50.0;
+    self.latchingEnforced;
+  }
+
+  event detectEStopSignal(timestampMs: Real)
+    refines factory_plc_discovery::EStopLatencyCommitment,
+            factory_plc_discovery::EStopLatchingCommitment {
+    pre: not self.eStopSignalActive;
+    pre: timestampMs >= 0.0;
+    post: self.eStopSignalActive = true;
+    post: self.signalTimestampMs = timestampMs;
+    post: self.responseLatencyUs <= self.maxResponseLatencyUs;
+    modifies: self.eStopSignalActive,
+              self.signalTimestampMs,
+              self.responseLatencyUs;
+  }
+
+  event clearEStopSignal() {
+    pre: self.eStopSignalActive;
+    post: self.eStopSignalActive = false;
+    modifies: self.eStopSignalActive;
+  }
+}
+
+kind FailsafeStateManager {
+  identity: managerId;
+  property managerId: String;
+  property isFailsafeActive: Boolean;
+  property failSafeEntryTimeMs: Real;
+  property failSafeSource: String;
+  property isLatched: Boolean;
+  property latchingEnforced: Boolean;
+  property rejectionActive: Boolean;
+  property maxEStopLatencyMs: Real;
+  property maxSensorFaultResponseCycles: Integer;
+
+  invariants {
+    self.managerId <> null;
+    self.latchingEnforced;
+    self.rejectionActive;
+    self.maxEStopLatencyMs > 0.0;
+    self.maxEStopLatencyMs <= 50.0;
+    self.maxSensorFaultResponseCycles > 0;
+    self.maxSensorFaultResponseCycles <= 1;
+  }
+
+  event enterFailsafeFromEStop(timestampMs: Real)
+    refines factory_plc_discovery::EStopLatencyCommitment,
+            factory_plc_discovery::EStopLatchingCommitment {
+    pre: not self.isFailsafeActive;
+    pre: not self.isLatched;
+    pre: timestampMs >= 0.0;
+    post: self.isFailsafeActive = true;
+    post: self.failSafeEntryTimeMs = timestampMs;
+    post: self.failSafeSource = 'ESTOP';
+    post: self.isLatched = true;
+    modifies: self.isFailsafeActive,
+              self.failSafeEntryTimeMs,
+              self.failSafeSource,
+              self.isLatched;
+  }
+
+  event enterFailsafeFromSensorFault(timestampMs: Real)
+    refines factory_plc_discovery::SensorFaultFailsafeCommitment {
+    pre: not self.isFailsafeActive;
+    pre: not self.isLatched;
+    pre: timestampMs >= 0.0;
+    post: self.isFailsafeActive = true;
+    post: self.failSafeEntryTimeMs = timestampMs;
+    post: self.failSafeSource = 'SENSOR_FAULT';
+    post: self.isLatched = false;
+    modifies: self.isFailsafeActive,
+              self.failSafeEntryTimeMs,
+              self.failSafeSource,
+              self.isLatched;
+  }
+
+  event resetFailsafeMode() {
+    pre: self.isFailsafeActive;
+    pre: not self.isLatched or self.failSafeSource = 'ESTOP';
+    post: self.isFailsafeActive = false;
+    post: self.isLatched = false;
+    modifies: self.isFailsafeActive,
+              self.isLatched;
+  }
+
+  event rejectMotionCommand(commandId: String, commandType: String)
+    refines factory_plc_discovery::MotionCommandRejectionCommitment {
+    pre: self.isFailsafeActive;
+    pre: self.rejectionActive;
+    pre: commandId <> null;
+    pre: commandType <> null;
+    post: true;
+  }
+
+  event acceptMotionCommand(commandId: String, commandType: String) {
+    pre: not self.isFailsafeActive;
+    pre: commandId <> null;
+    pre: commandType <> null;
+    post: true;
+  }
+}
+
+kind MotionOutputController {
+  identity: outputControllerId;
+  property outputControllerId: String;
+  property allOutputsDeEnergized: Boolean;
+  property motionOutputSet: Set<String>;
+  property lastDeEnergizeTimestampMs: Real;
+  property maxDeEnergizeLatencyMs: Real;
+  property maxEStopLatencyMs: Real;
+  property rejectionActive: Boolean;
+  property latchingEnforced: Boolean;
+
+  invariants {
+    self.outputControllerId <> null;
+    self.maxDeEnergizeLatencyMs > 0.0;
+    self.maxDeEnergizeLatencyMs <= 50.0;
+    self.maxEStopLatencyMs > 0.0;
+    self.maxEStopLatencyMs <= 50.0;
+    self.rejectionActive;
+    self.latchingEnforced;
+  }
+
+  event deEnergizeAllOutputs(timestampMs: Real)
+    refines factory_plc_discovery::EStopLatencyCommitment,
+            factory_plc_discovery::EStopLatchingCommitment {
+    pre: not self.allOutputsDeEnergized;
+    pre: timestampMs >= 0.0;
+    post: self.allOutputsDeEnergized = true;
+    post: self.lastDeEnergizeTimestampMs = timestampMs;
+    post: self.motionOutputSet->forAll(id | true);
+    modifies: self.allOutputsDeEnergized,
+              self.lastDeEnergizeTimestampMs;
+  }
+
+  event reEnergizeAllOutputs() {
+    pre: self.allOutputsDeEnergized;
+    post: self.allOutputsDeEnergized = false;
+    modifies: self.allOutputsDeEnergized;
+  }
+
+  event issueMotionCommand(outputId: String, commandType: String) {
+    pre: not self.allOutputsDeEnergized;
+    pre: outputId <> null;
+    pre: self.motionOutputSet->includes(outputId);
+    post: true;
+  }
+}
+
+kind SafetySensorManager {
+  identity: sensorManagerId;
+  property sensorManagerId: String;
+  property sensorFaultDetected: Boolean;
+  property sensorIdSet: Set<String>;
+  property lastSensorReadings: Set<String>;
+  property sensorFaultTimestampMs: Real;
+  property faultRecoveryTimestampMs: Real;
+  property maxSensorFaultResponseCycles: Integer;
+  property rejectionActive: Boolean;
+  property latchingEnforced: Boolean;
+  property maxEStopLatencyMs: Real;
+
+  invariants {
+    self.sensorManagerId <> null;
+    self.maxSensorFaultResponseCycles > 0;
+    self.maxSensorFaultResponseCycles <= 1;
+    self.rejectionActive;
+    self.latchingEnforced;
+    self.maxEStopLatencyMs > 0.0;
+    self.maxEStopLatencyMs <= 50.0;
+  }
+
+  event detectSensorFault(sensorId: String, faultTimestampMs: Real, faultReported: Boolean)
+    refines factory_plc_discovery::SensorFaultFailsafeCommitment {
+    pre: not self.sensorFaultDetected;
+    pre: faultReported;
+    pre: sensorId <> null;
+    pre: faultTimestampMs >= 0.0;
+    post: self.sensorFaultDetected = true;
+    post: self.sensorFaultTimestampMs = faultTimestampMs;
+    modifies: self.sensorFaultDetected,
+              self.sensorFaultTimestampMs;
+  }
+
+  event clearSensorFault(recoveryTimestampMs: Real) {
+    pre: self.sensorFaultDetected;
+    pre: recoveryTimestampMs >= 0.0;
+    post: self.sensorFaultDetected = false;
+    post: self.faultRecoveryTimestampMs = recoveryTimestampMs;
+    modifies: self.sensorFaultDetected,
+              self.faultRecoveryTimestampMs;
+  }
+}
+
+kind ManualResetController {
+  identity: resetControllerId;
+  property resetControllerId: String;
+  property manualResetInputActive: Boolean;
+  property resetRequestTimestampMs: Real;
+  property resetValid: Boolean;
+  property latchingEnforced: Boolean;
+  property maxEStopLatencyMs: Real;
+
+  invariants {
+    self.resetControllerId <> null;
+    self.latchingEnforced;
+    self.maxEStopLatencyMs > 0.0;
+    self.maxEStopLatencyMs <= 50.0;
+  }
+
+  event receiveResetRequest(timestampMs: Real) {
+    pre: not self.manualResetInputActive;
+    pre: timestampMs >= 0.0;
+    post: self.manualResetInputActive = true;
+    post: self.resetRequestTimestampMs = timestampMs;
+    post: self.resetValid = true;
+    modifies: self.manualResetInputActive,
+              self.resetRequestTimestampMs,
+              self.resetValid;
+  }
+
+  event consumeResetRequest() {
+    pre: self.manualResetInputActive;
+    post: self.manualResetInputActive = false;
+    modifies: self.manualResetInputActive;
+  }
+}
+
+kind ScanCycleSynchronizer {
+  identity: synchId;
+  property synchId: String;
+  property currentCycleId: String;
+  property cycleStartTimestampMs: Real;
+  property cycleDurationMs: Real;
+  property cycleCount: Integer;
+  property eStopResponseTimeMs: Real;
+  property faultWithinCurrentCycle: Boolean;
+  property maxEStopLatencyMs: Real;
+  property latchingEnforced: Boolean;
+  property rejectionActive: Boolean;
+  property maxSensorFaultResponseCycles: Integer;
+
+  invariants {
+    self.synchId <> null;
+    self.cycleDurationMs > 0.0;
+    self.cycleDurationMs <= 50.0;
+    self.maxEStopLatencyMs > 0.0;
+    self.maxEStopLatencyMs <= 50.0;
+    self.latchingEnforced;
+    self.rejectionActive;
+    self.maxSensorFaultResponseCycles > 0;
+    self.maxSensorFaultResponseCycles <= 1;
+  }
+
+  event startNextCycle(cycleId: String, startTimestampMs: Real) {
+    pre: cycleId <> null;
+    pre: startTimestampMs >= 0.0;
+    post: self.currentCycleId = cycleId;
+    post: self.cycleStartTimestampMs = startTimestampMs;
+    post: self.cycleCount = self.cycleCount + 1;
+    post: self.faultWithinCurrentCycle = false;
+    modifies: self.currentCycleId,
+              self.cycleStartTimestampMs,
+              self.cycleCount,
+              self.faultWithinCurrentCycle;
+  }
+
+  event recordFaultInCycle(timestampMs: Real)
+    refines factory_plc_discovery::SensorFaultFailsafeCommitment,
+            factory_plc_discovery::EStopLatencyCommitment {
+    pre: not self.faultWithinCurrentCycle;
+    pre: timestampMs >= 0.0;
+    post: self.faultWithinCurrentCycle = true;
+    post: self.eStopResponseTimeMs = timestampMs - self.cycleStartTimestampMs;
+    post: self.eStopResponseTimeMs >= 0.0;
+    post: self.eStopResponseTimeMs <= self.maxEStopLatencyMs;
+    modifies: self.faultWithinCurrentCycle,
+              self.eStopResponseTimeMs;
+  }
+
+  event completeCycle() {
+    pre: true;
+    post: self.faultWithinCurrentCycle = false;
+    modifies: self.faultWithinCurrentCycle;
+  }
+}
+
+// ============================================================================
+// INTERFACES (relators)
+// ============================================================================
+
+relator EStopActivationInterface mediates (EStopInterruptHandler, FailsafeStateManager) {
+  identity: intId;
+  property intId: String;
+  property activationLatencyMs: Real;
+  property activationComplete: Boolean;
+  invariants {
+    self.intId <> null;
+    self.activationLatencyMs >= 0.0;
+  }
+}
+
+relator FailsafeToMotionInterface mediates (FailsafeStateManager, MotionOutputController) {
+  identity: intId;
+  property intId: String;
+  property deEnergizeLatencyMs: Real;
+  invariants {
+    self.intId <> null;
+  }
+}
+
+relator SensorFaultFailsafeInterface mediates (SafetySensorManager, FailsafeStateManager) {
+  identity: intId;
+  property intId: String;
+  property failSafeEntryLatencyMs: Real;
+  invariants {
+    self.intId <> null;
+  }
+}
+
+relator ManualResetInterface mediates (ManualResetController, FailsafeStateManager) {
+  identity: intId;
+  property intId: String;
+  property resetConsumed: Boolean;
+  invariants {
+    self.intId <> null;
+  }
+}
+
+// ============================================================================
+// DATA FLOWS
+// ============================================================================
+
+happening EStopDeactivationFlow {
+  identity: flowId;
+  property flowId: String;
+  property eStopSignalTimestampMs: Real;
+  property failsafeEntryTimestampMs: Real;
+  property motionDeEnergizeTimestampMs: Real;
+  property totalLatencyMs: Real;
+  property withinSpec: Boolean;
+  invariants {
+    self.flowId <> null;
+    self.eStopSignalTimestampMs >= 0.0;
+    self.failsafeEntryTimestampMs >= 0.0;
+    self.motionDeEnergizeTimestampMs >= 0.0;
+    self.totalLatencyMs = self.motionDeEnergizeTimestampMs - self.eStopSignalTimestampMs;
+    self.withinSpec = (self.totalLatencyMs <= 50.0);
+  }
+}
+
+happening SensorFaultToFailsafeFlow {
+  identity: flowId;
+  property flowId: String;
+  property sensorFaultTimestampMs: Real;
+  property failsafeEntryTimestampMs: Real;
+  property cycleStartTimestampMs: Real;
+  property cyclesToResponse: Integer;
+  invariants {
+    self.flowId <> null;
+    self.sensorFaultTimestampMs >= 0.0;
+    self.failsafeEntryTimestampMs >= 0.0;
+    self.cyclesToResponse >= 0;
+    self.cyclesToResponse <= 1;
+  }
+}
+
+happening ManualResetFlow {
+  identity: flowId;
+  property flowId: String;
+  property resetRequestTimestampMs: Real;
+  property failsafeExitTimestampMs: Real;
+  property latchReleased: Boolean;
+  invariants {
+    self.flowId <> null;
+    self.resetRequestTimestampMs >= 0.0;
+    self.failsafeExitTimestampMs >= 0.0;
+    self.latchReleased;
+  }
+}

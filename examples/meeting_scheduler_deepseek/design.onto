@@ -1,0 +1,211 @@
+schema "onto/0.1";
+namespace meeting_scheduler_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+kind RequestManager {
+  identity: requestId;
+  property requestId: String;
+  property rangeStart: Real;
+  property rangeEnd: Real;
+  property isOpen: Boolean;
+  property initiatorId: String;
+  invariants {
+    self.requestId <> null;
+    self.rangeStart >= 0.0;
+    self.rangeEnd >= self.rangeStart;
+    self.isOpen = true implies self.initiatorId <> null;
+  }
+  event openRequest(start: Real, end: Real) {
+    pre: start >= 0.0;
+    pre: end >= start;
+    post: self.rangeStart = start;
+    post: self.rangeEnd = end;
+    post: self.isOpen = true;
+    modifies: self.rangeStart, self.rangeEnd, self.isOpen;
+  }
+  event closeRequest() {
+    pre: self.isOpen = true;
+    post: self.isOpen = false;
+    modifies: self.isOpen;
+  }
+}
+
+kind ConstraintManager {
+  identity: constraintId;
+  property constraintId: String;
+  property participantId: String;
+  property exclusionDates: Set<Real>;
+  property preferenceDates: Set<Real>;
+  invariants {
+    self.constraintId <> null;
+    self.participantId <> null;
+    self.preferenceDates->forAll(d | not self.exclusionDates->includes(d));
+  }
+  event updateConstraints(exclusions: Set<Real>, preferences: Set<Real>) {
+    pre: exclusions->forAll(d | d >= 0.0);
+    pre: preferences->forAll(d | d >= 0.0);
+    pre: preferences->forAll(d | not exclusions->includes(d));
+    post: self.exclusionDates = exclusions;
+    post: self.preferenceDates = preferences;
+    modifies: self.exclusionDates, self.preferenceDates;
+  }
+}
+
+kind ProposerEngine {
+  identity: engineId;
+  property engineId: String;
+  invariants {
+    self.engineId <> null;
+  }
+  event proposeDate(rangeStart: Real, rangeEnd: Real, exclusions: Set<Real>, preferences: Set<Real>): Real {
+    pre: rangeStart >= 0.0;
+    pre: rangeEnd >= rangeStart;
+    post: result >= rangeStart;
+    post: result <= rangeEnd;
+    post: not exclusions->includes(result);
+    post: if preferences->notEmpty() and preferences->exists(d | d >= rangeStart and d <= rangeEnd and not exclusions->includes(d)) then
+            preferences->includes(result)
+          else
+            true
+          endif;
+  }
+}
+
+kind NotificationService {
+  identity: notifId;
+  property notifId: String;
+  property lastNotificationSentAt: Real;
+  property notificationLog: Set<String>;
+  invariants {
+    self.notifId <> null;
+    self.lastNotificationSentAt >= 0.0;
+  }
+  event notifyAll(participants: Set<String>, date: Real, location: String, at: Real) {
+    pre: participants->notEmpty();
+    pre: date >= 0.0;
+    pre: location <> null;
+    pre: at >= 0.0;
+    post: self.lastNotificationSentAt = at;
+    post: self.notificationLog->includes('CONFIRMED');
+    modifies: self.lastNotificationSentAt, self.notificationLog;
+  }
+  event reportConflict(initiatorId: String, at: Real) {
+    pre: initiatorId <> null;
+    pre: at >= 0.0;
+    post: self.lastNotificationSentAt = at;
+    post: self.notificationLog->includes('CONFLICT');
+    modifies: self.lastNotificationSentAt, self.notificationLog;
+  }
+}
+
+kind MeetingStore {
+  identity: meetingId;
+  property meetingId: String;
+  property scheduledDate: Real;
+  property location: String;
+  property confirmed: Boolean;
+  invariants {
+    self.meetingId <> null;
+    self.confirmed implies self.scheduledDate >= 0.0 and self.location <> null;
+  }
+  event confirmMeeting(date: Real, location: String) {
+    pre: date >= 0.0;
+    pre: location <> null;
+    pre: not self.confirmed;
+    post: self.scheduledDate = date;
+    post: self.location = location;
+    post: self.confirmed = true;
+    modifies: self.scheduledDate, self.location, self.confirmed;
+  }
+}
+
+relator RequestToConstraintRelator mediates (RequestManager, ConstraintManager) {
+  identity: relatorId;
+  property relatorId: String;
+  property linkedAt: Real;
+  invariants {
+    self.relatorId <> null;
+    self.linkedAt >= 0.0;
+  }
+}
+
+relator RequestToProposerRelator mediates (RequestManager, ProposerEngine) {
+  identity: relatorId;
+  property relatorId: String;
+  property linkedAt: Real;
+  invariants {
+    self.relatorId <> null;
+    self.linkedAt >= 0.0;
+  }
+}
+
+relator ConstraintToProposerRelator mediates (ConstraintManager, ProposerEngine) {
+  identity: relatorId;
+  property relatorId: String;
+  property linkedAt: Real;
+  invariants {
+    self.relatorId <> null;
+    self.linkedAt >= 0.0;
+  }
+}
+
+relator RequestToNotificationRelator mediates (RequestManager, NotificationService) {
+  identity: relatorId;
+  property relatorId: String;
+  property linkedAt: Real;
+  invariants {
+    self.relatorId <> null;
+    self.linkedAt >= 0.0;
+  }
+}
+
+relator MeetingToNotificationRelator mediates (MeetingStore, NotificationService) {
+  identity: relatorId;
+  property relatorId: String;
+  property linkedAt: Real;
+  invariants {
+    self.relatorId <> null;
+    self.linkedAt >= 0.0;
+  }
+}
+
+happening SchedulingFlow {
+  identity: flowId;
+  property flowId: String;
+  property requestManagerId: String;
+  property constraintManagerId: String;
+  property proposerEngineId: String;
+  property meetingStoreId: String;
+  property notificationServiceId: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.outcome <> null;
+  }
+}
+
+happening ConstraintUpdateFlow {
+  identity: flowId;
+  property flowId: String;
+  property participantId: String;
+  property constraintManagerId: String;
+  property requestManagerId: String;
+  property newExclusions: Set<Real>;
+  invariants {
+    self.flowId <> null;
+    self.participantId <> null;
+  }
+}
+
+relation requestConstraintMed: <<mediation>> from RequestToConstraintRelator [1] to RequestManager [1];
+relation constraintRequestMed: <<mediation>> from RequestToConstraintRelator [1] to ConstraintManager [1];
+relation requestProposerMed: <<mediation>> from RequestToProposerRelator [1] to RequestManager [1];
+relation proposerRequestMed: <<mediation>> from RequestToProposerRelator [1] to ProposerEngine [1];
+relation constraintProposerMed: <<mediation>> from ConstraintToProposerRelator [1] to ConstraintManager [1];
+relation proposerConstraintMed: <<mediation>> from ConstraintToProposerRelator [1] to ProposerEngine [1];
+relation requestNotifMed: <<mediation>> from RequestToNotificationRelator [1] to RequestManager [1];
+relation notifRequestMed: <<mediation>> from RequestToNotificationRelator [1] to NotificationService [1];
+relation meetingNotifMeetingMed: <<mediation>> from MeetingToNotificationRelator [1] to MeetingStore [1];
+relation meetingNotifNotifMed: <<mediation>> from MeetingToNotificationRelator [1] to NotificationService [1];

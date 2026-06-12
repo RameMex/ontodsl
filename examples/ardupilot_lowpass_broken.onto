@@ -1,0 +1,37 @@
+schema "onto/0.1";
+namespace ardupilot_filters;
+
+// Same model as ardupilot_lowpass.onto but with deliberate bugs to
+// verify ontodls catches them. The LSP-violating apply override is
+// the bug-lpv-01 / bug-lp-01 hazard the dashboard pretends to detect.
+
+kind DigitalLPF {
+  identity: filterId;
+  property filterId: String;
+  property output: Real;
+  property initialised: Boolean;
+
+  event apply_internal(sample: Real, alpha: Real) {
+    pre: alpha >= 0.0;
+    pre: alpha <= 1.0;
+    post: self.initialised = true;
+    modifies: self.output, self.initialised;
+  }
+}
+
+subkind LowPassFilter specializes DigitalLPF {
+  property cutoffFreq: Real;
+
+  // BUG 1: precondition references undeclared parameter `nonExistent`.
+  // Should be caught by semantic check.
+  event set_cutoff_frequency(newCutoffFreq: Real) {
+    pre: nonExistent >= 0.0;
+    post: self.cutoffFreq = newCutoffFreq;
+    modifies: self.cutoffFreq;
+  }
+
+  // BUG 2: invariant references an undeclared property `nonexistentProp`.
+  invariants {
+    self.nonexistentProp >= 0.0;
+  }
+}

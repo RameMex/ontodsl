@@ -1,0 +1,175 @@
+schema "onto/0.1";
+namespace baseball_league;
+
+// ─── Categories and Configuration ────────────────────────────────────────
+
+kind TournamentCategory {
+  identity: categoryId;
+  property categoryId: String;
+  property name: String;
+  property inningsBase: Integer;
+  property basesDistanceFt: Real;
+  property plateToLomaFt: Real;
+  property maxPitchesPerGame: Integer;
+  property allowsCurve: Boolean;
+
+  invariants {
+    self.categoryId <> null;
+    self.name <> null;
+    self.inningsBase > 0;
+    self.basesDistanceFt > 0.0;
+    self.plateToLomaFt > 0.0;
+    self.maxPitchesPerGame > 0;
+  }
+}
+
+// ─── Teams and Players ───────────────────────────────────────────────────
+
+kind Player {
+  identity: playerId;
+  property playerId: String;
+  property name: String;
+  property birthYear: Integer;
+
+  invariants {
+    self.playerId <> null;
+    self.name <> null;
+    self.birthYear > 1900;
+  }
+}
+
+kind Team {
+  identity: teamId;
+  property teamId: String;
+  property name: String;
+  property leagueCategory: TournamentCategory;
+
+  invariants {
+    self.teamId <> null;
+    self.name <> null;
+    self.leagueCategory <> null;
+  }
+}
+
+// ─── Roles ───────────────────────────────────────────────────────────────
+
+role HomeTeam mediated-by Game of Team {
+  property teamId: String;
+  property leagueCategory: TournamentCategory;
+}
+
+role AwayTeam mediated-by Game of Team {
+  property teamId: String;
+  property leagueCategory: TournamentCategory;
+}
+
+// ─── Game Management ─────────────────────────────────────────────────────
+
+relator Game mediates (HomeTeam, AwayTeam) {
+  identity: gameId;
+  property gameId: String;
+  property leagueCategory: TournamentCategory;
+  property homeTeam: HomeTeam;
+  property awayTeam: AwayTeam;
+  property status: String;
+  property homeScore: Integer;
+  property awayScore: Integer;
+  property isTie: Boolean;
+
+  property pitchers: Set<Player>;
+  property catchers: Set<Player>;
+
+  invariants {
+    self.gameId <> null;
+    self.leagueCategory <> null;
+    self.homeTeam <> null;
+    self.awayTeam <> null;
+    self.homeTeam.leagueCategory = self.leagueCategory;
+    self.awayTeam.leagueCategory = self.leagueCategory;
+    self.homeTeam.teamId <> self.awayTeam.teamId;
+    self.homeScore >= 0;
+    self.awayScore >= 0;
+    self.pitchers->forAll(p | not self.catchers->includes(p));
+  }
+
+  event registerPitcher(p: Player) {
+    pre: p <> null;
+    pre: self.status = 'LIVE';
+    pre: not self.catchers->includes(p);
+    post: self.pitchers->includes(p);
+    modifies: self.pitchers;
+  }
+
+  event registerCatcher(p: Player) {
+    pre: p <> null;
+    pre: self.status = 'LIVE';
+    pre: not self.pitchers->includes(p);
+    post: self.catchers->includes(p);
+    modifies: self.catchers;
+  }
+
+  event completeGame(hScore: Integer, aScore: Integer) {
+    pre: self.status = 'LIVE';
+    pre: hScore >= 0;
+    pre: aScore >= 0;
+    post: self.homeScore = hScore;
+    post: self.awayScore = aScore;
+    post: self.status = 'COMPLETED';
+    post: self.isTie = (hScore = aScore);
+    modifies: self.homeScore, self.awayScore, self.status, self.isTie;
+  }
+}
+
+// ─── Pitching Rest Tracking ──────────────────────────────────────────────
+
+relator PitcherPerformance mediates (Player, Game) {
+  identity: performanceId;
+  property performanceId: String;
+  property pitchesThrown: Integer;
+  
+  property pitcher: Player;
+  property game: Game;
+
+  invariants {
+    self.performanceId <> null;
+    self.pitcher <> null;
+    self.game <> null;
+    self.pitchesThrown >= 0;
+    self.pitchesThrown <= self.game.leagueCategory.maxPitchesPerGame;
+  }
+
+  query requiredRestDays(): Integer {
+    body: if self.pitchesThrown <= 20 then 0
+          else if self.pitchesThrown <= 35 then 1
+          else if self.pitchesThrown <= 50 then 2
+          else if self.pitchesThrown <= 65 then 3
+          else 4 endif endif endif endif;
+  }
+}
+
+// ─── Standings & Metrics ──────────────────────────────────────────────────
+
+kind TeamStanding {
+  identity: standingId;
+  property standingId: String;
+  property team: Team;
+  property wins: Integer;
+  property losses: Integer;
+  property pct: Real;
+
+  invariants {
+    self.standingId <> null;
+    self.team <> null;
+    self.wins >= 0;
+    self.losses >= 0;
+    self.pct = (if (self.wins + self.losses) > 0 then (self.wins / (self.wins + self.losses)) else 0.0 endif);
+  }
+}
+
+// ─── Explicit Relations (OntoUML Stereotypes) ────────────────────────────
+
+relation playerRoster: <<memberOf>> from Player [1..*] to Team [1];
+relation gameHomeTeamMed: <<mediation>> from Game [1] to HomeTeam [1];
+relation gameAwayTeamMed: <<mediation>> from Game [1] to AwayTeam [1];
+relation perfPlayerMed: <<mediation>> from PitcherPerformance [1] to Player [1];
+relation perfGameMed: <<mediation>> from PitcherPerformance [1] to Game [1];

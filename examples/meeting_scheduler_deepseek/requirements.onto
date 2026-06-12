@@ -1,0 +1,95 @@
+schema "onto/0.1";
+namespace meeting_scheduler_requirements;
+import "./discovery.onto";
+
+// ─── System Kind ─────────────────────────────────────────────────────────
+// Mirrors commitment properties onto the system kind for discharge proofs.
+// Each property referenced in a commitment's predicate is declared here
+// with the same name and type (except commitmentId, which is skipped).
+kind MeetingSchedulerSystem specializes ExclusionRespect, InitiatorNotified {
+  identity: systemId;
+  property systemId: String;
+  property proposedDate: Real;
+  property rangeStart: Real;
+  property rangeEnd: Real;
+  property conflictReported: Boolean;
+  property notificationSent: Boolean;
+  property constraintUpdateAccepted: Boolean;
+
+  invariants {
+    self.systemId <> null;
+    self.rangeStart >= 0.0;
+    self.rangeEnd >= self.rangeStart;
+    self.proposedDate >= 0.0;
+  }
+
+  // ─── Events (Functional Requirements) ─────────────────────────────────
+
+  // FR-1: Initiator requests a meeting with date range.
+  // Sets the window; kicks off the scheduling flow.
+  event requestMeeting(start: Real, end: Real) {
+    pre: start >= 0.0;
+    pre: end >= start;
+    pre: start <= end;
+    post: self.rangeStart = start;
+    post: self.rangeEnd = end;
+    post: self.conflictReported = false;
+    post: self.notificationSent = false;
+    post: self.constraintUpdateAccepted = false;
+    modifies: self.rangeStart, self.rangeEnd, self.conflictReported,
+              self.notificationSent, self.constraintUpdateAccepted;
+  }
+
+  // FR-2: Propose a date that fits constraints.
+  // Discharges GOAL-1 (ScheduleWithinConstraints).
+  event proposeDate(date: Real): Real
+    refines meeting_scheduler_discovery::ScheduleWithinConstraints {
+    pre: date >= self.rangeStart;
+    pre: date <= self.rangeEnd;
+    post: self.proposedDate = date;
+    post: self.proposedDate >= self.rangeStart;
+    post: self.proposedDate <= self.rangeEnd;
+    post: result = date;
+    modifies: self.proposedDate;
+  }
+
+  // FR-3: Report scheduling conflict to initiator.
+  // Discharges GOAL-2 (ReportConflict).
+  event reportConflict(): Boolean
+    refines meeting_scheduler_discovery::ReportConflict {
+    pre: not self.conflictReported;
+    post: self.conflictReported = true;
+    post: result = true;
+    modifies: self.conflictReported;
+  }
+
+  // FR-4: Notify all participants of confirmed date and location.
+  // Discharges GOAL-3a (NotifyParticipants).
+  event notifyParticipants(): Boolean
+    refines meeting_scheduler_discovery::NotifyParticipants {
+    pre: not self.notificationSent;
+    post: self.notificationSent = true;
+    post: result = true;
+    modifies: self.notificationSent;
+  }
+
+  // FR-5: Accept updated constraints from a participant while open.
+  // Discharges GOAL-3b (AcceptUpdatedConstraints).
+  event acceptConstraintUpdate(): Boolean
+    refines meeting_scheduler_discovery::AcceptUpdatedConstraints {
+    pre: not self.constraintUpdateAccepted;
+    post: self.constraintUpdateAccepted = true;
+    post: result = true;
+    modifies: self.constraintUpdateAccepted;
+  }
+
+  // FR-6: Confirm the meeting — finalizes scheduling.
+  event confirmMeeting(date: Real, location: String) {
+    pre: self.proposedDate = date;
+    pre: location <> null;
+    pre: not self.conflictReported;
+    // post: proposedDate is already set; location is accepted
+    post: self.notificationSent = false;  // reset flag for fresh notification
+    modifies: self.notificationSent;
+  }
+}

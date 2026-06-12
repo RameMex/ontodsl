@@ -1,0 +1,208 @@
+schema "onto/0.1";
+namespace ride_dispatch_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// ──────────────────────────────────────────────────────────────────────────
+// FORMALIZATION STAGE — what the WORLD imposes on the ride dispatch system.
+//
+// Regulatory/compliance anchors → categories with documentary invariants.
+// Active business rules → new guard/rejection events on a subkind of
+//   RideDispatchSystem (RideDispatchSystemFormalized).
+// Physical/domain-logical invariants → member-quantified categories.
+// Passive assumptions → FormalAssumptionRecord, NOT events.
+// ──────────────────────────────────────────────────────────────────────────
+
+// ======================================================================
+// REGULATORY / COMPLIANCE ANCHORS (Categories)
+// ======================================================================
+
+category GdprArticle5Compliant {
+  property lawfulBasis: String;
+  property noticeUrl: String;
+  property dataRetentionDays: Integer;
+  invariants {
+    self.lawfulBasis <> null;
+    self.noticeUrl <> null;
+    self.dataRetentionDays > 0;
+  }
+}
+
+category PciDssCompliant {
+  property pciScope: String;
+  property paymentProcessor: String;
+  invariants {
+    self.pciScope <> null;
+    self.paymentProcessor <> null;
+  }
+}
+
+category AdaAccessible {
+  property wheelchairRideCapacity: Integer;
+  property waitTimeMaxWavSec: Real;
+  invariants {
+    self.wheelchairRideCapacity >= 0;
+    self.waitTimeMaxWavSec > 0.0;
+  }
+}
+
+// ======================================================================
+// MEMBER-QUANTIFIED CATEGORIES
+// ======================================================================
+
+category GeographicallyPlausible where bearer: RideDispatchSystem {
+  invariants {
+    bearer.maxLatencyBudget <= 30.0;
+  }
+}
+
+category StateMachineDiscipline where bearer: RideDispatchSystem {
+  invariants {
+    bearer.idleDrivers + bearer.assignedDrivers + bearer.enRouteDrivers >= 0;
+    bearer.driverMutualExclusionHolds = true;
+  }
+}
+
+// ======================================================================
+// PASSIVE ASSUMPTIONS — FormalAssumptionRecord
+// ======================================================================
+
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property label: String;
+  property description: String;
+  property status: String;
+  invariants {
+    self.assumptionId <> null;
+    self.label <> null;
+    self.description <> null;
+    self.status = 'accepted' or self.status = 'verified' or self.status = 'falsified';
+  }
+}
+
+// ======================================================================
+// RELATOR for documenting assumptions (mediates between FormalAssumptionRecord and system)
+// ======================================================================
+
+relator AssumptionDocumentation mediates (FormalAssumptionRecord, RideDispatchSystemFormalized) {
+  identity: docId;
+  property docId: String;
+  property documentedAt: String;
+  invariants {
+    self.docId <> null;
+    self.documentedAt <> null;
+  }
+}
+
+// ======================================================================
+// RELATOR for compliance monitoring
+// ======================================================================
+
+relator ComplianceMonitor mediates (RideVendor, RideDispatchSystemFormalized) {
+  identity: monitorId;
+  property monitorId: String;
+  property lastAuditDate: String;
+  property overallComplianceStatus: String;
+  invariants {
+    self.monitorId <> null;
+    self.lastAuditDate <> null;
+    self.overallComplianceStatus = 'compliant' or self.overallComplianceStatus = 'non_compliant' or self.overallComplianceStatus = 'pending_audit';
+  }
+}
+
+// ======================================================================
+// FORMALIZED SUBKIND — active business rules as NEW rejection/guard events
+// ======================================================================
+
+subkind RideDispatchSystemFormalized specializes RideDispatchSystem {
+  property lawfulBasis: String;
+  property noticeUrl: String;
+  property dataRetentionDays: Integer;
+  property pciScope: String;
+  property paymentProcessor: String;
+  property wheelchairRideCapacity: Integer;
+  property waitTimeMaxWavSec: Real;
+  property totalDrivers: Integer;
+  property driverLock: Integer;
+
+  invariants {
+    self.lawfulBasis <> null;
+    self.noticeUrl <> null;
+    self.dataRetentionDays > 0;
+    self.pciScope <> null;
+    self.paymentProcessor <> null;
+    self.wheelchairRideCapacity >= 0;
+    self.waitTimeMaxWavSec > 0.0;
+    self.idleDrivers + self.assignedDrivers + self.enRouteDrivers + self.completedRides = self.totalDrivers;
+    self.driverLock = 0 or self.driverLock = 1;
+  }
+
+  // ACTIVE BUSINESS RULE #1: Reject double-assignment
+  event rejectDoubleAssignment(driverId: String, requestId: String) {
+    pre: driverId <> null;
+    pre: requestId <> null;
+    pre: self.driverMutualExclusionHolds = false;
+    post: self.driverMutualExclusionHolds = false;
+  }
+
+  // ACTIVE BUSINESS RULE #2: Reject invalid state transition (skip)
+  event rejectStateSkip(driverId: String, fromState: String, toState: String) {
+    pre: driverId <> null;
+    pre: fromState <> null;
+    pre: toState <> null;
+    pre: (fromState = 'idle' and toState = 'en_route') or
+         (fromState = 'idle' and toState = 'completed') or
+         (fromState = 'assigned' and toState = 'completed') or
+         (fromState = 'en_route' and toState = 'idle') or
+         (fromState = 'en_route' and toState = 'assigned') or
+         (fromState = 'completed' and toState = 'en_route') or
+         (fromState = 'completed' and toState = 'assigned');
+    post: self.driverStateTransitionValid = self.driverStateTransitionValid@pre;
+  }
+
+  // ACTIVE BUSINESS RULE #3: Reject if first offer exceeds latency budget
+  event rejectExcessiveLatency(timeSinceRequest: Real, requestId: String) {
+    pre: timeSinceRequest > 30.0;
+    pre: requestId <> null;
+    post: self.maxAssignmentLatencySec = timeSinceRequest;
+    modifies: self.maxAssignmentLatencySec;
+  }
+
+  // ACTIVE BUSINESS RULE #4: Lock driver for atomic assignment
+  event acquireDriverLock(driverId: String, requestId: String) {
+    pre: driverId <> null;
+    pre: requestId <> null;
+    pre: self.driverLock = 0;
+    post: self.driverLock = 1;
+    modifies: self.driverLock;
+  }
+
+  // ACTIVE BUSINESS RULE #5: Release the lock
+  event releaseDriverLock(driverId: String, requestId: String, wasSuccessful: Boolean) {
+    pre: driverId <> null;
+    pre: requestId <> null;
+    pre: self.driverLock = 1;
+    post: self.driverLock = 0;
+    modifies: self.driverLock;
+  }
+
+  // ACTIVE BUSINESS RULE #6: Log compliance violation
+  event logComplianceViolation(violationCode: String, detail: String) {
+    pre: violationCode <> null;
+    pre: detail <> null;
+    pre: self.lawfulBasis <> null;
+    pre: self.pciScope <> null;
+    pre: self.dataRetentionDays > 0;
+    post: self.lawfulBasis <> null;
+  }
+}
+
+// ======================================================================
+// EXPLICIT <<mediation>> RELATIONS
+// ======================================================================
+// Corrected: source must be a Relator (AssumptionDocumentation, ComplianceMonitor)
+relation assumptionDocsSystem: <<mediation>> from AssumptionDocumentation [1] to RideDispatchSystemFormalized [1];
+relation docsAssumptionRecord: <<mediation>> from AssumptionDocumentation [1] to FormalAssumptionRecord [1];
+relation complianceMonSystem: <<mediation>> from ComplianceMonitor [1] to RideDispatchSystemFormalized [1];
+relation complianceMonVendor: <<mediation>> from ComplianceMonitor [1] to RideVendor [1];

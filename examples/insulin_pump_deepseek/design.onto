@@ -1,0 +1,596 @@
+schema "onto/0.1";
+namespace insulin_pump_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// DESIGN STAGE: Insulin Pump Control System
+// =====================================================================
+
+// ─── Component: Blood Sugar Sensor ──────────────────────────────────
+kind BloodSugarSensor {
+  identity: sensorId;
+  property sensorId: String;
+  property lastReadingMgDl: Real;
+  property lastRateMgDlPerMin: Real;
+  property sensorFaulty: Boolean;
+  property readingTimestamp: Real;
+
+  invariants {
+    self.sensorId <> null;
+    self.lastReadingMgDl >= 0.0;
+    self.lastReadingMgDl <= 1000.0;
+    self.sensorFaulty implies self.lastReadingMgDl = 0.0;
+  }
+
+  event takeReading(value: Real, timestamp: Real)
+    refines insulin_pump_requirements::InsulinPumpControlSystem.checkBloodSugar {
+    pre: value >= 0.0;
+    pre: value <= 1000.0;
+    pre: timestamp >= 0.0;
+
+    post: self.lastReadingMgDl = value;
+    post: self.readingTimestamp = timestamp;
+    post: self.sensorFaulty = false;
+
+    modifies: self.lastReadingMgDl,
+              self.readingTimestamp,
+              self.sensorFaulty;
+  }
+
+  event reportSensorFault() {
+    pre: not self.sensorFaulty;
+    post: self.sensorFaulty = true;
+    modifies: self.sensorFaulty;
+  }
+
+  event resetSensor() {
+    pre: self.sensorFaulty = true;
+    post: self.sensorFaulty = false;
+    post: self.lastReadingMgDl = 0.0;
+    post: self.lastRateMgDlPerMin = 0.0;
+    modifies: self.sensorFaulty,
+              self.lastReadingMgDl,
+              self.lastRateMgDlPerMin;
+  }
+}
+
+// ─── Role: Sensor Endpoint ──────────────────────────────────────────
+role SensorEndpoint mediated-by SensorChannel of BloodSugarSensor {
+  property lastReadingMgDl: Real;
+  property readingTimestamp: Real;
+  property sensorFaulty: Boolean;
+}
+
+// ─── Component: Dose Calculator ─────────────────────────────────────
+kind DoseCalculator {
+  identity: calculatorId;
+  property calculatorId: String;
+  property safeMaxDoseUnits: Real;
+  property safeZoneUpperBound: Real;
+  property lastComputedDose: Real;
+  property lastCalculationTime: Real;
+  property dosingCheckIntervalSeconds: Real;
+
+  invariants {
+    self.calculatorId <> null;
+    self.safeMaxDoseUnits > 0.0;
+    self.safeMaxDoseUnits <= 2.0;
+    self.safeZoneUpperBound >= 0.0;
+    self.lastComputedDose >= 0.0;
+    self.lastComputedDose <= self.safeMaxDoseUnits;
+    self.dosingCheckIntervalSeconds > 0.0;
+    self.dosingCheckIntervalSeconds <= 600.0;
+  }
+
+  event computeDose(sugar: Real, rate: Real, timestamp: Real): Real
+    refines insulin_pump_requirements::InsulinPumpControlSystem.deliverInsulin,
+            insulin_pump_formalization::DosePlausibility {
+    pre: sugar >= 0.0;
+    pre: sugar <= 1000.0;
+    pre: rate >= 0.0;
+    pre: sugar > self.safeZoneUpperBound;
+    pre: rate > 0.0;
+    pre: timestamp >= 0.0;
+
+    post: if (timestamp - self.lastCalculationTime) >= self.dosingCheckIntervalSeconds then
+            result <= self.safeMaxDoseUnits and result > 0.0
+          else
+            result = 0.0
+          endif;
+    post: self.lastComputedDose = result;
+    post: self.lastCalculationTime = timestamp;
+
+    modifies: self.lastComputedDose,
+              self.lastCalculationTime;
+  }
+
+  event setMaxDose(newMax: Real)
+    refines insulin_pump_requirements::InsulinPumpControlSystem.setSafeMaxDose,
+            insulin_pump_formalization::Fda510kCleared {
+    pre: newMax > 0.0;
+    pre: newMax <= 2.0;
+    pre: self.safeMaxDoseUnits <> newMax;
+
+    post: self.safeMaxDoseUnits = newMax;
+
+    modifies: self.safeMaxDoseUnits;
+  }
+
+  event setSafeZone(newUpperBound: Real) {
+    pre: newUpperBound >= 0.0;
+    pre: self.safeZoneUpperBound <> newUpperBound;
+
+    post: self.safeZoneUpperBound = newUpperBound;
+
+    modifies: self.safeZoneUpperBound;
+  }
+
+  event setDosingCheckInterval(newInterval: Real) {
+    pre: newInterval > 0.0;
+    pre: newInterval <= 600.0;
+    pre: self.dosingCheckIntervalSeconds <> newInterval;
+
+    post: self.dosingCheckIntervalSeconds = newInterval;
+
+    modifies: self.dosingCheckIntervalSeconds;
+  }
+
+  event resetCalculator() {
+    pre: self.lastComputedDose >= 0.0;
+    post: self.lastComputedDose = 0.0;
+    post: self.lastCalculationTime = 0.0;
+    modifies: self.lastComputedDose,
+              self.lastCalculationTime;
+  }
+}
+
+// ─── Role: Calculator Endpoint ──────────────────────────────────────
+role CalculatorEndpoint mediated-by SensorChannel of DoseCalculator {
+  property lastComputedDose: Real;
+  property safeMaxDoseUnits: Real;
+  property safeZoneUpperBound: Real;
+}
+
+// ─── Interface: Sensor Channel ──────────────────────────────────────
+relator SensorChannel mediates (SensorEndpoint, CalculatorEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property lastTransmittedReadingMgDl: Real;
+  property lastTransmittedRateMgDlPerMin: Real;
+  property transmissionTimestamp: Real;
+  property isActive: Boolean;
+
+  invariants {
+    self.channelId <> null;
+    self.lastTransmittedReadingMgDl >= 0.0;
+    self.lastTransmittedReadingMgDl <= 1000.0;
+    self.lastTransmittedRateMgDlPerMin >= 0.0;
+  }
+
+  event transmitReading(value: Real, rate: Real, timestamp: Real) {
+    pre: value >= 0.0;
+    pre: value <= 1000.0;
+    pre: rate >= 0.0;
+    pre: timestamp >= 0.0;
+    pre: self.isActive = true;
+
+    post: self.lastTransmittedReadingMgDl = value;
+    post: self.lastTransmittedRateMgDlPerMin = rate;
+    post: self.transmissionTimestamp = timestamp;
+
+    modifies: self.lastTransmittedReadingMgDl,
+              self.lastTransmittedRateMgDlPerMin,
+              self.transmissionTimestamp;
+  }
+}
+
+// ─── Component: Pump Actuator ───────────────────────────────────────
+kind PumpActuator {
+  identity: actuatorId;
+  property actuatorId: String;
+  property reservoirUnits: Real;
+  property reservoirCapacityUnits: Real;
+  property isLowReservoir: Boolean;
+  property delivering: Boolean;
+  property lastDeliveredDose: Real;
+  property lastDoseTime: Real;
+  property actuatorFaulty: Boolean;
+
+  invariants {
+    self.actuatorId <> null;
+    self.reservoirUnits >= 0.0;
+    self.reservoirUnits <= self.reservoirCapacityUnits;
+    self.reservoirCapacityUnits > 0.0;
+    self.isLowReservoir = (self.reservoirUnits < 20.0);
+    self.lastDeliveredDose >= 0.0;
+    self.actuatorFaulty implies not self.delivering;
+  }
+
+  event deliverInsulin(dose: Real, timestamp: Real)
+    refines insulin_pump_requirements::InsulinPumpControlSystem.deliverInsulin {
+    pre: dose > 0.0;
+    pre: dose <= 2.0;
+    pre: self.reservoirUnits >= dose;
+    pre: not self.delivering;
+    pre: not self.actuatorFaulty;
+    pre: timestamp >= 0.0;
+
+    post: self.reservoirUnits = self.reservoirUnits@pre - dose;
+    post: self.delivering = true;
+    post: self.lastDeliveredDose = dose;
+    post: self.lastDoseTime = timestamp;
+
+    modifies: self.reservoirUnits,
+              self.lastDeliveredDose,
+              self.lastDoseTime;
+  }
+
+  event stopDelivery()
+    refines insulin_pump_requirements::InsulinPumpControlSystem.detectFault {
+    pre: self.delivering = true;
+    post: self.delivering = false;
+    post: self.lastDeliveredDose = 0.0;
+    modifies: self.delivering,
+              self.lastDeliveredDose;
+  }
+
+  event refillReservoir(amount: Real) {
+    pre: amount > 0.0;
+    pre: self.reservoirUnits + amount <= self.reservoirCapacityUnits;
+    pre: not self.delivering;
+    post: self.reservoirUnits = self.reservoirUnits@pre + amount;
+    modifies: self.reservoirUnits;
+  }
+
+  event reportLowReservoir()
+    refines insulin_pump_requirements::InsulinPumpControlSystem.detectLowReservoir {
+    pre: self.isLowReservoir = true;
+  }
+
+  event reportActuatorFault() {
+    pre: not self.actuatorFaulty;
+    pre: not self.delivering;
+    post: self.actuatorFaulty = true;
+    modifies: self.actuatorFaulty;
+  }
+
+  event clearActuatorFault() {
+    pre: self.actuatorFaulty = true;
+    post: self.actuatorFaulty = false;
+    modifies: self.actuatorFaulty;
+  }
+}
+
+// ─── Role: Actuator Endpoint ────────────────────────────────────────
+role ActuatorEndpoint mediated-by DoseCommandChannel of PumpActuator {
+  property reservoirUnits: Real;
+  property delivering: Boolean;
+  property actuatorFaulty: Boolean;
+}
+
+// ─── Interface: Dose Command Channel ────────────────────────────────
+relator DoseCommandChannel mediates (CalculatorEndpoint, ActuatorEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property lastCommandedDose: Real;
+  property commandTimestamp: Real;
+  property commandAcknowledged: Boolean;
+
+  invariants {
+    self.channelId <> null;
+    self.lastCommandedDose >= 0.0;
+    self.lastCommandedDose <= 2.0;
+  }
+
+  event sendDoseCommand(dose: Real, timestamp: Real) {
+    pre: dose > 0.0;
+    pre: dose <= 2.0;
+    pre: timestamp >= 0.0;
+    pre: not self.commandAcknowledged;
+
+    post: self.lastCommandedDose = dose;
+    post: self.commandTimestamp = timestamp;
+
+    modifies: self.lastCommandedDose,
+              self.commandTimestamp;
+  }
+
+  event acknowledgeCommand() {
+    pre: not self.commandAcknowledged;
+    post: self.commandAcknowledged = true;
+    modifies: self.commandAcknowledged;
+  }
+}
+
+// ─── Component: Hardware Fault Detector ─────────────────────────────
+kind HardwareFaultDetector {
+  identity: detectorId;
+  property detectorId: String;
+  property sensorOk: Boolean;
+  property pumpOk: Boolean;
+  property needleOk: Boolean;
+  property allOk: Boolean;
+  property faultDetected: Boolean;
+  property faultReason: String;
+  property lastTestTime: Real;
+  property selfTestIntervalSeconds: Real;
+
+  invariants {
+    self.detectorId <> null;
+    self.allOk = (self.sensorOk and self.pumpOk and self.needleOk);
+    self.faultDetected = (not (self.sensorOk and self.pumpOk and self.needleOk));
+    self.selfTestIntervalSeconds > 0.0;
+    self.selfTestIntervalSeconds <= 60.0;
+  }
+
+  event runSelfTest(sensorStatus: Boolean, pumpStatus: Boolean, needleStatus: Boolean, timestamp: Real)
+    refines insulin_pump_requirements::InsulinPumpControlSystem.detectFault,
+            insulin_pump_formalization::enforceSelfTestInterval {
+    pre: timestamp >= 0.0;
+    pre: (timestamp - self.lastTestTime) <= self.selfTestIntervalSeconds;
+
+    post: self.sensorOk = sensorStatus;
+    post: self.pumpOk = pumpStatus;
+    post: self.needleOk = needleStatus;
+    post: self.lastTestTime = timestamp;
+
+    modifies: self.sensorOk,
+              self.pumpOk,
+              self.needleOk,
+              self.lastTestTime;
+  }
+
+  event detectFault(reason: String)
+    refines insulin_pump_requirements::InsulinPumpControlSystem.detectFault {
+    pre: not self.faultDetected;
+    pre: reason <> null;
+
+    post: self.faultDetected = true;
+    post: self.faultReason = reason;
+    post: self.sensorOk = false;
+    post: self.pumpOk = false;
+    post: self.needleOk = false;
+
+    modifies: self.faultDetected,
+              self.faultReason,
+              self.sensorOk,
+              self.pumpOk,
+              self.needleOk;
+  }
+
+  event clearFault()
+    refines insulin_pump_requirements::InsulinPumpControlSystem.resumeOperation {
+    pre: self.faultDetected = true;
+
+    post: self.faultDetected = false;
+    post: self.faultReason = '';
+    post: self.sensorOk = true;
+    post: self.pumpOk = true;
+    post: self.needleOk = true;
+
+    modifies: self.faultDetected,
+              self.faultReason,
+              self.sensorOk,
+              self.pumpOk,
+              self.needleOk;
+  }
+
+  event setSelfTestInterval(newInterval: Real) {
+    pre: newInterval > 0.0;
+    pre: newInterval <= 60.0;
+    pre: self.selfTestIntervalSeconds <> newInterval;
+
+    post: self.selfTestIntervalSeconds = newInterval;
+
+    modifies: self.selfTestIntervalSeconds;
+  }
+}
+
+// ─── Role: Fault Detector Endpoint ──────────────────────────────────
+role FaultDetectorEndpoint mediated-by FaultChannel of HardwareFaultDetector {
+  property faultDetected: Boolean;
+  property faultReason: String;
+  property allOk: Boolean;
+}
+
+// ─── Interface: Fault Channel ───────────────────────────────────────
+relator FaultChannel mediates (FaultDetectorEndpoint, AlarmEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property lastFaultDetected: Boolean;
+  property lastFaultReason: String;
+  property alarmRaised: Boolean;
+
+  invariants {
+    self.channelId <> null;
+    self.lastFaultReason <> null;
+  }
+
+  event transmitFault(faultDetected: Boolean, reason: String) {
+    pre: faultDetected = true;
+    pre: reason <> null;
+
+    post: self.lastFaultDetected = faultDetected;
+    post: self.lastFaultReason = reason;
+    post: self.alarmRaised = true;
+
+    modifies: self.lastFaultDetected,
+              self.lastFaultReason,
+              self.alarmRaised;
+  }
+
+  event clearFaultSignal() {
+    pre: self.alarmRaised = true;
+    post: self.alarmRaised = false;
+    post: self.lastFaultDetected = false;
+    modifies: self.alarmRaised,
+              self.lastFaultDetected;
+  }
+}
+
+// ─── Role: Alarm Endpoint ───────────────────────────────────────────
+role AlarmEndpoint mediated-by FaultChannel of AlarmManager {
+  property alarmActive: Boolean;
+  property lowReservoirAlarmActive: Boolean;
+  property malfunctionAlarmActive: Boolean;
+}
+
+// ─── Component: Alarm Manager ───────────────────────────────────────
+kind AlarmManager {
+  identity: alarmManagerId;
+  property alarmManagerId: String;
+  property alarmActive: Boolean;
+  property lowReservoirAlarmActive: Boolean;
+  property malfunctionAlarmActive: Boolean;
+  property alarmSoundOn: Boolean;
+
+  invariants {
+    self.alarmManagerId <> null;
+    self.alarmActive = (self.lowReservoirAlarmActive or self.malfunctionAlarmActive);
+    self.alarmSoundOn implies self.alarmActive;
+  }
+
+  event soundMalfunctionAlarm()
+    refines insulin_pump_requirements::InsulinPumpControlSystem.soundAlarm,
+            insulin_pump_requirements::InsulinPumpControlSystem.detectFault {
+    pre: not self.malfunctionAlarmActive;
+
+    post: self.malfunctionAlarmActive = true;
+    post: self.alarmActive = true;
+    post: self.alarmSoundOn = true;
+
+    modifies: self.malfunctionAlarmActive,
+              self.alarmActive,
+              self.alarmSoundOn;
+  }
+
+  event soundLowReservoirAlarm()
+    refines insulin_pump_requirements::InsulinPumpControlSystem.soundAlarm,
+            insulin_pump_requirements::InsulinPumpControlSystem.detectLowReservoir {
+    pre: not self.lowReservoirAlarmActive;
+
+    post: self.lowReservoirAlarmActive = true;
+    post: self.alarmActive = true;
+    post: self.alarmSoundOn = true;
+
+    modifies: self.lowReservoirAlarmActive,
+              self.alarmActive,
+              self.alarmSoundOn;
+  }
+
+  event clearAlarms()
+    refines insulin_pump_requirements::InsulinPumpControlSystem.clearAlarms {
+    pre: self.alarmActive = true;
+
+    post: self.alarmActive = false;
+    post: self.lowReservoirAlarmActive = false;
+    post: self.malfunctionAlarmActive = false;
+    post: self.alarmSoundOn = false;
+
+    modifies: self.alarmActive,
+              self.lowReservoirAlarmActive,
+              self.malfunctionAlarmActive,
+              self.alarmSoundOn;
+  }
+}
+
+// ─── Interface: Reservoir Low Channel ───────────────────────────────
+relator ReservoirLowChannel mediates (ActuatorEndpoint, AlarmEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property lowReservoirDetected: Boolean;
+  property reservoirLevelUnits: Real;
+
+  invariants {
+    self.channelId <> null;
+    self.reservoirLevelUnits >= 0.0;
+  }
+
+  event transmitLowReservoir(level: Real) {
+    pre: level < 20.0;
+    pre: level >= 0.0;
+    pre: not self.lowReservoirDetected;
+
+    post: self.lowReservoirDetected = true;
+    post: self.reservoirLevelUnits = level;
+
+    modifies: self.lowReservoirDetected,
+              self.reservoirLevelUnits;
+  }
+
+  event clearLowReservoirSignal() {
+    pre: self.lowReservoirDetected = true;
+    post: self.lowReservoirDetected = false;
+    modifies: self.lowReservoirDetected;
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// HAPPENINGS — renamed to avoid [E2] duplicate with discovery.onto
+// ═════════════════════════════════════════════════════════════════════
+
+// Main dose delivery flow: sensor → channel → calculator → channel → actuator
+happening DoseDeliveryFlowDesign {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property steps: String;
+  property stepCount: Integer;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy = 'timer::dosingCheckInterval';
+    self.steps = 'takeReading,transmitReading,computeDose,sendDoseCommand,deliverInsulin';
+    self.stepCount = 5;
+    self.outcome = 'dose_delivered';
+  }
+}
+
+// Fault detection flow: detector → fault channel → alarm → actuator stop
+happening FaultDetectionFlowDesign {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property steps: String;
+  property stepCount: Integer;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy = 'timer::selfTest';
+    self.steps = 'runSelfTest,detectFault,transmitFault,soundMalfunctionAlarm,stopDelivery';
+    self.stepCount = 5;
+    self.outcome = 'delivery_stopped_and_alarm_sounded';
+  }
+}
+
+// Low reservoir flow: actuator → low reservoir channel → alarm
+happening LowReservoirFlowDesign {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property steps: String;
+  property stepCount: Integer;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy = 'monitor::reservoirLevel';
+    self.steps = 'reportLowReservoir,transmitLowReservoir,soundLowReservoirAlarm';
+    self.stepCount = 3;
+    self.outcome = 'patient_alerted_low_reservoir';
+  }
+}
+
+// ─── Explicit Relations ─────────────────────────────────────────────
+relation sensorChannelMed: <<mediation>> from SensorChannel [1] to SensorEndpoint [1];
+relation sensorChannelCalcMed: <<mediation>> from SensorChannel [1] to CalculatorEndpoint [1];
+relation doseChannelCalcMed: <<mediation>> from DoseCommandChannel [1] to CalculatorEndpoint [1];
+relation doseChannelActMed: <<mediation>> from DoseCommandChannel [1] to ActuatorEndpoint [1];
+relation faultChannelDetMed: <<mediation>> from FaultChannel [1] to FaultDetectorEndpoint [1];
+relation faultChannelAlarmMed: <<mediation>> from FaultChannel [1] to AlarmEndpoint [1];
+relation reservoirChannelActMed: <<mediation>> from ReservoirLowChannel [1] to ActuatorEndpoint [1];
+relation reservoirChannelAlarmMed: <<mediation>> from ReservoirLowChannel [1] to AlarmEndpoint [1];

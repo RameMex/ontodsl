@@ -1,0 +1,36 @@
+schema "onto/0.1";
+namespace v07_child;
+import "./parent.onto";
+
+// Component with INTENTIONAL renames — currentBloodSugar → lastReadingMgDl,
+// reservoirUnits → tankCharge. Without the renames clause, O4 would
+// emit W38/W39 spuriously. With the clause, no warnings.
+kind BloodSugarSensor renames {
+  currentBloodSugar -> lastReadingMgDl;
+} {
+  identity: cid;
+  property cid: String;
+  property lastReadingMgDl: Real;
+
+  event takeReading(value: Real)
+    refines v07_parent::SystemKind.deliverInsulin {
+    pre: value >= 0.0;
+    post: self.lastReadingMgDl = value;
+    modifies: self.lastReadingMgDl;
+  }
+}
+
+kind PumpActuator renames {
+  reservoirUnits -> tankCharge;
+} {
+  identity: pid;
+  property pid: String;
+  property tankCharge: Real;
+
+  event drainTank(amount: Real)
+    refines v07_parent::SystemKind.deliverInsulin {
+    pre: amount >= 0.0;
+    post: self.tankCharge = self.tankCharge@pre - amount;
+    modifies: self.tankCharge;
+  }
+}

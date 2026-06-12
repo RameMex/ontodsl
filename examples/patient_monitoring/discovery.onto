@@ -1,0 +1,259 @@
+schema "onto/0.1";
+namespace patient_monitoring_discovery;
+
+// =====================================================================
+// Discovery stage — bedside vital-signs monitor domain.
+//
+// Captures: stakeholders, vendor agent, commitments (hard goals),
+// constraint categories, domain glossary kinds, and domain stories.
+// The system kind does NOT exist yet — that is Requirements stage.
+// =====================================================================
+
+// ─── Stakeholder agents ──────────────────────────────────────────────
+
+agent Patient {
+  identity: patientId;
+  property patientId: String;
+  property bedId: String;
+  invariants {
+    self.patientId <> null;
+    self.bedId <> null;
+  }
+}
+
+agent Clinician {
+  identity: clinicianId;
+  property clinicianId: String;
+  property name: String;
+  property clinicianRole: String;
+  invariants {
+    self.clinicianId <> null;
+    self.name <> null;
+  }
+}
+
+agent HospitalITDepartment {
+  identity: itDeptId;
+  property itDeptId: String;
+  property name: String;
+  invariants {
+    self.itDeptId <> null;
+  }
+}
+
+// Vendor / dev team — debitor of every stakeholder commitment.
+// The system kind that will fulfil these commitments does not exist
+// yet at Discovery; the vendor (the organisation promising to build
+// the monitor) does.
+agent VitalSignsMonitorVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  property regulatoryBodyRef: String;
+  invariants {
+    self.vendorId <> null;
+    self.name <> null;
+  }
+}
+
+// ─── Hard goals as commitments ────────────────────────────────────────
+
+// GOAL-1: Reject implausible heart-rate readings outside [20, 250] bpm.
+commitment ImplausibleReadingRejectionCommitment
+  debitor: VitalSignsMonitorVendor
+  creditor: Clinician {
+    identity: commitmentId;
+    property commitmentId: String;
+    property plausibilityLowerBpm: Real;
+    property plausibilityUpperBpm: Real;
+    predicate: self.plausibilityLowerBpm > 0.0
+               and self.plausibilityUpperBpm > self.plausibilityLowerBpm;
+  }
+
+// GOAL-2: Threshold alarm raised within 2 seconds of crossing.
+commitment AlarmLatencyCommitment
+  debitor: VitalSignsMonitorVendor
+  creditor: Clinician {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxAlarmLatencySeconds: Real;
+    predicate: self.maxAlarmLatencySeconds > 0.0
+               and self.maxAlarmLatencySeconds <= 2.0;
+  }
+
+// GOAL-3: Sensor-disconnect alarm after >5 seconds of no signal.
+commitment SensorDisconnectDetectionCommitment
+  debitor: VitalSignsMonitorVendor
+  creditor: Clinician {
+    identity: commitmentId;
+    property commitmentId: String;
+    property disconnectTimeoutSeconds: Real;
+    predicate: self.disconnectTimeoutSeconds > 0.0
+               and self.disconnectTimeoutSeconds <= 5.0;
+  }
+
+// GOAL-4: Silenced alarm auto-re-arms after at most 2 minutes.
+commitment AlarmSilenceAutoRearmCommitment
+  debitor: VitalSignsMonitorVendor
+  creditor: Clinician {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxSilenceDurationSeconds: Real;
+    predicate: self.maxSilenceDurationSeconds > 0.0
+               and self.maxSilenceDurationSeconds <= 120.0;
+  }
+
+// Vision commitment — vendor to hospital IT (infrastructure owner).
+commitment MonitorVisionCommitment
+  debitor: VitalSignsMonitorVendor
+  creditor: HospitalITDepartment {
+    identity: commitmentId;
+    property commitmentId: String;
+    property description: String;
+    predicate: self.commitmentId <> null;
+  }
+
+// ─── Constraint categories (inherited by system kind in Requirements) ─
+
+// Heart-rate plausibility window: any reading-holder must enforce [20, 250].
+category HeartRatePlausibilityConstraints where bearer: HeartRateReading {
+  invariants {
+    bearer.valueBpm >= 20.0;
+    bearer.valueBpm <= 250.0;
+  }
+}
+
+// Alarm threshold configuration must be within the plausibility window.
+category AlarmThresholdConstraints where bearer: AlarmThreshold {
+  invariants {
+    bearer.lowBpm >= 20.0;
+    bearer.highBpm <= 250.0;
+    bearer.highBpm > bearer.lowBpm;
+  }
+}
+
+// Silence duration must not exceed the 2-minute ceiling.
+category SilenceDurationConstraints where bearer: SilencedState {
+  invariants {
+    bearer.maxSilenceDurationSeconds > 0.0;
+    bearer.maxSilenceDurationSeconds <= 120.0;
+  }
+}
+
+// ─── Glossary kinds ───────────────────────────────────────────────────
+
+// heart rate — beats-per-minute reading from the ECG sensor.
+kind HeartRateReading {
+  identity: readingId;
+  property readingId: String;
+  property valueBpm: Real;
+  property timestampMs: Integer;
+  property sourcePatientId: String;
+  invariants {
+    self.readingId <> null;
+    self.valueBpm >= 0.0;
+    self.timestampMs >= 0;
+  }
+}
+
+// alarm threshold — per-vital upper/lower bound that triggers an alarm.
+kind AlarmThreshold {
+  identity: thresholdId;
+  property thresholdId: String;
+  property vitalSign: String;
+  property lowBpm: Real;
+  property highBpm: Real;
+  invariants {
+    self.thresholdId <> null;
+    self.vitalSign <> null;
+    self.lowBpm >= 0.0;
+    self.highBpm > self.lowBpm;
+  }
+}
+
+// silenced state — clinician-acknowledged alarm; muted for at most 2 minutes.
+kind SilencedState {
+  identity: silenceId;
+  property silenceId: String;
+  property acknowledgedByClinicianId: String;
+  property silenceStartTimestampMs: Integer;
+  property maxSilenceDurationSeconds: Real;
+  invariants {
+    self.silenceId <> null;
+    self.acknowledgedByClinicianId <> null;
+    self.silenceStartTimestampMs >= 0;
+    self.maxSilenceDurationSeconds > 0.0;
+    self.maxSilenceDurationSeconds <= 120.0;
+  }
+}
+
+// sensor disconnect — loss of ECG signal lasting more than 5 seconds.
+kind SensorDisconnectEvent {
+  identity: disconnectEventId;
+  property disconnectEventId: String;
+  property patientId: String;
+  property signalLostTimestampMs: Integer;
+  property signalRestoredTimestampMs: Integer;
+  property durationSeconds: Real;
+  invariants {
+    self.disconnectEventId <> null;
+    self.patientId <> null;
+    self.signalLostTimestampMs >= 0;
+    self.durationSeconds >= 0.0;
+  }
+}
+
+// ─── Domain stories (flows) ───────────────────────────────────────────
+
+// Normal monitoring flow: continuous reading, display, threshold check.
+happening NormalMonitoringFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+// Threshold-crossing alarm flow: reading crosses threshold → audible alert.
+happening ThresholdAlarmFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property thresholdCrossedTimestampMs: Integer;
+  property alarmRaisedTimestampMs: Integer;
+  invariants {
+    self.flowId <> null;
+    self.alarmRaisedTimestampMs >= self.thresholdCrossedTimestampMs;
+  }
+}
+
+// Clinician silence-and-rearm flow: alarm silenced, auto-re-arms after 2 min.
+happening AlarmSilenceRearmFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property silenceStartTimestampMs: Integer;
+  property rearmTimestampMs: Integer;
+  invariants {
+    self.flowId <> null;
+    self.rearmTimestampMs >= self.silenceStartTimestampMs;
+  }
+}
+
+// Sensor-disconnect detection flow: no signal >5 s → disconnect alarm.
+happening SensorDisconnectFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  property signalLostTimestampMs: Integer;
+  property alarmRaisedTimestampMs: Integer;
+  invariants {
+    self.flowId <> null;
+    self.alarmRaisedTimestampMs >= self.signalLostTimestampMs;
+  }
+}

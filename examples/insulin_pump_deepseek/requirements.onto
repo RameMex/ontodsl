@@ -1,0 +1,221 @@
+schema "onto/0.1";
+namespace insulin_pump_requirements;
+import "./discovery.onto";
+
+// ─── Requirements Stage: Insulin Pump Control System ──────────────
+// Black-box specification of the system. We declare a FRESH kind here
+// (not a subkind) to avoid duplicate declaration errors with the
+// Discovery-stage placeholder. This kind carries properties that mirror
+// the commitment body properties from Discovery, enabling Z3 discharge.
+
+kind InsulinPumpControlSystem {
+  identity: systemId;
+
+  // ─── Identity ────────────────────────────────────────────────
+  property systemId: String;
+
+  // ─── Properties from Discovery commitments (mirrored) ─────────
+  // Commitment #1: CorrectDoseCommitment
+  property safeMaxDoseUnits: Real;
+
+  // Commitment #2: FailSafeCommitment
+  property alarmActive: Boolean;
+  property deliveryStopped: Boolean;
+
+  // Commitment #3: AlertPatientCommitment
+  property lowReservoirAlarmActive: Boolean;
+  property malfunctionAlarmActive: Boolean;
+
+  // ─── Additional system properties (from glossary + conversation) ─
+  property reservoirUnits: Real;
+  property currentBloodSugar: Real;
+  property bloodSugarRate: Real;
+  property isOperating: Boolean;
+  property faultDetected: Boolean;
+  property sensorOk: Boolean;
+  property pumpOk: Boolean;
+  property needleOk: Boolean;
+
+  // ─── Quality / NFR: threshold parameters ──────────────────────
+  property safeZoneUpperBound: Real;
+  property dosingCheckIntervalSeconds: Real;
+  property selfTestIntervalSeconds: Real;
+
+  // ─── Invariants ───────────────────────────────────────────────
+  invariants {
+    self.systemId <> null;
+    self.safeMaxDoseUnits > 0.0;
+    self.safeZoneUpperBound >= 0.0;
+    self.reservoirUnits >= 0.0;
+    self.currentBloodSugar >= 0.0;
+    self.dosingCheckIntervalSeconds > 0.0;
+    self.selfTestIntervalSeconds > 0.0;
+    self.dosingCheckIntervalSeconds <= 600.0;
+    self.selfTestIntervalSeconds <= 60.0;
+
+    // Safety: delivery must not happen while faulted
+    self.faultDetected implies not self.isOperating;
+    self.faultDetected implies self.deliveryStopped;
+    self.faultDetected implies self.alarmActive;
+
+    // Alarm state consistency
+    self.lowReservoirAlarmActive or self.malfunctionAlarmActive implies self.alarmActive;
+    self.deliveryStopped implies not self.isOperating;
+  }
+
+  // ═════════════════════════════════════════════════════════════════
+  // FR-1: Deliver correct insulin dose
+  // Discharges CorrectDoseCommitment.
+  // ═════════════════════════════════════════════════════════════════
+  event deliverInsulin(sugar: Real, rate: Real): Real
+    refines insulin_pump_discovery::CorrectDoseCommitment {
+    pre: self.isOperating = true;
+    pre: not self.faultDetected;
+    pre: sugar >= 0.0;
+    pre: rate >= 0.0;
+    pre: sugar > self.safeZoneUpperBound;
+    pre: self.reservoirUnits > 0.0;
+    pre: rate > 0.0;
+
+    post: result <= self.safeMaxDoseUnits;
+    post: result > 0.0;
+    post: self.reservoirUnits = self.reservoirUnits@pre - result;
+    post: self.currentBloodSugar = sugar;
+    post: self.bloodSugarRate = rate;
+    post: self.isOperating = true;
+    post: self.sensorOk = true;
+    post: self.pumpOk = true;
+
+    modifies: self.reservoirUnits,
+              self.currentBloodSugar,
+              self.bloodSugarRate;
+  }
+
+  // ═════════════════════════════════════════════════════════════════
+  // FR-2: Self-test and detect hardware faults
+  // Discharges FailSafeCommitment.
+  // ═════════════════════════════════════════════════════════════════
+  event detectFault(faultReason: String)
+    refines insulin_pump_discovery::FailSafeCommitment {
+    pre: not self.faultDetected;
+    pre: self.isOperating = true;
+
+    post: self.faultDetected = true;
+    post: self.isOperating = false;
+    post: self.deliveryStopped = true;
+    post: self.alarmActive = true;
+    post: self.malfunctionAlarmActive = true;
+    post: self.sensorOk = false;
+    post: self.pumpOk = false;
+    post: self.needleOk = false;
+
+    modifies: self.faultDetected,
+              self.isOperating,
+              self.deliveryStopped,
+              self.alarmActive,
+              self.malfunctionAlarmActive,
+              self.sensorOk,
+              self.pumpOk,
+              self.needleOk;
+  }
+
+  // ═════════════════════════════════════════════════════════════════
+  // FR-3: Sound alarm on detected malfunction
+  // Discharges AlertPatientCommitment only (NOT FailSafeCommitment).
+  // ═════════════════════════════════════════════════════════════════
+  event soundAlarm(alarmType: String)
+    refines insulin_pump_discovery::AlertPatientCommitment {
+    pre: self.faultDetected or self.reservoirUnits < 20.0;
+    pre: alarmType = 'HARDWARE_FAULT' or alarmType = 'LOW_RESERVOIR';
+
+    post: self.alarmActive = true;
+    post: if alarmType = 'HARDWARE_FAULT' then
+            self.malfunctionAlarmActive = true
+          else
+            self.lowReservoirAlarmActive = true
+          endif;
+
+    modifies: self.alarmActive,
+              self.malfunctionAlarmActive,
+              self.lowReservoirAlarmActive;
+  }
+
+  // ═════════════════════════════════════════════════════════════════
+  // FR-4: Detect and alert low reservoir condition
+  // Discharges AlertPatientCommitment.
+  // ═════════════════════════════════════════════════════════════════
+  event detectLowReservoir(threshold: Real)
+    refines insulin_pump_discovery::AlertPatientCommitment {
+    pre: self.reservoirUnits < threshold;
+    pre: self.reservoirUnits >= 0.0;
+    pre: threshold > 0.0;
+
+    post: self.lowReservoirAlarmActive = true;
+    post: self.alarmActive = true;
+    post: self.isOperating = true;
+
+    modifies: self.lowReservoirAlarmActive,
+              self.alarmActive;
+  }
+
+  // ═════════════════════════════════════════════════════════════════
+  // FR-5: Clear alarms (reset after intervention)
+  // ═════════════════════════════════════════════════════════════════
+  event clearAlarms() {
+    pre: self.alarmActive = true;
+
+    post: self.alarmActive = false;
+    post: self.lowReservoirAlarmActive = false;
+    post: self.malfunctionAlarmActive = false;
+
+    modifies: self.alarmActive,
+              self.lowReservoirAlarmActive,
+              self.malfunctionAlarmActive;
+  }
+
+  // ═════════════════════════════════════════════════════════════════
+  // FR-6: Resume operation after fault cleared
+  // ═════════════════════════════════════════════════════════════════
+  event resumeOperation() {
+    pre: self.faultDetected = true;
+    pre: self.isOperating = false;
+    pre: self.deliveryStopped = true;
+
+    post: self.faultDetected = false;
+    post: self.isOperating = true;
+    post: self.deliveryStopped = false;
+    post: self.sensorOk = true;
+    post: self.pumpOk = true;
+    post: self.needleOk = true;
+
+    modifies: self.faultDetected,
+              self.isOperating,
+              self.deliveryStopped,
+              self.sensorOk,
+              self.pumpOk,
+              self.needleOk;
+  }
+
+  // ═════════════════════════════════════════════════════════════════
+  // FR-7: Set safe maximum dose (configuration)
+  // ═════════════════════════════════════════════════════════════════
+  event setSafeMaxDose(newMax: Real) {
+    pre: newMax > 0.0;
+    pre: self.safeMaxDoseUnits <> newMax;
+
+    post: self.safeMaxDoseUnits = newMax;
+
+    modifies: self.safeMaxDoseUnits;
+  }
+
+  // ═════════════════════════════════════════════════════════════════
+  // FR-8: Check blood sugar (observation event)
+  // Pure observation — does not modify any state, so no modifies clause.
+  // ═════════════════════════════════════════════════════════════════
+  event checkBloodSugar(sugar: Real) {
+    pre: sugar >= 0.0;
+    pre: self.isOperating = true;
+
+    post: self.currentBloodSugar = sugar;
+  }
+}

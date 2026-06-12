@@ -1,0 +1,258 @@
+schema "onto/0.1";
+namespace patient_monitoring_requirements;
+import "./discovery.onto";
+
+// ─── Constraint Categories (from Discovery goals) ──────────────────────
+// These categories embody the constraint goals from Discovery.
+// The system kind specializes them to inherit the invariants.
+
+category RejectImplausibleConstraints {
+  invariants {
+    // The system must reject readings outside [20, 250] bpm.
+    // (Invariant placeholder — actual enforcement is via events.)
+    true;
+  }
+}
+
+category AlarmLatencyConstraints {
+  invariants {
+    // Alarm must be raised within 2 seconds of threshold crossing.
+    true;
+  }
+}
+
+category SensorDisconnectConstraints {
+  invariants {
+    // Sensor-disconnect alarm after >5 seconds of no signal.
+    true;
+  }
+}
+
+category SilenceAutoRearmConstraints {
+  invariants {
+    // Silenced alarm auto-re-arms after 2 minutes.
+    true;
+  }
+}
+
+// ─── The System Kind (black box) ───────────────────────────────────────
+
+kind VitalSignMonitorSystem
+  specializes RejectImplausibleConstraints,
+              AlarmLatencyConstraints,
+              SensorDisconnectConstraints,
+              SilenceAutoRearmConstraints {
+
+  identity: systemId;
+
+  // ─── System Identity ────────────────────────────────────────────────
+  property systemId: String;
+  property deviceSerialNumber: String;
+
+  // ─── Vital-sign state ───────────────────────────────────────────────
+  property currentHeartRate: Real;
+  property displayValue: Real;
+  property isDisplaying: Boolean;
+
+  // ─── Plausibility (GOAL-1) ──────────────────────────────────────────
+  property plausibleMin: Real;
+  property plausibleMax: Real;
+  property rejectionCounter: Integer;
+
+  // ─── Threshold configuration (GOAL-2) ───────────────────────────────
+  property highAlarmThreshold: Real;
+  property lowAlarmThreshold: Real;
+  property alarmRaised: Boolean;
+  property alarmRaisedAt: Real;
+  property alarmLatencyBudgetSeconds: Real;
+
+  // ─── Sensor disconnect (GOAL-3) ─────────────────────────────────────
+  property lastSignalAt: Real;
+  property disconnectThresholdSeconds: Real;
+  property disconnectAlarmRaised: Boolean;
+  property sensorConnected: Boolean;
+
+  // ─── Silence / auto-rearm (GOAL-4) ──────────────────────────────────
+  property alarmSilenced: Boolean;
+  property silenceStartedAt: Real;
+  property autoRearmSeconds: Real;
+
+  // ─── Invariants (bounds and internal consistency) ───────────────────
+  invariants {
+    self.systemId <> null;
+    self.deviceSerialNumber <> null;
+    self.plausibleMin = 20.0;
+    self.plausibleMax = 250.0;
+    self.rejectionCounter >= 0;
+    self.highAlarmThreshold > self.lowAlarmThreshold;
+    self.highAlarmThreshold <= self.plausibleMax;
+    self.lowAlarmThreshold >= self.plausibleMin;
+    self.alarmLatencyBudgetSeconds <= 2.0;
+    self.disconnectThresholdSeconds = 5.0;
+    self.autoRearmSeconds = 120.0;
+    self.lastSignalAt >= 0.0;
+    (self.alarmSilenced and self.silenceStartedAt > 0.0) implies
+      (self.alarmSilenced = true);
+    not self.alarmSilenced implies self.silenceStartedAt = 0.0;
+  }
+
+  // ─── Event: deliverReading (primary heartbeat) ──────────────────────
+  // The ECG sensor delivers a heart rate reading.
+  // This event handles:
+  //   - Plausibility check (GOAL-1)
+  //   - Display update
+  //   - Threshold comparison (GOAL-2)
+  //   - Alarm raise within latency budget
+  //   - Sensor signal timestamp update (GOAL-3)
+  //   - Auto-rearm check (GOAL-4)
+  event deliverReading(heartRate: Real, timestamp: Real)
+    refines patient_monitoring_discovery::RejectImplausibleCommitment,
+            patient_monitoring_discovery::AlarmLatencyCommitment,
+            patient_monitoring_discovery::SensorDisconnectCommitment,
+            patient_monitoring_discovery::SilenceAutoRearmCommitment {
+    pre: timestamp >= 0.0;
+    pre: heartRate >= 0.0;   // raw sensor value before plausibility
+
+    // CASE A: plausible reading (within [20, 250])
+    // - Display it, compare against thresholds, raise alarm if needed.
+    // - Reset sensor disconnect timer.
+    // - Auto-rearm if silence expired.
+    post: if heartRate >= self.plausibleMin and heartRate <= self.plausibleMax then
+            // Display update
+            self.displayValue = heartRate
+            and self.isDisplaying = true
+            and self.currentHeartRate = heartRate
+            // Plausibility: no rejection increment
+            and self.rejectionCounter = self.rejectionCounter@pre
+            // Sensor connectivity recovered
+            and self.lastSignalAt = timestamp
+            and self.sensorConnected = true
+            and self.disconnectAlarmRaised = false
+            // Alarm check: raise if threshold crossed
+            and (
+              if (heartRate > self.highAlarmThreshold or heartRate < self.lowAlarmThreshold) then
+                self.alarmRaised = true
+                and self.alarmRaisedAt = timestamp
+                and (self.alarmRaisedAt - self.lastSignalAt) <= self.alarmLatencyBudgetSeconds
+              else
+                self.alarmRaised = self.alarmRaised@pre   // unchanged
+                and self.alarmRaisedAt = self.alarmRaisedAt@pre
+              endif
+            )
+            // Auto-rearm: if silenced and rearm time has elapsed, unsilence
+            and (
+              if self.alarmSilenced@pre and (timestamp - self.silenceStartedAt@pre) >= self.autoRearmSeconds then
+                self.alarmSilenced = false
+                and self.silenceStartedAt = 0.0
+              else
+                self.alarmSilenced = self.alarmSilenced@pre
+                and self.silenceStartedAt = self.silenceStartedAt@pre
+              endif
+            )
+          else
+            // CASE B: implausible reading (outside [20, 250])
+            // - Reject: do not display, do not compare thresholds.
+            // - Increment rejection counter.
+            // - Display retains previous value.
+            // - Alarm state unchanged.
+            // - Sensor signal time NOT updated (simulating no valid signal).
+            //   (This is conservative — the sensor is still sending but
+            //    the data is noise; we treat it as a non-signal for
+            //    disconnect purposes.)
+            self.displayValue = self.displayValue@pre
+            and self.isDisplaying = self.isDisplaying@pre
+            and self.currentHeartRate = self.currentHeartRate@pre
+            and self.rejectionCounter = self.rejectionCounter@pre + 1
+            and self.lastSignalAt = self.lastSignalAt@pre
+            and self.sensorConnected = self.sensorConnected@pre
+            and self.disconnectAlarmRaised = self.disconnectAlarmRaised@pre
+            and self.alarmRaised = self.alarmRaised@pre
+            and self.alarmRaisedAt = self.alarmRaisedAt@pre
+            and self.alarmSilenced = self.alarmSilenced@pre
+            and self.silenceStartedAt = self.silenceStartedAt@pre
+          endif;
+
+    // Implicit: whatever case, the system properties not mentioned in
+    // the modifies clause are unchanged by frame rule.
+    modifies: self.displayValue,
+              self.isDisplaying,
+              self.currentHeartRate,
+              self.rejectionCounter,
+              self.lastSignalAt,
+              self.sensorConnected,
+              self.disconnectAlarmRaised,
+              self.alarmRaised,
+              self.alarmRaisedAt,
+              self.alarmSilenced,
+              self.silenceStartedAt;
+  }
+
+  // ─── Event: acknowledgeAlarm (silence alarm) ─────────────────────────
+  // Clinician presses the silence button.
+  event acknowledgeAlarm(timestamp: Real) {
+    pre: self.alarmRaised;
+    pre: not self.alarmSilenced;
+    pre: timestamp >= 0.0;
+
+    post: self.alarmSilenced = true;
+    post: self.silenceStartedAt = timestamp;
+
+    modifies: self.alarmSilenced, self.silenceStartedAt;
+  }
+
+  // ─── Event: sensorDisconnectDetected (timer-based, driven by clock) ──
+  // This event fires when the clock tick detects that
+  // (now - lastSignalAt) > disconnectThresholdSeconds.
+  event sensorDisconnectDetected(timestamp: Real) {
+    pre: self.sensorConnected;
+    pre: not self.disconnectAlarmRaised;
+    pre: (timestamp - self.lastSignalAt) > self.disconnectThresholdSeconds;
+
+    post: self.sensorConnected = false;
+    post: self.disconnectAlarmRaised = true;
+    post: self.alarmRaised = true;
+    post: self.alarmRaisedAt = timestamp;
+
+    modifies: self.sensorConnected,
+              self.disconnectAlarmRaised,
+              self.alarmRaised,
+              self.alarmRaisedAt;
+  }
+
+  // ─── Event: sensorReconnected (detected by deliverReading restoring
+  //        lastSignalAt) — could also be explicit.
+  //   For simplicity we rely on deliverReading's post-condition to
+  //   reset the disconnect flags when a plausible reading arrives.
+  //   This event is for explicit reconnection after sensor attachment.
+  event sensorReconnected(timestamp: Real) {
+    pre: not self.sensorConnected;
+    pre: self.disconnectAlarmRaised;
+    pre: timestamp >= 0.0;
+
+    post: self.sensorConnected = true;
+    post: self.disconnectAlarmRaised = false;
+    post: self.lastSignalAt = timestamp;
+    // Optionally clear the generic alarm if it was solely due to
+    // disconnect (the clinician reattached the sensor).
+    post: self.alarmRaised = false;
+    post: self.alarmRaisedAt = 0.0;
+
+    modifies: self.sensorConnected,
+              self.disconnectAlarmRaised,
+              self.lastSignalAt,
+              self.alarmRaised,
+              self.alarmRaisedAt;
+  }
+
+  // ─── Event: configureThresholds ──────────────────────────────────────
+  event configureThresholds(newLow: Real, newHigh: Real) {
+    pre: newLow >= self.plausibleMin;
+    pre: newHigh <= self.plausibleMax;
+    pre: newLow < newHigh;
+
+    post: self.lowAlarmThreshold = newLow;
+    post: self.highAlarmThreshold = newHigh;
+
+    modifies: self.lowAlarmThreshold, self.highAlarmThreshold;
+  }
+}

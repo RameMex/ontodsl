@@ -1,0 +1,186 @@
+schema "onto/0.1";
+namespace delivery_drone_discovery;
+
+// ─── Stakeholders ─────────────────────────────────────────────────────
+agent Customer {
+  identity: customerId;
+  property customerId: String;
+  property name: String;
+  property deliveryAddress: String;
+  invariants {
+    self.customerId <> null;
+    self.name <> null;
+  }
+}
+
+agent Operator {
+  identity: operatorId;
+  property operatorId: String;
+  property name: String;
+  property certification: String;
+  invariants {
+    self.operatorId <> null;
+    self.name <> null;
+  }
+}
+
+agent RegulatoryAuthority {
+  identity: authorityId;
+  property authorityId: String;
+  property name: String;
+  property jurisdiction: String;
+  invariants {
+    self.authorityId <> null;
+    self.name <> null;
+  }
+}
+
+// Vendor / dev team — debitor of every stakeholder commitment.
+agent DroneVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property vendorName: String;
+  invariants {
+    self.vendorId <> null;
+    self.vendorName <> null;
+  }
+}
+
+// ─── Glossary terms as Kinds ───────────────────────────────────────────
+kind BatterySoC {
+  identity: socId;
+  property socId: String;
+  property value: Real;
+  invariants {
+    self.socId <> null;
+    self.value >= 0.0;
+    self.value <= 1.0;
+  }
+}
+
+kind RoundTripReserve {
+  identity: reserveId;
+  property reserveId: String;
+  property minSoC: Real;
+  invariants {
+    self.reserveId <> null;
+    self.minSoC >= 0.0;
+    self.minSoC <= 1.0;
+  }
+}
+
+kind Geofence {
+  identity: geofenceId;
+  property geofenceId: String;
+  property polygonWkt: String;
+  property maxLatitude: Real;
+  property minLatitude: Real;
+  property maxLongitude: Real;
+  property minLongitude: Real;
+  invariants {
+    self.geofenceId <> null;
+    self.polygonWkt <> null;
+  }
+}
+
+// ─── Kind to host commitment-predicate properties ──────────────────────
+// This is a placeholder that Requirements will specialize/refine.
+// It declares the properties referenced in the commitment predicates
+// so the discharge proof has a target type with non-trivial attributes.
+// The Requirements-stage system kind can inherit via specialization
+// (kind DroneMissionController specializes PredicateHost { ... }).
+kind PredicateHost {
+  identity: hostId;
+  property hostId: String;
+  property safeReserveRatio: Real;
+  property geofenceMaxResponseSec: Real;
+  property rthBatteryThreshold: Real;
+  property rthIsCancellable: Boolean;
+  invariants {
+    self.hostId <> null;
+  }
+}
+
+// ─── Hard Goals as Commitments ────────────────────────────────────────
+// GOAL-1: Pre-takeoff battery reserve
+commitment PreTakeoffBatteryReserve
+  debitor: DroneVendor
+  creditor: Operator {
+    identity: commitmentId;
+    property commitmentId: String;
+    property safeReserveRatio: Real;
+    predicate: self.safeReserveRatio >= 0.20;
+  }
+
+// GOAL-2: Geofence containment (RTH initiated within 2 seconds)
+commitment GeofenceContainment
+  debitor: DroneVendor
+  creditor: RegulatoryAuthority {
+    identity: commitmentId;
+    property commitmentId: String;
+    property geofenceMaxResponseSec: Real;
+    predicate: self.geofenceMaxResponseSec <= 2.0;
+  }
+
+// GOAL-3: Mid-mission battery RTH
+commitment MidMissionBatteryRTH
+  debitor: DroneVendor
+  creditor: Customer {
+    identity: commitmentId;
+    property commitmentId: String;
+    property rthBatteryThreshold: Real;
+    predicate: self.rthBatteryThreshold >= 0.0;
+  }
+
+// GOAL-4: Authoritative RTH (RTH cannot be cancelled by operator once
+// initiated by a safety condition).
+commitment AuthoritativeRTH
+  debitor: DroneVendor
+  creditor: RegulatoryAuthority {
+    identity: commitmentId;
+    property commitmentId: String;
+    property rthIsCancellable: Boolean;
+    predicate: not self.rthIsCancellable;
+  }
+
+// ─── Constraint Goal (category with member-quantified invariants) ──────
+// Now the bearer type is PredicateHost, which has all referenced properties.
+category BatterySafetyConstraints where bearer: PredicateHost {
+  invariants {
+    bearer.safeReserveRatio >= 0.20;
+    bearer.geofenceMaxResponseSec <= 2.0;
+    bearer.rthBatteryThreshold >= 0.0;
+    not bearer.rthIsCancellable;
+  }
+}
+
+// ─── Domain Stories as Happenings (with identity declarations) ─────────
+happening TakeoffSequence {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+happening GeofenceViolationResponse {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+happening BatteryDropResponse {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}

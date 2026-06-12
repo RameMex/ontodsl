@@ -1,0 +1,298 @@
+schema "onto/0.1";
+namespace delivery_drone_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// DESIGN STAGE — Component decomposition of DroneMissionController.
+//
+// Components (sibling kinds, NOT subkinds):
+//   • BatteryManager            — SoC reading, reserve computation, threshold monitoring
+//   • GeofenceMonitor           — GPS fix, polygon containment check, violation detection
+//   • FlightController          — RTH initiation, flight state management, operator interface
+//   • MissionPlannerInterface   — takeoff request acceptance, pre-flight validation
+//
+// Each component kind must declare the properties referenced in
+// commitment predicates that its events discharge, so the verifier
+// can prove non-vacuous refinement.
+//
+// Interfaces (relators) connect components via roles.
+// Happenings model end-to-end flows across component boundaries.
+// =====================================================================
+
+// ─── Battery Manager Component ──────────────────────────────────────
+kind BatteryManager {
+  identity: batteryId;
+  property batteryId: String;
+  property soc: Real;                    // battery state-of-charge [0,1]
+  property reserve: Real;               // round-trip reserve [0,1]
+  property socBelowThreshold: Boolean;  // true if SoC <= reserve threshold
+
+  // Properties required by commitment predicates (from Discovery):
+  property safeReserveRatio: Real;      // PreTakeoffBatteryReserve
+  property rthBatteryThreshold: Real;    // MidMissionBatteryRTH
+
+  invariants {
+    self.batteryId <> null;
+    self.soc >= 0.0;
+    self.soc <= 1.0;
+    self.reserve >= 0.0;
+    self.reserve <= 1.0;
+    self.safeReserveRatio >= 0.20;
+    self.rthBatteryThreshold >= 0.0;
+  }
+
+  // GOAL-1: Pre-takeoff battery reserve (discharge PreTakeoffBatteryReserve)
+  event readSoCAndReserve(): Real
+    refines delivery_drone_discovery::PreTakeoffBatteryReserve {
+    post: result >= 0.0;
+    post: result <= 1.0;
+    post: self.soc = result;
+    post: self.safeReserveRatio >= 0.20;
+    modifies: self.soc;
+  }
+
+  event setReserve(newReserve: Real)
+    refines delivery_drone_requirements::DroneMissionController.authorizeTakeoff {
+    pre: newReserve >= 0.0;
+    pre: newReserve <= 1.0;
+    post: self.reserve = newReserve;
+    modifies: self.reserve;
+  }
+
+  // GOAL-3: Mid-mission battery RTH (discharge MidMissionBatteryRTH)
+  event checkSoCThreshold()
+    refines delivery_drone_discovery::MidMissionBatteryRTH {
+    pre: self.soc >= 0.0;
+    pre: self.soc <= 1.0;
+    post: self.rthBatteryThreshold >= 0.0;
+    post: self.socBelowThreshold = (self.soc <= self.rthBatteryThreshold);
+    modifies: self.socBelowThreshold;
+  }
+}
+
+// ─── Geofence Monitor Component ─────────────────────────────────────
+kind GeofenceMonitor {
+  identity: monitorId;
+  property monitorId: String;
+  property geofenceAuthorized: Boolean; // true while position inside geofence
+  property geofenceViolationDetected: Boolean; // true if violation is ongoing
+  property currentLatitude: Real;
+  property currentLongitude: Real;
+
+  // Properties required by commitment predicates (from Discovery):
+  property geofenceMaxResponseSec: Real; // GeofenceContainment
+
+  invariants {
+    self.monitorId <> null;
+    self.geofenceMaxResponseSec <= 2.0;
+  }
+
+  // GOAL-2: Geofence containment (discharge GeofenceContainment)
+  event checkPositionInsideGeofence(lat: Real, lon: Real): Boolean
+    refines delivery_drone_discovery::GeofenceContainment {
+    pre: lat >= -90.0;
+    pre: lat <= 90.0;
+    pre: lon >= -180.0;
+    pre: lon <= 180.0;
+    post: self.currentLatitude = lat;
+    post: self.currentLongitude = lon;
+    post: self.geofenceMaxResponseSec <= 2.0;
+    post: result = (lat >= 60.0 and lat <= 62.0 and lon >= 24.0 and lon <= 26.0); // Helsinki geofence placeholder
+    post: if not result then
+            self.geofenceAuthorized = false and
+            self.geofenceViolationDetected = true
+          else
+            self.geofenceAuthorized = true and
+            self.geofenceViolationDetected = false
+          endif;
+    modifies: self.currentLatitude, self.currentLongitude, self.geofenceAuthorized, self.geofenceViolationDetected;
+  }
+}
+
+// ─── Flight Controller Component ────────────────────────────────────
+kind FlightController {
+  identity: flightId;
+  property flightId: String;
+  property isFlying: Boolean;
+  property rthInitiated: Boolean;
+
+  // Properties required by commitment predicates (from Discovery):
+  property rthIsCancellable: Boolean; // AuthoritativeRTH
+
+  invariants {
+    self.flightId <> null;
+    not self.rthIsCancellable;
+  }
+
+  // GOAL-2: Initiate RTH on geofence violation
+  event initiateRTHFromGeofence()
+    refines delivery_drone_requirements::DroneMissionController.detectGeofenceViolation,
+            delivery_drone_formalization::FormalizedDroneMissionController.enforceGeofenceContainment {
+    pre: self.isFlying = true;
+    pre: not self.rthInitiated;
+    post: self.rthInitiated = true;
+    post: self.isFlying = false;
+    modifies: self.rthInitiated, self.isFlying;
+  }
+
+  // GOAL-3: Initiate RTH on battery threshold drop
+  event initiateRTHFromBattery()
+    refines delivery_drone_requirements::DroneMissionController.monitorBatterySoC {
+    pre: self.isFlying = true;
+    pre: not self.rthInitiated;
+    post: self.rthInitiated = true;
+    post: self.isFlying = false;
+    modifies: self.rthInitiated, self.isFlying;
+  }
+
+  // GOAL-4: Authoritative RTH — rejection of attempted cancellation
+  event rejectOperatorCancellation(operatorConfirm: String): Boolean
+    refines delivery_drone_discovery::AuthoritativeRTH {
+    pre: self.rthInitiated = true;
+    pre: operatorConfirm = 'confirm_cancel';
+    post: not self.rthIsCancellable;
+    post: result = true;
+  }
+
+  // Normal takeoff authorization (delegated to BatteryManager for pre-flight check)
+  event executeTakeoff()
+    refines delivery_drone_requirements::DroneMissionController.authorizeTakeoff {
+    pre: not self.isFlying;
+    pre: not self.rthInitiated;
+    post: self.isFlying = true;
+    modifies: self.isFlying;
+  }
+}
+
+// ─── Mission Planner Interface Component ────────────────────────────
+kind MissionPlannerInterface {
+  identity: plannerId;
+  property plannerId: String;
+  property missionId: String;
+  property destinationLatitude: Real;
+  property destinationLongitude: Real;
+  property computedRoundTripReserve: Real;
+
+  invariants {
+    self.plannerId <> null;
+    self.missionId <> null;
+    self.computedRoundTripReserve >= 0.0;
+    self.computedRoundTripReserve <= 1.0;
+  }
+
+  event submitDeliveryRequest(mNum: String, destLat: Real, destLon: Real) {
+    pre: mNum <> null;
+    pre: destLat >= -90.0;
+    pre: destLat <= 90.0;
+    pre: destLon >= -180.0;
+    pre: destLon <= 180.0;
+    post: self.missionId = mNum;
+    post: self.destinationLatitude = destLat;
+    post: self.destinationLongitude = destLon;
+    modifies: self.missionId, self.destinationLatitude, self.destinationLongitude;
+  }
+
+  event computeReserveForMission(distKm: Real): Real
+    refines delivery_drone_requirements::DroneMissionController.authorizeTakeoff {
+    pre: distKm >= 0.0;
+    post: self.computedRoundTripReserve = (distKm * 0.01);  // placeholder: 1% per km round trip
+    post: result = self.computedRoundTripReserve;
+    post: result >= 0.0;
+    post: result <= 1.0;
+    modifies: self.computedRoundTripReserve;
+  }
+}
+
+// ─── Roles (component endpoints) ────────────────────────────────────
+role BatteryManagerRole mediated-by BatteryFlightLink of BatteryManager {
+  property batteryId: String;
+  property soc: Real;
+  property socBelowThreshold: Boolean;
+}
+
+role FlightControllerRole mediated-by BatteryFlightLink of FlightController {
+  property flightId: String;
+  property isFlying: Boolean;
+  property rthInitiated: Boolean;
+}
+
+role GeofenceMonitorRole mediated-by GeofenceFlightLink of GeofenceMonitor {
+  property monitorId: String;
+  property geofenceViolationDetected: Boolean;
+}
+
+// ─── Interfaces (relators) ──────────────────────────────────────────
+relator BatteryFlightLink mediates (BatteryManagerRole, FlightControllerRole) {
+  identity: linkId;
+  property linkId: String;
+  property batterySocTransfer: Real;
+  property batteryReserveTransfer: Real;
+  property thresholdAlert: Boolean;
+
+  invariants {
+    self.linkId <> null;
+    self.batterySocTransfer >= 0.0;
+    self.batterySocTransfer <= 1.0;
+    self.batteryReserveTransfer >= 0.0;
+    self.batteryReserveTransfer <= 1.0;
+  }
+}
+
+relator GeofenceFlightLink mediates (GeofenceMonitorRole, FlightControllerRole) {
+  identity: linkId;
+  property linkId: String;
+  property violationAlert: Boolean;
+
+  invariants {
+    self.linkId <> null;
+  }
+}
+
+// ─── End-to-End Happenings (data flows across components) ───────────
+happening PreFlightTakeoffSequence {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String; // MissionPlannerInterface.submitDeliveryRequest
+  property outcome: String;     // FlightController.executeTakeoff or reject
+
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+happening GeofenceViolationResponseFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String; // GeofenceMonitor.checkPositionInsideGeofence violation
+  property outcome: String;     // FlightController.initiateRTHFromGeofence
+
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+happening MidMissionBatteryRTHFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String; // BatteryManager.checkSoCThreshold threshold hit
+  property outcome: String;     // FlightController.initiateRTHFromBattery
+
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+// ─── Explicit Relations (OntoUML Stereotypes) ────────────────────────
+// NOTE: Using unqualified names as per import resolution.
+// The imports at top make these types accessible by their short names.
+relation batteryManagerMembership: <<memberOf>> from BatteryManager [1..*] to DroneMissionController [1];
+relation geofenceMonitorMembership: <<memberOf>> from GeofenceMonitor [1..*] to DroneMissionController [1];
+relation flightControllerMembership: <<memberOf>> from FlightController [1..*] to DroneMissionController [1];
+relation missionPlannerInterfaceMembership: <<memberOf>> from MissionPlannerInterface [1..*] to DroneMissionController [1];
+
+relation batteryFlightLinkMed1: <<mediation>> from BatteryFlightLink [1] to BatteryManagerRole [1];
+relation batteryFlightLinkMed2: <<mediation>> from BatteryFlightLink [1] to FlightControllerRole [1];
+relation geofenceFlightLinkMed1: <<mediation>> from GeofenceFlightLink [1] to GeofenceMonitorRole [1];
+relation geofenceFlightLinkMed2: <<mediation>> from GeofenceFlightLink [1] to FlightControllerRole [1];

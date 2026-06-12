@@ -1,0 +1,164 @@
+schema "onto/0.1";
+namespace online_banking_discovery;
+
+// ─── Stakeholders ─────────────────────────────────────────────────────
+agent Customer {
+  identity: customerId;
+  property customerId: String;
+  property name: String;
+  invariants {
+    self.customerId <> null;
+    self.name <> null;
+  }
+}
+
+agent Regulator {
+  identity: regulatorId;
+  property regulatorId: String;
+  property jurisdiction: String;
+  invariants {
+    self.regulatorId <> null;
+    self.jurisdiction <> null;
+  }
+}
+
+// The vendor / dev team — debitor of all stakeholder commitments.
+agent BankVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+    self.name <> null;
+  }
+}
+
+// ─── Glossary terms (sortals) ─────────────────────────────────────────
+kind Account {
+  identity: accountId;
+  property accountId: String;
+  property ownerId: String;
+  property balanceCents: Real;
+  invariants {
+    self.accountId <> null;
+    self.ownerId <> null;
+    self.balanceCents >= 0.0;
+  }
+}
+
+kind JournalEntry {
+  identity: entryId;
+  property entryId: String;
+  property transferId: String;
+  property sourceAccountId: String;
+  property destAccountId: String;
+  property amountCents: Real;
+  property preSourceBalanceCents: Real;
+  property postSourceBalanceCents: Real;
+  property preDestBalanceCents: Real;
+  property postDestBalanceCents: Real;
+  property timestamp: String;
+  invariants {
+    self.entryId <> null;
+    self.transferId <> null;
+    self.sourceAccountId <> null;
+    self.destAccountId <> null;
+    self.amountCents >= 0.0;
+    self.preSourceBalanceCents >= 0.0;
+    self.postSourceBalanceCents >= 0.0;
+    self.preDestBalanceCents >= 0.0;
+    self.postDestBalanceCents >= 0.0;
+    self.timestamp <> null;
+    self.postSourceBalanceCents = self.preSourceBalanceCents - self.amountCents;
+    self.postDestBalanceCents = self.preDestBalanceCents + self.amountCents;
+  }
+}
+
+// ─── Hard goal commitments ───────────────────────────────────────────
+// Each predicate references a property name that will appear on the
+// system kind in Requirements (avoiding S36).
+
+// GOAL-1: Atomic transfer — both debit and credit succeed, or both roll back.
+commitment AtomicTransferCommitment
+  debitor: BankVendor
+  creditor: Customer {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxAtomicLatencyMs: Real;
+    // self.maxAtomicLatencyMs will be looked up on the system kind
+    predicate: self.maxAtomicLatencyMs >= 0.0;
+  }
+
+// GOAL-2: No overdraft — source balance never goes negative after transfer.
+commitment NoOverdraftCommitment
+  debitor: BankVendor
+  creditor: Customer {
+    identity: commitmentId;
+    property commitmentId: String;
+    property minSourceBalanceCents: Real;
+    // self.minSourceBalanceCents will be looked up on the system kind
+    predicate: self.minSourceBalanceCents >= 0.0;
+  }
+
+// GOAL-3: Auditable journal — every committed transfer has a journal entry.
+commitment AuditJournalCommitment
+  debitor: BankVendor
+  creditor: Regulator {
+    identity: commitmentId;
+    property commitmentId: String;
+    property journalRetentionDays: Integer;
+    // self.journalRetentionDays will be looked up on the system kind
+    predicate: self.journalRetentionDays > 0;
+  }
+
+// GOAL-4: Bounded transfer latency — pending resolves within 30 seconds.
+commitment BoundedLatencyCommitment
+  debitor: BankVendor
+  creditor: Customer {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxPendingSec: Real;
+    // self.maxPendingSec will be looked up on the system kind
+    predicate: self.maxPendingSec <= 30.0;
+  }
+
+// ─── Constraint goals (categories for system invariants) ──────────────
+// Category for atomic transfer: system must guarantee no partial state.
+category AtomicTransferConstraints where bearer: Account {
+  invariants {
+    true;
+  }
+}
+
+// Category for no-overdraft: invariant that source balance never negative.
+category NoOverdraftConstraints where bearer: Account {
+  invariants {
+    bearer.balanceCents >= 0.0;
+  }
+}
+
+// Category for audit trail: every committed transfer has a journal entry.
+category AuditTrailConstraints where bearer: Account {
+  invariants {
+    true;
+  }
+}
+
+// ─── Domain story — main transfer flow (MUST have identity) ──────────
+happening TransferFlow {
+  identity: flowId;
+  property flowId: String;
+  property sourceAccount: Account;
+  property destAccount: Account;
+  property amountCents: Real;
+  property state: String;     // 'PENDING', 'COMPLETED', 'ROLLED_BACK'
+  property enteredPendingAt: String;  // ISO timestamp
+  invariants {
+    self.flowId <> null;
+    self.sourceAccount <> null;
+    self.destAccount <> null;
+    self.amountCents >= 0.0;
+    self.sourceAccount.accountId <> self.destAccount.accountId;
+    self.state = 'PENDING' or self.state = 'COMPLETED' or self.state = 'ROLLED_BACK';
+  }
+}

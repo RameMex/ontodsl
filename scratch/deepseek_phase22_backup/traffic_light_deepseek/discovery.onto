@@ -1,0 +1,203 @@
+schema "onto/0.1";
+namespace traffic_light_discovery;
+
+// ─── Stakeholders (Agents) ───────────────────────────────────────────────
+
+agent Motorist {
+  identity: motoristId;
+  property motoristId: String;
+  property registrationNumber: String;
+  invariants {
+    self.motoristId <> null;
+  }
+}
+
+agent Pedestrian {
+  identity: pedestrianId;
+  property pedestrianId: String;
+  invariants {
+    self.pedestrianId <> null;
+  }
+}
+
+agent EmergencyVehicleOperator {
+  identity: operatorId;
+  property operatorId: String;
+  property vehicleType: String;
+  invariants {
+    self.operatorId <> null;
+  }
+}
+
+agent TrafficAuthority {
+  identity: authorityId;
+  property authorityId: String;
+  property jurisdiction: String;
+  invariants {
+    self.authorityId <> null;
+  }
+}
+
+agent TrafficLightVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+  }
+}
+
+// ─── Hard Goals (Commitments) ────────────────────────────────────────────
+
+commitment MutualExclusionCommitment
+  debitor: TrafficLightVendor
+  creditor: Motorist {
+    identity: commitmentId;
+    property commitmentId: String;
+    property conflictFreeGuarantee: Boolean;
+    predicate: self.conflictFreeGuarantee = true;
+  }
+
+commitment YellowIntervalCommitment
+  debitor: TrafficLightVendor
+  creditor: Motorist {
+    identity: commitmentId;
+    property commitmentId: String;
+    property minYellowSeconds: Real;
+    predicate: self.minYellowSeconds >= 3.0;
+  }
+
+commitment EmergencyPreemptionCommitment
+  debitor: TrafficLightVendor
+  creditor: EmergencyVehicleOperator {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxPreemptionSeconds: Real;
+    predicate: self.maxPreemptionSeconds <= 1.0;
+  }
+
+commitment PedestrianRequestCommitment
+  debitor: TrafficLightVendor
+  creditor: Pedestrian {
+    identity: commitmentId;
+    property commitmentId: String;
+    property walkGranted: Boolean;
+    predicate: self.walkGranted = true;
+  }
+
+// ─── Constraint Goals (Categories) ───────────────────────────────────────
+// Categories at Discovery stage use property‑level constraints that the
+// system kind (defined later in Requirements) will satisfy via its own
+// invariants. We avoid referencing specific properties of the future
+// system kind; instead we model the constraints as abstract invariants
+// on the category itself.
+
+category MutualExclusionConstraints {
+  invariants {
+    true; // Concrete invariants will be attached to the system kind in Requirements
+  }
+}
+
+category YellowIntervalConstraints {
+  invariants {
+    true; // Concrete invariants will be attached to the system kind in Requirements
+  }
+}
+
+category EmergencyPreemptionConstraints {
+  invariants {
+    true; // Concrete invariants will be attached to the system kind in Requirements
+  }
+}
+
+category PedestrianConstraints {
+  invariants {
+    true; // Concrete invariants will be attached to the system kind in Requirements
+  }
+}
+
+// ─── Glossary Terms (Kinds) ──────────────────────────────────────────────
+
+kind Approach {
+  identity: approachId;
+  property approachId: String;
+  property direction: String;
+  property orientation: String;
+  invariants {
+    self.approachId <> null;
+    self.direction <> null;
+    self.orientation <> null;
+  }
+}
+
+kind Phase {
+  identity: phaseId;
+  property phaseId: String;
+  property whichApproachesGreen: Set<Approach>;
+  property configuredDurationSeconds: Real;
+  invariants {
+    self.phaseId <> null;
+    self.configuredDurationSeconds > 0.0;
+    self.whichApproachesGreen->isEmpty() = false;
+  }
+}
+
+kind YellowInterval {
+  identity: intervalId;
+  property intervalId: String;
+  property approach: Approach;
+  property minimumSeconds: Real;
+  invariants {
+    self.intervalId <> null;
+    self.approach <> null;
+    self.minimumSeconds >= 3.0;
+  }
+}
+
+kind PreemptionEvent {
+  identity: eventId;
+  property eventId: String;
+  property sensorTriggered: Boolean;
+  property timestampTriggered: Real;
+  property responseDeadlineSeconds: Real;
+  invariants {
+    self.eventId <> null;
+    self.sensorTriggered = true implies self.timestampTriggered > 0.0;
+    self.responseDeadlineSeconds <= 1.0;
+  }
+}
+
+// ─── Domain Stories (Happenings) ─────────────────────────────────────────
+
+happening NormalPhaseTransitionFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+  }
+}
+
+happening EmergencyPreemptionFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+  }
+}
+
+happening PedestrianRequestFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+  }
+}

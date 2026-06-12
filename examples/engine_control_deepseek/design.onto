@@ -1,0 +1,443 @@
+schema "onto/0.1";
+namespace engine_control_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Stage 4 — Design: Component Decomposition (CORRECTED)
+// =====================================================================
+// Fixes applied:
+// 1. 'not state' is invalid OCL — use 'self.onGround = false' with if/then/else
+// 2. Relator 'clearAlert' referenced self.overspeedDetected which doesn't exist
+//    on the relator — fix: use the sender role's property
+// 3. Relator 'injectModelledValues' referenced self.sensorFaultActive which 
+//    doesn't exist on the relator — fix: use the notifier role's property
+// 4. Relator 'clearInjection' same issue
+// 5. Relator 'injectModelledThrust' same issue
+// 6. Relator 'clearThrustInjection' same issue
+// =====================================================================
+
+// ─── Component: Speed Monitor ─────────────────────────────────────────
+// Owns: maxSafeSpeed, currentSpeed, overspeedDetected, overspeedProtectionFitted,
+//       fuelFlow
+kind SpeedMonitor {
+  identity: monitorId;
+  property monitorId: String;
+  property maxSafeSpeed: Real;
+  property currentSpeed: Real;
+  property overspeedDetected: Boolean;
+  property overspeedProtectionFitted: Boolean;
+  property fuelFlow: Real;
+
+  invariants {
+    self.monitorId <> null;
+    self.maxSafeSpeed > 0.0;
+    self.currentSpeed >= 0.0;
+    self.fuelFlow >= 0.0;
+    self.overspeedDetected = (self.currentSpeed > self.maxSafeSpeed);
+  }
+
+  // Implements: EngineControlSystem.detectOverspeed
+  event detectOverspeed()
+    refines engine_control_requirements::EngineControlSystem.detectOverspeed {
+    pre: self.currentSpeed > self.maxSafeSpeed;
+    post: self.overspeedDetected = true;
+    modifies: self.overspeedDetected;
+  }
+
+  // Implements: EngineControlSystem.limitFuelOnOverspeed
+  event limitFuelOnOverspeed()
+    refines engine_control_requirements::EngineControlSystem.limitFuelOnOverspeed {
+    pre: self.overspeedDetected = true;
+    pre: self.overspeedProtectionFitted = true;
+    pre: self.fuelFlow > 0.0;
+    post: self.fuelFlow <= 0.0;
+    post: self.currentSpeed <= self.maxSafeSpeed;
+    modifies: self.fuelFlow;
+  }
+
+  // Own event: set current speed from sensor reading
+  event setCurrentSpeed(speed: Real) {
+    pre: speed >= 0.0;
+    post: self.currentSpeed = speed;
+    modifies: self.currentSpeed;
+  }
+
+  // Own event: set overspeed protection flag
+  event setOverspeedProtectionFitted(fitted: Boolean) {
+    post: self.overspeedProtectionFitted = fitted;
+    modifies: self.overspeedProtectionFitted;
+  }
+
+  // Own event: inject modelled fuel flow when fault occurs
+  event setFuelFlowFromModelledValue(flow: Real) {
+    pre: flow >= 0.0;
+    post: self.fuelFlow = flow;
+    modifies: self.fuelFlow;
+  }
+}
+
+// ─── Component: Thrust Manager ─────────────────────────────────────────
+// Owns: onGround, inFlight, thrustCommanded, thrustHeld,
+//       reverserCommanded, reverserEnabled,
+//       continuousIgnitionCommanded, continuousIgnitionEnabled
+kind ThrustManager {
+  identity: managerId;
+  property managerId: String;
+  property onGround: Boolean;
+  property inFlight: Boolean;
+  property thrustCommanded: Real;
+  property thrustHeld: Real;
+  property reverserCommanded: Boolean;
+  property reverserEnabled: Boolean;
+  property continuousIgnitionCommanded: Boolean;
+  property continuousIgnitionEnabled: Boolean;
+
+  invariants {
+    self.managerId <> null;
+    self.thrustCommanded >= 0.0;
+    self.thrustHeld >= 0.0;
+    self.inFlight = (not self.onGround);
+    self.reverserEnabled implies (self.onGround and self.reverserCommanded);
+  }
+
+  // Implements: EngineControlSystem.commandContinuousIgnition
+  event commandContinuousIgnition()
+    refines engine_control_requirements::EngineControlSystem.commandContinuousIgnition {
+    pre: self.continuousIgnitionCommanded = true;
+    post: self.continuousIgnitionEnabled = true;
+    modifies: self.continuousIgnitionEnabled;
+  }
+
+  // Implements: EngineControlSystem.holdThrustInFlight
+  event holdThrustInFlight()
+    refines engine_control_requirements::EngineControlSystem.holdThrustInFlight {
+    pre: self.inFlight = true;
+    pre: self.thrustCommanded > 0.0;
+    post: self.thrustHeld = self.thrustCommanded;
+    modifies: self.thrustHeld;
+  }
+
+  // Implements: EngineControlSystem.deployReverserOnGround
+  event deployReverserOnGround()
+    refines engine_control_requirements::EngineControlSystem.deployReverserOnGround {
+    pre: self.onGround = true;
+    pre: self.reverserCommanded = true;
+    pre: not self.reverserEnabled;
+    post: self.reverserEnabled = true;
+    modifies: self.reverserEnabled;
+  }
+
+  // Own event: update onGround state from aircraft data bus
+  // CORRECTED: 'not state' is invalid OCL; use if/then/else with Boolean comparison
+  event setOnGround(state: Boolean) {
+    pre: state = true or state = false;  // trivial pre — always accepted
+    post: self.onGround = state;
+    post: if state then self.inFlight = false else self.inFlight = true endif;
+    modifies: self.onGround, self.inFlight;
+  }
+
+  // Own event: set reverser commanded
+  event setReverserCommanded(cmd: Boolean) {
+    post: self.reverserCommanded = cmd;
+    modifies: self.reverserCommanded;
+  }
+
+  // Own event: set continuous ignition command
+  event setContinuousIgnitionCommanded(cmd: Boolean) {
+    post: self.continuousIgnitionCommanded = cmd;
+    modifies: self.continuousIgnitionCommanded;
+  }
+
+  // Own event: set thrust command
+  event setThrustCommanded(thrust: Real) {
+    pre: thrust >= 0.0;
+    post: self.thrustCommanded = thrust;
+    modifies: self.thrustCommanded;
+  }
+}
+
+// ─── Component: Sensor Fault Handler ───────────────────────────────────
+// Owns: faultDetected, sensorFaultActive, modelledValueAvailable,
+//       modelledValueInUse
+kind SensorFaultHandler {
+  identity: handlerId;
+  property handlerId: String;
+  property faultDetected: Boolean;
+  property sensorFaultActive: Boolean;
+  property modelledValueAvailable: Boolean;
+  property modelledValueInUse: Boolean;
+
+  invariants {
+    self.handlerId <> null;
+    self.faultDetected implies self.modelledValueAvailable;
+  }
+
+  // Implements: EngineControlSystem.detectSensorFault
+  event detectSensorFault()
+    refines engine_control_requirements::EngineControlSystem.detectSensorFault {
+    pre: not self.sensorFaultActive;
+    post: self.sensorFaultActive = true;
+    post: self.faultDetected = true;
+    post: self.modelledValueInUse = true;
+    post: self.modelledValueAvailable = true;
+    modifies: self.sensorFaultActive, self.faultDetected, self.modelledValueInUse, self.modelledValueAvailable;
+  }
+
+  // Own event: clear sensor fault (after maintenance / self-test pass)
+  event clearSensorFault() {
+    pre: self.sensorFaultActive = true;
+    post: self.sensorFaultActive = false;
+    post: self.faultDetected = false;
+    post: self.modelledValueInUse = false;
+    modifies: self.sensorFaultActive, self.faultDetected, self.modelledValueInUse;
+  }
+}
+
+// ─── Component: Overspeed Protection (auxiliary ─ not always fitted) ──
+// This component exists only if overspeedProtectionFitted = true.
+// For variants without it, this kind is never instantiated.
+kind OverspeedProtectionUnit {
+  identity: protectionId;
+  property protectionId: String;
+  property isArmed: Boolean;
+  property fuelShutoffValve: Boolean;
+  property overspeedDetected: Boolean;  // mirrored from SpeedMonitor
+
+  invariants {
+    self.protectionId <> null;
+  }
+
+  event armProtection() {
+    post: self.isArmed = true;
+    modifies: self.isArmed;
+  }
+
+  event shutOffFuelOnOverspeed() {
+    pre: self.isArmed = true;
+    pre: self.overspeedDetected = true;
+    post: self.fuelShutoffValve = true;
+    modifies: self.fuelShutoffValve;
+  }
+
+  event resetAfterOverspeed() {
+    pre: not self.overspeedDetected;
+    post: self.fuelShutoffValve = false;
+    post: self.isArmed = false;
+    modifies: self.fuelShutoffValve, self.isArmed;
+  }
+
+  event setOverspeedDetected(detected: Boolean) {
+    post: self.overspeedDetected = detected;
+    modifies: self.overspeedDetected;
+  }
+}
+
+// ─── Interfaces (Relators) ────────────────────────────────────────────
+// Each relator mediates two Role endpoint kinds. Roles are created
+// per component to represent that component's contractual face in
+// the interface.
+
+// ---- Interface: SpeedMonitor ↔ ThrustManager ----
+// When overspeed is detected, ThrustManager must reduce thrust.
+role OverspeedAlertSender mediated-by OverspeedAlertChannel of SpeedMonitor {
+  property monitorId: String;
+  property overspeedDetected: Boolean;
+  property fuelFlow: Real;
+}
+
+role OverspeedAlertReceiver mediated-by OverspeedAlertChannel of ThrustManager {
+  property managerId: String;
+  property thrustCommanded: Real;
+  property reverserEnabled: Boolean;
+}
+
+relator OverspeedAlertChannel mediates (OverspeedAlertSender, OverspeedAlertReceiver) {
+  identity: channelId;
+  property channelId: String;
+  property alertActive: Boolean;
+  property lastAlertTimestamp: Real;
+
+  invariants {
+    self.channelId <> null;
+  }
+
+  event transmitAlert(sender: OverspeedAlertSender, receiver: OverspeedAlertReceiver) {
+    pre: sender.overspeedDetected = true;
+    post: self.alertActive = true;
+    // The receiver should reduce thrust in response (modelled via a separate event)
+    modifies: self.alertActive;
+  }
+
+  // CORRECTED: self.overspeedDetected doesn't exist — use the sender role's property
+  event clearAlert(sender: OverspeedAlertSender) {
+    pre: not sender.overspeedDetected;
+    post: self.alertActive = false;
+    modifies: self.alertActive;
+  }
+}
+
+// ---- Interface: SensorFaultHandler ↔ SpeedMonitor ----
+// When a sensor fault is detected, the modelled value for speed must be injected.
+role FaultNotifier mediated-by FaultNotificationChannel of SensorFaultHandler {
+  property handlerId: String;
+  property sensorFaultActive: Boolean;
+  property modelledValueAvailable: Boolean;
+}
+
+role ModelledValueInjector mediated-by FaultNotificationChannel of SpeedMonitor {
+  property monitorId: String;
+  property currentSpeed: Real;
+  property fuelFlow: Real;
+}
+
+relator FaultNotificationChannel mediates (FaultNotifier, ModelledValueInjector) {
+  identity: channelId;
+  property channelId: String;
+  property modelledCurrentSpeed: Real;
+  property modelledFuelFlow: Real;
+  property injectionActive: Boolean;
+
+  invariants {
+    self.channelId <> null;
+    self.modelledCurrentSpeed >= 0.0;
+    self.modelledFuelFlow >= 0.0;
+  }
+
+  event injectModelledValues(notifier: FaultNotifier, injector: ModelledValueInjector) {
+    // CORRECTED: self.sensorFaultActive doesn't exist — use notifier role's property
+    pre: notifier.sensorFaultActive = true;
+    pre: notifier.modelledValueAvailable = true;
+    pre: self.modelledCurrentSpeed >= 0.0;
+    pre: self.modelledFuelFlow >= 0.0;
+    post: self.injectionActive = true;
+    // Actual injection occurs via injector's own event
+    modifies: self.injectionActive;
+  }
+
+  // CORRECTED: self.sensorFaultActive doesn't exist — use notifier role
+  event clearInjection(notifier: FaultNotifier) {
+    pre: not notifier.sensorFaultActive;
+    post: self.injectionActive = false;
+    modifies: self.injectionActive;
+  }
+}
+
+// ---- Interface: SensorFaultHandler ↔ ThrustManager ----
+// When a sensor fault is detected, the modelled value for thrust must be injected.
+role FaultNotifier2 mediated-by ThrustFaultChannel of SensorFaultHandler {
+  property handlerId: String;
+  property sensorFaultActive: Boolean;
+}
+
+role ThrustModelledValueInjector mediated-by ThrustFaultChannel of ThrustManager {
+  property managerId: String;
+  property thrustCommanded: Real;
+}
+
+relator ThrustFaultChannel mediates (FaultNotifier2, ThrustModelledValueInjector) {
+  identity: channelId;
+  property channelId: String;
+  property modelledThrustCommand: Real;
+  property injectionActive: Boolean;
+
+  invariants {
+    self.channelId <> null;
+    self.modelledThrustCommand >= 0.0;
+  }
+
+  event injectModelledThrust(notifier: FaultNotifier2, injector: ThrustModelledValueInjector) {
+    // CORRECTED: self.sensorFaultActive doesn't exist — use notifier role's property
+    pre: notifier.sensorFaultActive = true;
+    pre: self.modelledThrustCommand >= 0.0;
+    post: self.injectionActive = true;
+    modifies: self.injectionActive;
+  }
+
+  // CORRECTED: self.sensorFaultActive doesn't exist — use notifier role
+  event clearThrustInjection(notifier: FaultNotifier2) {
+    pre: not notifier.sensorFaultActive;
+    post: self.injectionActive = false;
+    modifies: self.injectionActive;
+  }
+}
+
+// ---- Interface: SpeedMonitor ↔ OverspeedProtectionUnit ----
+// The protection unit listens for overspeed signals from the monitor.
+role OverspeedSource mediated-by ProtectionLink of SpeedMonitor {
+  property monitorId: String;
+  property overspeedDetected: Boolean;
+}
+
+role ProtectionActuator mediated-by ProtectionLink of OverspeedProtectionUnit {
+  property protectionId: String;
+  property fuelShutoffValve: Boolean;
+}
+
+relator ProtectionLink mediates (OverspeedSource, ProtectionActuator) {
+  identity: linkId;
+  property linkId: String;
+  property protectionArmed: Boolean;
+
+  invariants {
+    self.linkId <> null;
+  }
+
+  event activateProtection(source: OverspeedSource, actuator: ProtectionActuator) {
+    pre: source.overspeedDetected = true;
+    pre: self.protectionArmed = true;
+    post: actuator.fuelShutoffValve = true;
+    modifies: actuator.fuelShutoffValve;
+  }
+
+  event armProtectionLink() {
+    post: self.protectionArmed = true;
+    modifies: self.protectionArmed;
+  }
+}
+
+// ─── Data Flows (Happenings) ──────────────────────────────────────────
+// Each happening represents an end-to-end story crossing components.
+
+happening OverspeedDetectionAndMitigationFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+happening ThrustManagementFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+happening SensorFaultRecoveryFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+// ─── Explicit Relations (OntoUML Stereotypes) ─────────────────────────
+
+// Component endpoints are members of their respective components
+relation speedMonitorMembership: <<memberOf>> from OverspeedAlertSender [1] to SpeedMonitor [1];
+relation thrustManagerMembership1: <<memberOf>> from OverspeedAlertReceiver [1] to ThrustManager [1];
+relation thrustManagerMembership2: <<memberOf>> from ThrustModelledValueInjector [1] to ThrustManager [1];
+relation sensorFaultHandlerMembership1: <<memberOf>> from FaultNotifier [1] to SensorFaultHandler [1];
+relation sensorFaultHandlerMembership2: <<memberOf>> from FaultNotifier2 [1] to SensorFaultHandler [1];
+relation speedMonitorMembership2: <<memberOf>> from ModelledValueInjector [1] to SpeedMonitor [1];
+relation speedMonitorMembership3: <<memberOf>> from OverspeedSource [1] to SpeedMonitor [1];
+relation protectionUnitMembership: <<memberOf>> from ProtectionActuator [1] to OverspeedProtectionUnit [1];

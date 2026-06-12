@@ -1,0 +1,257 @@
+schema "onto/0.1";
+namespace traffic_light_requirements;
+import "./discovery.onto";
+
+// =====================================================================
+// Requirements — Intersection Traffic Light Controller
+//
+// The system as a black box: one kind (TrafficLightControllerSystem)
+// whose events are the Functional Requirements.  Every event that
+// discharges a Discovery commitment carries a structured 'refines:'
+// clause so the inter-stage verifier can prove the implication.
+//
+// Properties encode the observable state of the controller.
+// Non-functional concerns (minimum yellow duration, max preemption
+// response time) are scalar bounds expressed as invariant-guarded
+// properties on the system kind.
+// =====================================================================
+
+// ─── The System Kind ─────────────────────────────────────────────────
+
+kind TrafficLightControllerSystem
+    specializes MutualExclusionConstraints,
+                YellowIntervalConstraints,
+                PreemptionTimingConstraints,
+                PedestrianSafetyConstraints {
+
+  identity: controllerId;
+
+  // --- Identity + configuration ---
+  property controllerId: String;
+
+  // NFR thresholds (invariant-guarded scalar bounds)
+  property minimumYellowSeconds: Real;
+  property maxPreemptionResponseSeconds: Real;
+
+  // --- Observable phase / signal state ---
+  // Current phase identifier (empty string = no active phase / all-red)
+  property currentPhaseId: String;
+
+  // Signal states for the two canonical conflicting approach axes.
+  // Encoded as 'GREEN', 'YELLOW', 'RED'.
+  property nsSignalState: String;
+  property ewSignalState: String;
+
+  // Elapsed seconds in the current signal state for each axis
+  property nsStateElapsedSeconds: Real;
+  property ewStateElapsedSeconds: Real;
+
+  // --- Preemption state ---
+  property preemptionActive: Boolean;
+  property allRedCommandedAt: Real;
+
+  // --- Pedestrian request state ---
+  property pedestrianRequestPending: Boolean;
+  property pedestrianRequestApproach: String;
+  property pedestrianWalkActive: Boolean;
+
+  // ── Invariants ────────────────────────────────────────────────────
+
+  invariants {
+    // Identity never null
+    self.controllerId <> null;
+
+    // NFR thresholds are well-formed at all times
+    self.minimumYellowSeconds >= 3.0;
+    self.maxPreemptionResponseSeconds <= 1.0;
+    self.maxPreemptionResponseSeconds > 0.0;
+
+    // Signal states are in the legal domain
+    (self.nsSignalState = 'GREEN' or
+     self.nsSignalState = 'YELLOW' or
+     self.nsSignalState = 'RED');
+    (self.ewSignalState = 'GREEN' or
+     self.ewSignalState = 'YELLOW' or
+     self.ewSignalState = 'RED');
+
+    // GOAL-1 (system-wide invariant): crossing approaches never both GREEN
+    not (self.nsSignalState = 'GREEN' and self.ewSignalState = 'GREEN');
+
+    // GOAL-4 safety invariant: WALK only active when its approach is GREEN
+    // and the crossing approach is NOT GREEN.
+    (self.pedestrianWalkActive = true) implies
+      (
+        (self.pedestrianRequestApproach = 'NS' and
+         self.nsSignalState = 'GREEN' and
+         not (self.ewSignalState = 'GREEN'))
+        or
+        (self.pedestrianRequestApproach = 'EW' and
+         self.ewSignalState = 'GREEN' and
+         not (self.nsSignalState = 'GREEN'))
+      );
+
+    // Elapsed seconds are non-negative
+    self.nsStateElapsedSeconds >= 0.0;
+    self.ewStateElapsedSeconds >= 0.0;
+  }
+
+  // ── FR-1: Start a new green phase ────────────────────────────────
+  // Activates a named phase: one axis goes GREEN, the crossing axis
+  // must already be RED.  Post guarantees conflicting GREENs = 0,
+  // discharging MutualExclusionCommitment.
+  event startPhase(phaseId: String, greenAxis: String)
+    refines traffic_light_discovery::MutualExclusionCommitment {
+    pre: self.preemptionActive = false;
+    pre: phaseId <> null;
+    pre: (greenAxis = 'NS' or greenAxis = 'EW');
+    pre: (greenAxis = 'NS') implies (self.ewSignalState = 'RED');
+    pre: (greenAxis = 'EW') implies (self.nsSignalState = 'RED');
+    post: self.currentPhaseId = phaseId;
+    post: (greenAxis = 'NS') implies (self.nsSignalState = 'GREEN');
+    post: (greenAxis = 'NS') implies (self.ewSignalState = 'RED');
+    post: (greenAxis = 'EW') implies (self.ewSignalState = 'GREEN');
+    post: (greenAxis = 'EW') implies (self.nsSignalState = 'RED');
+    post: not (self.nsSignalState = 'GREEN' and self.ewSignalState = 'GREEN');
+    post: self.nsStateElapsedSeconds = 0.0;
+    post: self.ewStateElapsedSeconds = 0.0;
+    modifies: self.currentPhaseId,
+              self.nsSignalState,
+              self.ewSignalState,
+              self.nsStateElapsedSeconds,
+              self.ewStateElapsedSeconds;
+  }
+
+  // ── FR-2: Transition a GREEN axis to YELLOW ───────────────────────
+  // Begins the mandatory yellow interval on a given axis.
+  // The axis moves to YELLOW (never directly GREEN → RED).
+  // minimumYellowSeconds >= 3.0 is guaranteed by the class invariant,
+  // discharging YellowIntervalCommitment.
+  event beginYellow(axis: String)
+    refines traffic_light_discovery::YellowIntervalCommitment {
+    pre: self.preemptionActive = false;
+    pre: (axis = 'NS' or axis = 'EW');
+    pre: (axis = 'NS') implies (self.nsSignalState = 'GREEN');
+    pre: (axis = 'EW') implies (self.ewSignalState = 'GREEN');
+    post: (axis = 'NS') implies (self.nsSignalState = 'YELLOW');
+    post: (axis = 'EW') implies (self.ewSignalState = 'YELLOW');
+    post: (axis = 'NS') implies (self.nsStateElapsedSeconds = 0.0);
+    post: (axis = 'EW') implies (self.ewStateElapsedSeconds = 0.0);
+    post: self.minimumYellowSeconds >= 3.0;
+    modifies: self.nsSignalState,
+              self.ewSignalState,
+              self.nsStateElapsedSeconds,
+              self.ewStateElapsedSeconds;
+  }
+
+  // ── FR-3: Transition a YELLOW axis to RED ────────────────────────
+  // Only legal once the YELLOW duration satisfies the minimum interval.
+  // Pre gate enforces >= minimumYellowSeconds (>= 3 s) before RED.
+  event endYellowGoRed(axis: String, elapsedYellowSeconds: Real)
+    refines traffic_light_discovery::YellowIntervalCommitment {
+    pre: (axis = 'NS' or axis = 'EW');
+    pre: (axis = 'NS') implies (self.nsSignalState = 'YELLOW');
+    pre: (axis = 'EW') implies (self.ewSignalState = 'YELLOW');
+    pre: elapsedYellowSeconds >= self.minimumYellowSeconds;
+    pre: self.minimumYellowSeconds >= 3.0;
+    post: (axis = 'NS') implies (self.nsSignalState = 'RED');
+    post: (axis = 'EW') implies (self.ewSignalState = 'RED');
+    post: (axis = 'NS') implies (self.nsStateElapsedSeconds = elapsedYellowSeconds);
+    post: (axis = 'EW') implies (self.ewStateElapsedSeconds = elapsedYellowSeconds);
+    modifies: self.nsSignalState,
+              self.ewSignalState,
+              self.nsStateElapsedSeconds,
+              self.ewStateElapsedSeconds;
+  }
+
+  // ── FR-4: Emergency preemption — command ALL-RED ─────────────────
+  // Triggered by preemption sensor activation.  Regardless of current
+  // phase / yellow state, all approaches go RED within the response
+  // budget.  Post proves responseTimeSeconds <= maxPreemptionResponseSeconds
+  // (<= 1 s by invariant), discharging EmergencyPreemptionCommitment.
+  event commandAllRedPreemption(responseTimeSeconds: Real)
+    refines traffic_light_discovery::EmergencyPreemptionCommitment {
+    pre: self.preemptionActive = false;
+    pre: responseTimeSeconds >= 0.0;
+    pre: responseTimeSeconds <= self.maxPreemptionResponseSeconds;
+    post: self.nsSignalState = 'RED';
+    post: self.ewSignalState = 'RED';
+    post: self.preemptionActive = true;
+    post: self.pedestrianWalkActive = false;
+    post: responseTimeSeconds <= self.maxPreemptionResponseSeconds;
+    post: self.maxPreemptionResponseSeconds <= 1.0;
+    modifies: self.nsSignalState,
+              self.ewSignalState,
+              self.preemptionActive,
+              self.pedestrianWalkActive,
+              self.allRedCommandedAt;
+  }
+
+  // ── FR-5: Clear preemption — resume normal phasing ───────────────
+  // Once the emergency vehicle has passed and the sensor clears, the
+  // controller exits preemption mode.  Both axes remain RED until
+  // a subsequent startPhase call.
+  event clearPreemption() {
+    pre: self.preemptionActive = true;
+    post: self.preemptionActive = false;
+    post: self.nsSignalState = 'RED';
+    post: self.ewSignalState = 'RED';
+    modifies: self.preemptionActive,
+              self.nsSignalState,
+              self.ewSignalState;
+  }
+
+  // ── FR-6: Register a pedestrian WALK request ─────────────────────
+  // Records a pedestrian button press for a given approach axis.
+  // Does not immediately change signal state; WALK is granted by
+  // activateWalk in the next compatible phase.
+  event registerPedestrianRequest(approachAxis: String)
+    refines traffic_light_discovery::PedestrianWalkCommitment {
+    pre: (approachAxis = 'NS' or approachAxis = 'EW');
+    pre: self.pedestrianRequestPending = false;
+    post: self.pedestrianRequestPending = true;
+    post: self.pedestrianRequestApproach = approachAxis;
+    modifies: self.pedestrianRequestPending,
+              self.pedestrianRequestApproach;
+  }
+
+  // ── FR-7: Activate WALK signal for pending pedestrian request ────
+  // Grants the WALK signal when the compatible approach is GREEN and
+  // the crossing approach is not GREEN (enforced by pre).
+  // Post sets pedestrianWalkActive = true, discharging
+  // PedestrianWalkCommitment (walkRequestHonoured = true).
+  event activateWalk()
+    refines traffic_light_discovery::PedestrianWalkCommitment {
+    pre: self.pedestrianRequestPending = true;
+    pre: self.preemptionActive = false;
+    pre: (self.pedestrianRequestApproach = 'NS') implies (self.nsSignalState = 'GREEN');
+    pre: (self.pedestrianRequestApproach = 'EW') implies (self.ewSignalState = 'GREEN');
+    pre: (self.pedestrianRequestApproach = 'NS') implies (not (self.ewSignalState = 'GREEN'));
+    pre: (self.pedestrianRequestApproach = 'EW') implies (not (self.nsSignalState = 'GREEN'));
+    post: self.pedestrianWalkActive = true;
+    post: self.pedestrianRequestPending = false;
+    modifies: self.pedestrianWalkActive,
+              self.pedestrianRequestPending;
+  }
+
+  // ── FR-8: Deactivate WALK signal ─────────────────────────────────
+  // Clears the WALK signal when the associated approach transitions
+  // away from GREEN (begins YELLOW or enters preemption ALL-RED).
+  event deactivateWalk() {
+    pre: self.pedestrianWalkActive = true;
+    post: self.pedestrianWalkActive = false;
+    modifies: self.pedestrianWalkActive;
+  }
+
+  // ── FR-9: Advance elapsed-time counters (clock tick) ─────────────
+  // The controller's internal timer advances both axis elapsed-second
+  // counters.  Downstream Design/Code stages refine this into a
+  // hardware-timer interrupt handler.
+  event clockTick(deltaNs: Real, deltaEw: Real) {
+    pre: deltaNs >= 0.0;
+    pre: deltaEw >= 0.0;
+    post: self.nsStateElapsedSeconds = self.nsStateElapsedSeconds@pre + deltaNs;
+    post: self.ewStateElapsedSeconds = self.ewStateElapsedSeconds@pre + deltaEw;
+    modifies: self.nsStateElapsedSeconds,
+              self.ewStateElapsedSeconds;
+  }
+}

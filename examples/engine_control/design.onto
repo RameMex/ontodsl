@@ -1,0 +1,556 @@
+schema "onto/0.1";
+namespace engine_control_design;
+
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Design — Engine Control System
+//
+// Decomposes EngineControlSystem into four sibling components, each
+// owning a cohesive slice of system state.  Components are NOT
+// subkinds of EngineControlSystem — the relationship is decomposition,
+// not Liskov.
+//
+// Components:
+//   OverspeedProtectionUnit  — GOAL-1: fuel limiting on overspeed
+//   IgnitionThrustController — GOAL-2: ignition + thrust management
+//   SensorFaultManager       — GOAL-3: fault detection + modelled-value
+//   FlightPhaseMonitor       — shared ground-truth for flight phase
+//
+// Interfaces (relators):
+//   SpeedBus         — OverspeedProtectionUnit <-> SensorFaultManager
+//   FaultSignalBus   — SensorFaultManager -> OverspeedProtectionUnit
+//   ThrustBus        — IgnitionThrustController <-> FlightPhaseMonitor
+//   ReverserBus      — IgnitionThrustController <-> FlightPhaseMonitor
+//
+// Happenings (cross-component data flows):
+//   OverspeedDetectionDataFlow
+//   SensorFaultSubstitutionDataFlow
+//   ThrustReverserGroundCheckDataFlow
+//   ContinuousIgnitionDataFlow
+// =====================================================================
+
+
+// =====================================================================
+// SECTION 1 — ROLES
+//
+// Each relator mediates two role kinds, one per endpoint.
+// Roles are declared before the relators that reference them.
+// =====================================================================
+
+role SpeedProducer mediated-by SpeedBus of OverspeedProtectionUnit {
+  property unitId: String;
+}
+
+role SpeedConsumer mediated-by SpeedBus of SensorFaultManager {
+  property unitId: String;
+}
+
+role FaultSignalSource mediated-by FaultSignalBus of SensorFaultManager {
+  property unitId: String;
+}
+
+role FaultSignalSink mediated-by FaultSignalBus of OverspeedProtectionUnit {
+  property unitId: String;
+}
+
+role ThrustCommander mediated-by ThrustBus of IgnitionThrustController {
+  property unitId: String;
+}
+
+role PhaseOracleForThrust mediated-by ThrustBus of FlightPhaseMonitor {
+  property unitId: String;
+}
+
+role ReverserController mediated-by ReverserBus of IgnitionThrustController {
+  property unitId: String;
+}
+
+role PhaseOracleForReverser mediated-by ReverserBus of FlightPhaseMonitor {
+  property unitId: String;
+}
+
+
+// =====================================================================
+// SECTION 2 — COMPONENTS
+// =====================================================================
+
+// ---------------------------------------------------------------------
+// Component A: OverspeedProtectionUnit
+//
+// Owns: engineSpeed, maxSafeSpeed, fuelFlow, overspeedProtectionFitted,
+//       unprotectedOverspeedAlertIssued
+//
+// Refines:
+//   engine_control_requirements::EngineControlSystem.limitFuelOnOverspeed        (FR-1)
+//   engine_control_formalization::EngineControlSystemFormalized
+//     .rejectOverspeedLimitOnUnprotectedVariant                                   (BR-2)
+//   engine_control_formalization::EngineControlSystemFormalized
+//     .enforceFuelCutOnSpeedViolation                                             (BR-4)
+// ---------------------------------------------------------------------
+
+kind OverspeedProtectionUnit {
+  identity: unitId;
+
+  property unitId: String;
+  property engineSpeed: Real;
+  property maxSafeSpeed: Real;
+  property fuelFlow: Real;
+  property overspeedProtectionFitted: Boolean;
+  property unprotectedOverspeedAlertIssued: Boolean;
+
+  invariants {
+    self.unitId <> null;
+    self.maxSafeSpeed > 0.0;
+    self.engineSpeed >= 0.0;
+    self.fuelFlow >= 0.0;
+    self.engineSpeed <= self.maxSafeSpeed;
+  }
+
+  // refines: engine_control_requirements::EngineControlSystem.limitFuelOnOverspeed
+  event limitFuelOnOverspeed(detectedSpeed: Real) {
+    pre: detectedSpeed >= self.maxSafeSpeed;
+    pre: self.overspeedProtectionFitted = true;
+    post: self.fuelFlow = 0.0;
+    post: self.engineSpeed <= self.maxSafeSpeed;
+    modifies: self.fuelFlow, self.engineSpeed;
+  }
+
+  // refines: engine_control_formalization::EngineControlSystemFormalized
+  //            .rejectOverspeedLimitOnUnprotectedVariant (BR-2)
+  event rejectOverspeedLimitOnUnprotectedVariant(detectedSpeed: Real) {
+    pre: self.overspeedProtectionFitted = false;
+    pre: detectedSpeed >= self.maxSafeSpeed;
+    post: self.unprotectedOverspeedAlertIssued = true;
+    modifies: self.unprotectedOverspeedAlertIssued;
+  }
+
+  // refines: engine_control_formalization::EngineControlSystemFormalized
+  //            .enforceFuelCutOnSpeedViolation (BR-4)
+  event enforceFuelCutOnSpeedViolation() {
+    pre: self.engineSpeed > self.maxSafeSpeed;
+    pre: self.overspeedProtectionFitted = true;
+    post: self.fuelFlow = 0.0;
+    modifies: self.fuelFlow;
+  }
+
+  // Accepts effective speed published from SensorFaultManager via SpeedBus.
+  event receiveEffectiveSpeed(speed: Real) {
+    pre: speed >= 0.0;
+    post: self.engineSpeed = speed;
+    modifies: self.engineSpeed;
+  }
+}
+
+
+// ---------------------------------------------------------------------
+// Component B: IgnitionThrustController
+//
+// Owns: continuousIgnitionActive, commandedThrust, reverserDeploymentEnabled,
+//       reverserInFlightAttemptRejected, aircraftInFlight (mirror),
+//       sensorFaultActive (mirror), modelledValueSubstituted (mirror)
+//
+// Refines:
+//   engine_control_requirements::EngineControlSystem.activateContinuousIgnition   (FR-2)
+//   engine_control_requirements::EngineControlSystem.deactivateContinuousIgnition (FR-3)
+//   engine_control_requirements::EngineControlSystem.holdThrustInFlight           (FR-4)
+//   engine_control_requirements::EngineControlSystem.enableThrustReverser         (FR-5)
+//   engine_control_requirements::EngineControlSystem.disableThrustReverser        (FR-6)
+//   engine_control_formalization::EngineControlSystemFormalized
+//     .rejectReverserIfAirborne                                                    (BR-1)
+//   engine_control_formalization::EngineControlSystemFormalized
+//     .rejectIgnitionDeactivationInHazardousPhase                                 (BR-3)
+//   engine_control_formalization::EngineControlSystemFormalized
+//     .rejectThrustCommandPendingSubstitution                                      (BR-5)
+//   engine_control_formalization::EngineControlSystemFormalized
+//     .forceReverserDisableBeforeFlight                                            (BR-6)
+// ---------------------------------------------------------------------
+
+kind IgnitionThrustController {
+  identity: unitId;
+
+  property unitId: String;
+  property continuousIgnitionActive: Boolean;
+  property commandedThrust: Real;
+  property reverserDeploymentEnabled: Boolean;
+  property reverserInFlightAttemptRejected: Boolean;
+  property aircraftInFlight: Boolean;
+  property sensorFaultActive: Boolean;
+  property modelledValueSubstituted: Boolean;
+
+  invariants {
+    self.unitId <> null;
+    self.commandedThrust >= 0.0;
+    not (self.aircraftInFlight and self.reverserDeploymentEnabled);
+  }
+
+  // refines: engine_control_requirements::EngineControlSystem.activateContinuousIgnition (FR-2)
+  event activateContinuousIgnition() {
+    pre: self.continuousIgnitionActive = false;
+    post: self.continuousIgnitionActive = true;
+    modifies: self.continuousIgnitionActive;
+  }
+
+  // refines: engine_control_requirements::EngineControlSystem.deactivateContinuousIgnition (FR-3)
+  event deactivateContinuousIgnition() {
+    pre: self.continuousIgnitionActive = true;
+    pre: self.aircraftInFlight = false;
+    post: self.continuousIgnitionActive = false;
+    modifies: self.continuousIgnitionActive;
+  }
+
+  // refines: engine_control_formalization::EngineControlSystemFormalized
+  //            .rejectIgnitionDeactivationInHazardousPhase (BR-3)
+  event rejectIgnitionDeactivationInHazardousPhase() {
+    pre: self.continuousIgnitionActive = true;
+    pre: self.aircraftInFlight = true;
+    post: self.continuousIgnitionActive = true;
+    modifies: self.continuousIgnitionActive;
+  }
+
+  // refines: engine_control_requirements::EngineControlSystem.holdThrustInFlight (FR-4)
+  event holdThrustInFlight(commanded: Real) {
+    pre: self.aircraftInFlight = true;
+    pre: commanded >= 0.0;
+    pre: self.modelledValueSubstituted = true;
+    post: self.commandedThrust = commanded;
+    modifies: self.commandedThrust;
+  }
+
+  // refines: engine_control_formalization::EngineControlSystemFormalized
+  //            .rejectThrustCommandPendingSubstitution (BR-5)
+  event rejectThrustCommandPendingSubstitution(commanded: Real) {
+    pre: self.sensorFaultActive = true;
+    pre: self.modelledValueSubstituted = false;
+    pre: commanded >= 0.0;
+    post: self.modelledValueSubstituted = false;
+    modifies: self.modelledValueSubstituted;
+  }
+
+  // refines: engine_control_requirements::EngineControlSystem.enableThrustReverser (FR-5)
+  event enableThrustReverser() {
+    pre: self.aircraftInFlight = false;
+    post: self.reverserDeploymentEnabled = true;
+    modifies: self.reverserDeploymentEnabled;
+  }
+
+  // refines: engine_control_requirements::EngineControlSystem.disableThrustReverser (FR-6)
+  event disableThrustReverser() {
+    pre: self.reverserDeploymentEnabled = true;
+    post: self.reverserDeploymentEnabled = false;
+    modifies: self.reverserDeploymentEnabled;
+  }
+
+  // refines: engine_control_formalization::EngineControlSystemFormalized
+  //            .rejectReverserIfAirborne (BR-1)
+  event rejectReverserIfAirborne() {
+    pre: self.aircraftInFlight = true;
+    pre: self.reverserDeploymentEnabled = false;
+    post: self.reverserInFlightAttemptRejected = true;
+    modifies: self.reverserInFlightAttemptRejected;
+  }
+
+  // refines: engine_control_formalization::EngineControlSystemFormalized
+  //            .forceReverserDisableBeforeFlight (BR-6)
+  event forceReverserDisableBeforeFlight() {
+    pre: self.aircraftInFlight = false;
+    pre: self.reverserDeploymentEnabled = true;
+    post: self.reverserDeploymentEnabled = false;
+    modifies: self.reverserDeploymentEnabled;
+  }
+
+  // Accepts flight-phase update pushed from FlightPhaseMonitor via ThrustBus / ReverserBus.
+  event receiveFlightPhaseUpdate(inFlight: Boolean) {
+    post: self.aircraftInFlight = inFlight;
+    post: if inFlight then
+            self.reverserDeploymentEnabled = false
+          else
+            self.reverserDeploymentEnabled = self.reverserDeploymentEnabled
+          endif;
+    modifies: self.aircraftInFlight, self.reverserDeploymentEnabled;
+  }
+
+  // Accepts sensor-fault status pushed from SensorFaultManager via FaultSignalBus.
+  event receiveSensorFaultStatus(faultActive: Boolean, substituted: Boolean) {
+    post: self.sensorFaultActive = faultActive;
+    post: self.modelledValueSubstituted = substituted;
+    modifies: self.sensorFaultActive, self.modelledValueSubstituted;
+  }
+}
+
+
+// ---------------------------------------------------------------------
+// Component C: SensorFaultManager
+//
+// Owns: sensorFaultDetected, usingModelledValue, modelledSpeedValue
+//
+// Refines:
+//   engine_control_requirements::EngineControlSystem.substituteModelledValue (FR-7)
+//   engine_control_requirements::EngineControlSystem.resumeSensorReading     (FR-8)
+// ---------------------------------------------------------------------
+
+kind SensorFaultManager {
+  identity: unitId;
+
+  property unitId: String;
+  property sensorFaultDetected: Boolean;
+  property usingModelledValue: Boolean;
+  property modelledSpeedValue: Real;
+
+  invariants {
+    self.unitId <> null;
+    self.modelledSpeedValue >= 0.0;
+    self.usingModelledValue implies self.sensorFaultDetected;
+  }
+
+  // refines: engine_control_requirements::EngineControlSystem.substituteModelledValue (FR-7)
+  event substituteModelledValue(modelledSpeed: Real) {
+    pre: self.sensorFaultDetected = false;
+    pre: modelledSpeed >= 0.0;
+    post: self.sensorFaultDetected = true;
+    post: self.usingModelledValue = true;
+    post: self.modelledSpeedValue = modelledSpeed;
+    modifies: self.sensorFaultDetected, self.usingModelledValue, self.modelledSpeedValue;
+  }
+
+  // refines: engine_control_requirements::EngineControlSystem.resumeSensorReading (FR-8)
+  event resumeSensorReading() {
+    pre: self.sensorFaultDetected = true;
+    pre: self.usingModelledValue = true;
+    post: self.sensorFaultDetected = false;
+    post: self.usingModelledValue = false;
+    modifies: self.sensorFaultDetected, self.usingModelledValue;
+  }
+}
+
+
+// ---------------------------------------------------------------------
+// Component D: FlightPhaseMonitor
+//
+// Owns: aircraftInFlight, weightOnWheelsDiscrete
+//
+// Refines:
+//   engine_control_requirements::EngineControlSystem.transitionToFlight  (FR-9)
+//   engine_control_requirements::EngineControlSystem.transitionToGround  (FR-10)
+// ---------------------------------------------------------------------
+
+kind FlightPhaseMonitor {
+  identity: unitId;
+
+  property unitId: String;
+  property aircraftInFlight: Boolean;
+  property weightOnWheelsDiscrete: Boolean;
+
+  invariants {
+    self.unitId <> null;
+    self.weightOnWheelsDiscrete implies not self.aircraftInFlight;
+  }
+
+  // refines: engine_control_requirements::EngineControlSystem.transitionToFlight (FR-9)
+  event transitionToFlight() {
+    pre: self.aircraftInFlight = false;
+    pre: self.weightOnWheelsDiscrete = false;
+    post: self.aircraftInFlight = true;
+    modifies: self.aircraftInFlight;
+  }
+
+  // refines: engine_control_requirements::EngineControlSystem.transitionToGround (FR-10)
+  event transitionToGround() {
+    pre: self.aircraftInFlight = true;
+    pre: self.weightOnWheelsDiscrete = true;
+    post: self.aircraftInFlight = false;
+    modifies: self.aircraftInFlight;
+  }
+
+  // Refreshes the raw WoW discrete from the avionics bus.
+  event updateWeightOnWheels(wow: Boolean) {
+    post: self.weightOnWheelsDiscrete = wow;
+    modifies: self.weightOnWheelsDiscrete;
+  }
+}
+
+
+// =====================================================================
+// SECTION 3 — INTERFACES (RELATORS)
+// =====================================================================
+
+// ---------------------------------------------------------------------
+// SpeedBus — carries effective engine speed from SensorFaultManager
+// to OverspeedProtectionUnit.
+// ---------------------------------------------------------------------
+
+relator SpeedBus mediates (SpeedProducer, SpeedConsumer) {
+  identity: busId;
+
+  property busId: String;
+  property effectiveSpeed: Real;
+  property isModelled: Boolean;
+  property faultFlagFromConsumer: Boolean;
+
+  invariants {
+    self.busId <> null;
+    self.effectiveSpeed >= 0.0;
+    self.isModelled implies self.faultFlagFromConsumer;
+  }
+
+  event publishSpeed(speed: Real, modelled: Boolean, faultActive: Boolean) {
+    pre: speed >= 0.0;
+    pre: modelled implies faultActive;
+    post: self.effectiveSpeed = speed;
+    post: self.isModelled = modelled;
+    post: self.faultFlagFromConsumer = faultActive;
+    modifies: self.effectiveSpeed, self.isModelled, self.faultFlagFromConsumer;
+  }
+}
+
+
+// ---------------------------------------------------------------------
+// FaultSignalBus — propagates fault flag and substitution status from
+// SensorFaultManager to OverspeedProtectionUnit.
+// ---------------------------------------------------------------------
+
+relator FaultSignalBus mediates (FaultSignalSource, FaultSignalSink) {
+  identity: busId;
+
+  property busId: String;
+  property faultActive: Boolean;
+  property substitutionActive: Boolean;
+
+  invariants {
+    self.busId <> null;
+    self.substitutionActive implies self.faultActive;
+  }
+
+  event propagateFaultStatus(fault: Boolean, substituted: Boolean) {
+    pre: substituted implies fault;
+    post: self.faultActive = fault;
+    post: self.substitutionActive = substituted;
+    modifies: self.faultActive, self.substitutionActive;
+  }
+}
+
+
+// ---------------------------------------------------------------------
+// ThrustBus — FlightPhaseMonitor publishes phase; IgnitionThrustController
+// reads it before updating commandedThrust.
+// ---------------------------------------------------------------------
+
+relator ThrustBus mediates (ThrustCommander, PhaseOracleForThrust) {
+  identity: busId;
+
+  property busId: String;
+  property publishedInFlight: Boolean;
+  property sequenceNumber: Integer;
+
+  invariants {
+    self.busId <> null;
+    self.sequenceNumber >= 0;
+  }
+
+  event publishPhaseForThrust(inFlight: Boolean) {
+    post: self.publishedInFlight = inFlight;
+    post: self.sequenceNumber = self.sequenceNumber + 1;
+    modifies: self.publishedInFlight, self.sequenceNumber;
+  }
+}
+
+
+// ---------------------------------------------------------------------
+// ReverserBus — dedicated phase channel for the reverser gate logic,
+// keeping reverser and thrust paths independently traceable to ARP4761 FTA.
+// ---------------------------------------------------------------------
+
+relator ReverserBus mediates (ReverserController, PhaseOracleForReverser) {
+  identity: busId;
+
+  property busId: String;
+  property publishedInFlight: Boolean;
+  property sequenceNumber: Integer;
+
+  invariants {
+    self.busId <> null;
+    self.sequenceNumber >= 0;
+  }
+
+  event publishPhaseForReverser(inFlight: Boolean) {
+    post: self.publishedInFlight = inFlight;
+    post: self.sequenceNumber = self.sequenceNumber + 1;
+    modifies: self.publishedInFlight, self.sequenceNumber;
+  }
+}
+
+
+// =====================================================================
+// SECTION 4 — EXPLICIT RELATIONS
+// =====================================================================
+
+relation speedBusToProducer:  <<mediation>> from SpeedBus [1]       to SpeedProducer [1];
+relation speedBusToConsumer:  <<mediation>> from SpeedBus [1]       to SpeedConsumer [1];
+relation faultBusToSource:    <<mediation>> from FaultSignalBus [1] to FaultSignalSource [1];
+relation faultBusToSink:      <<mediation>> from FaultSignalBus [1] to FaultSignalSink [1];
+relation thrustBusToCmd:      <<mediation>> from ThrustBus [1]      to ThrustCommander [1];
+relation thrustBusToOracle:   <<mediation>> from ThrustBus [1]      to PhaseOracleForThrust [1];
+relation reverserBusToCtrl:   <<mediation>> from ReverserBus [1]    to ReverserController [1];
+relation reverserBusToOracle: <<mediation>> from ReverserBus [1]    to PhaseOracleForReverser [1];
+
+
+// =====================================================================
+// SECTION 5 — HAPPENINGS (CROSS-COMPONENT DATA FLOWS)
+// =====================================================================
+
+// ---------------------------------------------------------------------
+// Flow 1: Overspeed Detection
+//
+// Steps (cross-boundary):
+//   1. SensorFaultManager reads sensor; if healthy publishes raw speed
+//      on SpeedBus.
+//   2. OverspeedProtectionUnit receives speed via receiveEffectiveSpeed.
+//   3. If speed >= maxSafeSpeed AND protection fitted:
+//      OverspeedProtectionUnit fires limitFuelOnOverspeed.
+// ---------------------------------------------------------------------
+
+happening OverspeedDetectionDataFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Flow 2: Sensor Fault Substitution
+//
+// Steps (cross-boundary):
+//   1. SensorFaultManager detects fault; fires substituteModelledValue.
+//   2. SensorFaultManager publishes fault status on FaultSignalBus
+//      (propagateFaultStatus) and modelled speed on SpeedBus
+//      (publishSpeed with isModelled = true).
+//   3. OverspeedProtectionUnit receives modelled speed via
+//      receiveEffectiveSpeed.
+//   4. IgnitionThrustController receives fault status via
+//      receiveSensorFaultStatus.
+// ---------------------------------------------------------------------
+
+happening SensorFaultSubstitutionDataFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Flow 3: Thrust Reverser Ground Check
+//
+// Steps (cross-boundary):
+//   1. FlightPhaseMonitor receives WoW discrete via updateWeightOnWheels.
+//   2. FlightPhaseMonitor fires transitionToGround (or transitionToFlight).
+//   3. FlightPhaseMonitor publishes

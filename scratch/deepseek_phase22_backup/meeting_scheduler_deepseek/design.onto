@@ -1,0 +1,400 @@
+schema "onto/0.1";
+namespace meeting_scheduler_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =========================================================================
+// DESIGN: Meeting Scheduler — Component Decomposition
+//
+// Components (cohesive state owners):
+//   MeetingCoordinator       — orchestrates the scheduling flow, owns meeting
+//                              request lifecycle (open/confirmed/conflict)
+//   ParticipantManager       — manages participant constraints (exclusion/
+//                              preference sets) per request
+//   DateProposer             — finds the best common date given constraints
+//   NotificationService      — sends notifications to initiator/participants
+//   ConflictHandler          — detects and reports scheduling conflicts
+//
+// Interfaces (relators):
+//   ConstraintIngestionChannel     — connects ParticipantManager to
+//                                    MeetingCoordinator (-> DateProposer)
+//   NotificationDeliveryChannel    — connects NotificationService to
+//                                    external actors
+//
+// Data flows (happenings):
+//   SchedulingFlow            — end-to-end: request → propose → confirm/conflict
+//   UpdateFlow                — participant sends updated constraints while open
+// =========================================================================
+
+// ─── Component: MeetingCoordinator ───────────────────────────────────────
+kind MeetingCoordinator {
+  identity: coordinatorId;
+  property coordinatorId: String;
+  property requestId: String;
+  property rangeStart: Real;
+  property rangeEnd: Real;
+  property isOpen: Boolean;
+  property isConfirmed: Boolean;
+  property initiatorId: String;
+  property location: String;
+  property participantCount: Integer;
+
+  invariants {
+    self.coordinatorId <> null;
+    self.rangeStart >= 0.0;
+    self.rangeEnd >= 0.0;
+    self.rangeEnd >= self.rangeStart;
+    if self.isConfirmed then self.location <> null endif;
+    self.requestId <> null;
+    self.participantCount >= 0;
+  }
+
+  event createRequest(initId: String, start: Real, end: Real)
+    refines meeting_scheduler_requirements::MeetingSchedulerSystem.requestMeeting {
+    pre: not self.isOpen;
+    pre: not self.isConfirmed;
+    pre: initId <> null;
+    pre: start >= 0.0;
+    pre: end >= 0.0;
+    pre: end >= start;
+    post: self.rangeStart = start;
+    post: self.rangeEnd = end;
+    post: self.isOpen = true;
+    post: self.isConfirmed = false;
+    post: self.initiatorId = initId;
+    post: self.location = '';
+    post: self.participantCount = 0;
+    modifies: self.rangeStart, self.rangeEnd, self.isOpen, self.isConfirmed,
+              self.initiatorId, self.location, self.participantCount;
+  }
+
+  event proposeDate(exclusionCount: Integer, preferenceCount: Integer): Real
+    refines meeting_scheduler_requirements::MeetingSchedulerSystem.proposeDate,
+            meeting_scheduler_formalization::MeetingSchedulerSystemFormalized.rejectOutOfRangeProposal {
+    pre: self.isOpen = true;
+    pre: not self.isConfirmed;
+    pre: self.rangeStart >= 0.0;
+    pre: self.rangeEnd >= self.rangeStart;
+    pre: exclusionCount >= 0;
+    pre: preferenceCount >= 0;
+    post: self.isOpen = true;
+    modifies: self.isOpen;
+  }
+
+  event confirmMeeting(location: String)
+    refines meeting_scheduler_requirements::MeetingSchedulerSystem.confirmMeeting {
+    pre: self.isOpen = true;
+    pre: not self.isConfirmed;
+    pre: location <> null;
+    pre: self.location = '';
+    post: self.isOpen = false;
+    post: self.isConfirmed = true;
+    post: self.location = location;
+    modifies: self.isOpen, self.isConfirmed, self.location;
+  }
+
+  event notifyInitiator(outcomeMessage: String)
+    refines meeting_scheduler_requirements::MeetingSchedulerSystem.notifyInitiator,
+            meeting_scheduler_requirements::MeetingSchedulerSystem.reportConflict {
+    pre: self.isConfirmed or not self.isOpen;
+    pre: outcomeMessage <> null;
+    post: self.isOpen = false;
+    modifies: self.isOpen;
+  }
+
+  event incrementParticipantCount()
+    refines meeting_scheduler_requirements::MeetingSchedulerSystem.updateConstraints {
+    pre: self.isOpen = true;
+    post: self.participantCount = self.participantCount@pre + 1;
+    modifies: self.participantCount;
+  }
+}
+
+// ─── Component: ParticipantManager ───────────────────────────────────────
+kind ParticipantManager {
+  identity: managerId;
+  property managerId: String;
+  property requestId: String;
+  property participantCount: Integer;
+
+  invariants {
+    self.managerId <> null;
+    self.requestId <> null;
+    self.participantCount >= 0;
+  }
+
+  event addParticipant(participantId: String, exclusionCount: Integer, preferenceCount: Integer)
+    refines meeting_scheduler_requirements::MeetingSchedulerSystem.updateConstraints {
+    pre: participantId <> null;
+    pre: exclusionCount >= 0;
+    pre: preferenceCount >= 0;
+    post: self.participantCount = self.participantCount@pre + 1;
+    modifies: self.participantCount;
+  }
+
+  event updateConstraints(participantId: String)
+    refines meeting_scheduler_requirements::MeetingSchedulerSystem.updateConstraints {
+    pre: participantId <> null;
+    pre: self.participantCount > 0;
+    modifies: ;
+  }
+
+  event removeParticipant(participantId: String)
+    refines meeting_scheduler_requirements::MeetingSchedulerSystem.updateConstraints {
+    pre: participantId <> null;
+    pre: self.participantCount > 0;
+    post: self.participantCount = self.participantCount@pre - 1;
+    modifies: self.participantCount;
+  }
+
+  event clearParticipants() {
+    pre: self.participantCount > 0;
+    post: self.participantCount = 0;
+    modifies: self.participantCount;
+  }
+}
+
+// ─── Component: DateProposer ─────────────────────────────────────────────
+kind DateProposer {
+  identity: proposerId;
+  property proposerId: String;
+  property requestId: String;
+  property bestDate: Real;
+  property hasProposal: Boolean;
+
+  invariants {
+    self.proposerId <> null;
+    self.requestId <> null;
+    if self.hasProposal then self.bestDate >= 0.0 endif;
+    if not self.hasProposal then self.bestDate < 0.0 endif;
+  }
+
+  event proposeBestDate(rangeStart: Real, rangeEnd: Real, participantCount: Integer): Real
+    refines meeting_scheduler_requirements::MeetingSchedulerSystem.proposeDate {
+    pre: rangeStart >= 0.0;
+    pre: rangeEnd >= rangeStart;
+    pre: not self.hasProposal;
+    pre: participantCount >= 0;
+    post: if result >= 0.0 then
+            result >= rangeStart and result <= rangeEnd
+          else
+            result < 0.0
+          endif;
+    post: if result >= 0.0 then
+            self.hasProposal = true and self.bestDate = result
+          else
+            self.hasProposal = false and self.bestDate = -1.0
+          endif;
+    modifies: self.bestDate, self.hasProposal;
+  }
+
+  event clearProposal() {
+    pre: self.hasProposal = true;
+    post: self.hasProposal = false;
+    post: self.bestDate = -1.0;
+    modifies: self.hasProposal, self.bestDate;
+  }
+}
+
+// ─── Component: NotificationService ──────────────────────────────────────
+kind NotificationService {
+  identity: serviceId;
+  property serviceId: String;
+  property lastNotifiedInitiatorId: String;
+  property lastNotifiedParticipantId: String;
+  property notificationSent: Boolean;
+
+  invariants {
+    self.serviceId <> null;
+    if self.notificationSent then self.lastNotifiedInitiatorId <> null endif;
+  }
+
+  event notifyInitiator(initiatorId: String, message: String)
+    refines meeting_scheduler_requirements::MeetingSchedulerSystem.notifyInitiator {
+    pre: initiatorId <> null;
+    pre: message <> null;
+    pre: not self.notificationSent;
+    post: self.lastNotifiedInitiatorId = initiatorId;
+    post: self.notificationSent = true;
+    modifies: self.lastNotifiedInitiatorId, self.notificationSent;
+  }
+
+  event notifyParticipant(participantId: String, message: String)
+    refines meeting_scheduler_requirements::MeetingSchedulerSystem.confirmMeeting,
+            meeting_scheduler_formalization::MeetingSchedulerSystemFormalized.notifyParticipantOnAnyOutcome {
+    pre: participantId <> null;
+    pre: message <> null;
+    post: self.lastNotifiedParticipantId = participantId;
+    modifies: self.lastNotifiedParticipantId;
+  }
+
+  event resetNotifications() {
+    pre: self.notificationSent = true;
+    post: self.notificationSent = false;
+    post: self.lastNotifiedInitiatorId = '';
+    post: self.lastNotifiedParticipantId = '';
+    modifies: self.notificationSent, self.lastNotifiedInitiatorId, self.lastNotifiedParticipantId;
+  }
+}
+
+// ─── Component: ConflictHandler ──────────────────────────────────────────
+kind ConflictHandler {
+  identity: handlerId;
+  property handlerId: String;
+  property requestId: String;
+  property conflictDetected: Boolean;
+  property conflictReported: Boolean;
+
+  invariants {
+    self.handlerId <> null;
+    self.requestId <> null;
+    if self.conflictReported then self.conflictDetected endif;
+  }
+
+  event detectConflict()
+    refines meeting_scheduler_requirements::MeetingSchedulerSystem.reportConflict,
+            meeting_scheduler_formalization::MeetingSchedulerSystemFormalized.rejectUpdateAfterConflict {
+    pre: not self.conflictDetected;
+    pre: not self.conflictReported;
+    post: self.conflictDetected = true;
+    modifies: self.conflictDetected;
+  }
+
+  event reportConflictToInitiator()
+    refines meeting_scheduler_requirements::MeetingSchedulerSystem.reportConflict,
+            meeting_scheduler_discovery::ConflictHandlingCommitment {
+    pre: self.conflictDetected = true;
+    pre: not self.conflictReported;
+    post: self.conflictReported = true;
+    modifies: self.conflictReported;
+  }
+
+  event resetConflict() {
+    pre: self.conflictReported = true;
+    post: self.conflictDetected = false;
+    post: self.conflictReported = false;
+    modifies: self.conflictDetected, self.conflictReported;
+  }
+}
+
+// ─── Interface: ConstraintIngestionChannel ───────────────────────────────
+role CoordinatorEndpoint mediated-by ConstraintIngestionChannel of MeetingCoordinator {
+  property coordinatorId: String;
+  property rangeStart: Real;
+  property rangeEnd: Real;
+  property isOpen: Boolean;
+  property participantCount: Integer;
+}
+
+role ParticipantManagerEndpoint mediated-by ConstraintIngestionChannel of ParticipantManager {
+  property managerId: String;
+  property requestId: String;
+  property participantCount: Integer;
+}
+
+relator ConstraintIngestionChannel mediates (CoordinatorEndpoint, ParticipantManagerEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property requestId: String;
+  property isActive: Boolean;
+
+  invariants {
+    self.channelId <> null;
+    self.requestId <> null;
+    self.isActive = true;
+  }
+
+  event forwardConstraints() {
+    pre: self.isActive = true;
+    post: self.isActive = true;
+  }
+}
+
+// ─── Interface: NotificationDeliveryChannel ──────────────────────────────
+role NotifierEndpoint mediated-by NotificationDeliveryChannel of NotificationService {
+  property serviceId: String;
+  property lastNotifiedInitiatorId: String;
+  property lastNotifiedParticipantId: String;
+}
+
+relator NotificationDeliveryChannel mediates (NotifierEndpoint, MeetingInitiator) {
+  identity: deliveryId;
+  property deliveryId: String;
+  property message: String;
+
+  invariants {
+    self.deliveryId <> null;
+    self.message <> null;
+  }
+
+  event deliverNotification(targetId: String, content: String) {
+    pre: targetId <> null;
+    pre: content <> null;
+    post: self.message = content;
+    modifies: self.message;
+  }
+}
+
+// ─── Data Flow: SchedulingFlow ──────────────────────────────────────────
+happening SchedulingFlow {
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy = 'initiator_request';
+    (self.outcome = 'confirmed' or self.outcome = 'conflict_detected' or self.outcome = 'pending');
+  }
+
+  event startFlow(requestId: String, rangeStart: Real, rangeEnd: Real)
+    refines meeting_scheduler_requirements::MeetingSchedulerSystem.requestMeeting {
+    pre: requestId <> null;
+    pre: rangeStart >= 0.0;
+    pre: rangeEnd >= rangeStart;
+    post: self.outcome = 'pending';
+    modifies: self.outcome;
+  }
+
+  event completeSuccessful(proposedDate: Real)
+    refines meeting_scheduler_requirements::MeetingSchedulerSystem.confirmMeeting {
+    pre: proposedDate >= 0.0;
+    pre: self.outcome = 'pending';
+    post: self.outcome = 'confirmed';
+    modifies: self.outcome;
+  }
+
+  event completeConflict()
+    refines meeting_scheduler_requirements::MeetingSchedulerSystem.reportConflict {
+    pre: self.outcome = 'pending';
+    post: self.outcome = 'conflict_detected';
+    modifies: self.outcome;
+  }
+}
+
+// ─── Data Flow: UpdateFlow ───────────────────────────────────────────────
+happening UpdateFlow {
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy = 'participant_constraint_update';
+    self.outcome = 'constraints_updated';
+  }
+
+  event startUpdate()
+    refines meeting_scheduler_requirements::MeetingSchedulerSystem.updateConstraints {
+    pre: true;
+    post: self.outcome = 'constraints_updated';
+    modifies: self.outcome;
+  }
+}
+
+// ─── Explicit Relations ──────────────────────────────────────────────────
+relation coordinatorEndpointMediation: <<mediation>> from ConstraintIngestionChannel [1] to CoordinatorEndpoint [1];
+relation participantManagerEndpointMediation: <<mediation>> from ConstraintIngestionChannel [1] to ParticipantManagerEndpoint [1];
+relation notifierEndpointMediation: <<mediation>> from NotificationDeliveryChannel [1] to NotifierEndpoint [1];
+relation notificationDeliveryMediation: <<mediation>> from NotificationDeliveryChannel [1] to MeetingInitiator [1];

@@ -1,0 +1,54 @@
+schema "onto/0.1";
+namespace array_demo;
+
+// Minimal canonical example of Array<T, N> usage. Models picking
+// patterns from the few-shot corpus should copy this shape — never
+// flatten an N-element state into N scalar properties, and never try
+// to write inline initializers like `default [0.0, 0.0, …]`. Array
+// properties are auto-zero-initialized for Copy elements; for fancier
+// initial state, expose a constructor parameter (omit `internal`).
+
+// 3-axis IMU sample. The state vector is a flat 6-element Array
+// (3 gyro + 3 accel) — modeling it as a single Array<Real, 6>
+// keeps the Rust type `[f64; 6]` (stack-allocated, Copy) and lets
+// invariants quantify over all components in one clause.
+kind ImuSample {
+  identity: sampleId;
+
+  property sampleId: String;
+
+  // Tagged time in seconds since boot. Real, monotonic.
+  property t: Real;
+
+  // 6-axis flat state vector: [gx, gy, gz, ax, ay, az].
+  property state: Array<Real, 6>;
+
+  // 3×3 measurement covariance. Flat row-major matrix. Composed
+  // Array<Array<…>> lowers to `[[f64; 3]; 3]` in Rust.
+  property cov: Array<Array<Real, 3>, 3>;
+
+  invariants {
+    self.t >= 0.0;
+    // forAll quantifies over every element of the flat array.
+    self.state->forAll(v | v.isFinite());
+    // Nested forAll walks rows then columns of the matrix; the
+    // covariance diagonal must be non-negative AND every element
+    // finite. ontodls auto-emits .iter().copied() so the lambda
+    // bodies receive owned f64s, not references.
+    self.cov->forAll(row | row->forAll(c | c.isFinite()));
+  }
+
+  // Fusion event: returns whether the sample was accepted.
+  event integrate(dt: Real): Boolean {
+    pre:  dt > 0.0;
+    pre:  dt.isFinite();
+    // No need to repeat the invariants in post: they are
+    // auto-enforced at the wrapper boundary.
+    post: result = true or result = false;
+
+    modifies: self.t;
+    effects: Telemetry;
+    reads:   dt;
+    writes:  t;
+  }
+}

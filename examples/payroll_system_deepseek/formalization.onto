@@ -1,0 +1,156 @@
+schema "onto/0.1";
+namespace payroll_system_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// ─── Regulatory / Legal / Compliance Anchors (categories) ────────────────
+// These are PASSIVE documentary anchors — they govern the project, not the
+// runtime system. They are categories with their own invariants.
+
+category IrrsRegistroLaboral {
+  // @assumption ASSUME-IR1: The system operates under Mexico's IMSS/INFONAVIT
+  // reporting framework. No US-specific FLSA/IRS preempt.
+  property imssRegistrationNumber: String;
+  property infonavitRegistrationNumber: String;
+  invariants {
+    self.imssRegistrationNumber <> null;
+    self.infonavitRegistrationNumber <> null;
+  }
+}
+
+category LaborLawCompliant {
+  // @assumption ASSUME-LL1: Federal labor law mandates minimum wage floor;
+  // no state-level overtime preemptions apply.
+  // @assumption ASSUME-LL2: All deductions are itemized; no aggregate cap
+  // other than net >= 0 (enforced by event guard at Requirements).
+  property legalMinWage: Real;
+  property maxWeeklyRegularHours: Integer;
+  invariants {
+    self.legalMinWage > 0.0;
+    self.maxWeeklyRegularHours >= 40;
+  }
+}
+
+category DataPrivacyCompliant {
+  // @assumption ASSUME-DP1: Paystub data is PII subject to LFPDPPP (Mexico).
+  // Retention is out of scope (documentary only).
+  property privacyPolicyVersion: String;
+  property dataRetentionDays: Integer;
+  invariants {
+    self.privacyPolicyVersion <> null;
+    self.dataRetentionDays > 0;
+  }
+}
+
+// ─── Physical / Domain-Logical Invariant Categories (member-quantified) ──
+// Enforces that timesheet hours are physically plausible.
+category PhysicallyPlausibleTimesheets where bearer: Timesheet {
+  invariants {
+    bearer.regularHours >= 0.0;
+    bearer.overtimeHours >= 0.0;
+    bearer.regularHours + bearer.overtimeHours <= 168.0;  // max hours in a week (24*7)
+  }
+}
+
+// Enforces that deduction amounts can never exceed gross pay in aggregate.
+category DeductionPlausibility where bearer: Deduction {
+  invariants {
+    bearer.amount >= 0.0;
+  }
+}
+
+// ─── Active Business Rules (events that reject/halt) ─────────────────────
+// These events are ADDED by the Formalization subkind — they do NOT override
+// any parent event from Requirements. They guard the system against
+// regulatory violations at runtime.
+//
+// IMPORTANT: A subkind can ONLY specialize a kind or another subkind, NOT
+// a category. Therefore PayrollSystem (a kind that already specializes
+// OvertimeCompliance, ImmutablePaystub, PayrollIntegrity) is the only parent.
+// The category invariants from Formalization are enforced by making them
+// properties of PayrollSystemFormalized and writing the same invariants
+// directly on this subkind.
+
+subkind PayrollSystemFormalized specializes PayrollSystem {
+  // Regulatory documentary properties (from IrrsRegistroLaboral)
+  property imssRegistrationNumber: String;
+  property infonavitRegistrationNumber: String;
+  invariants {
+    self.imssRegistrationNumber <> null;
+    self.infonavitRegistrationNumber <> null;
+  }
+
+  // Regulatory documentary properties (from LaborLawCompliant)
+  property legalMinWage: Real;
+  property maxWeeklyRegularHours: Integer;
+  invariants {
+    self.legalMinWage > 0.0;
+    self.maxWeeklyRegularHours >= 40;
+  }
+
+  // Regulatory documentary properties (from DataPrivacyCompliant)
+  property privacyPolicyVersion: String;
+  property dataRetentionDays: Integer;
+  invariants {
+    self.privacyPolicyVersion <> null;
+    self.dataRetentionDays > 0;
+  }
+
+  // ─── Active guard: Reject timesheet with implausible hours ─────────────
+  // If a signed timesheet has out-of-bounds hours, the event prevents
+  // it from entering the payroll run. This is a REJECTION — no state change.
+  event rejectImplausibleTimesheet(timesheet: Timesheet) {
+    pre: timesheet.isSigned = true;
+    pre: timesheet.regularHours < 0.0 or timesheet.overtimeHours < 0.0
+         or timesheet.regularHours + timesheet.overtimeHours > 168.0;
+    // pure rejection — no modifies clause, no state change
+  }
+
+  // ─── Active guard: Reject deduction that exceeds gross pay ────────────
+  // This event fires BEFORE applyDeductions runs, preventing the deduction
+  // from being applied.
+  event rejectExcessiveDeduction(grossPay: Real, deduction: Deduction) {
+    pre: deduction.amount > grossPay;
+    // pure rejection — no modifies clause
+  }
+
+  // ─── Active guard: Reject paystub issue for unregistered employee ─────
+  // IMSS/INFONAVIT compliance requires every employee to have valid
+  // registrations. This guard fires BEFORE issuePaystub.
+  event rejectUnregisteredEmployee(employee: Employee) {
+    pre: employee.employeeId = null;  // placeholder — real check would use a
+                                      // property like employee.imssRegistered
+    // pure rejection
+  }
+
+  // ─── Active guard: Reject pay period authorization for past-due periods ─
+  // Regulatory rule: cannot authorize a period whose end date has already
+  // passed (the period is "stale").
+  // Use a numeric representation to compare dates since String comparison
+  // with '<' is not supported in OCL. We compare year-month-day as an
+  // Integer (YYYYMMDD format) instead.
+  event rejectStalePayPeriod(periodEndDateInt: Integer, referenceDateInt: Integer) {
+    pre: periodEndDateInt < referenceDateInt;
+    // pure rejection
+  }
+}
+
+// ─── Formal Assumption Record (documentary PASSIVE — not events) ─────────
+// @assumption ASSUME-F1: The external payroll tax engine (SAT API) is assumed
+// correct; the system does not recompute tax tables.
+// @assumption ASSUME-F2: All deduction types have canonical ordering
+// defined outside this model (pre-tax → tax → post-tax).
+// @assumption ASSUME-F3: Negative net pay causes HR ticket creation, not
+// automatic reversal — the reversal is a separate human workflow.
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property assumptionCode: String;   // e.g. 'ASSUME-F1'
+  property description: String;
+  property artifactTimestamp: String; // ISO date when recorded
+  invariants {
+    self.assumptionId <> null;
+    self.assumptionCode <> null;
+    self.description <> null;
+  }
+}

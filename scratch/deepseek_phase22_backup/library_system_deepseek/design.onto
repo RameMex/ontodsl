@@ -1,0 +1,476 @@
+schema "onto/0.1";
+namespace library_system_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =========================================================================
+// DESIGN STAGE – Library Lending System
+// =========================================================================
+
+// ─── Component 1: CopyManager ────────────────────────────────────────────
+kind CopyManager {
+  identity: copyManagerId;
+  property copyManagerId: String;
+  property copies: Set<BookCopy>;
+  invariants {
+    self.copyManagerId <> null;
+    self.copies->forAll(c |
+      c.copyStatus = 'AVAILABLE' or c.copyStatus = 'LOANED' or c.copyStatus = 'RESERVED'
+    );
+  }
+  event markCopyLoaned(copyId: String) {
+    pre: self.copies->exists(c | c.copyId = copyId);
+    pre: self.copies->forAll(c |
+      if c.copyId = copyId then c.copyStatus = 'AVAILABLE' else true endif
+    );
+    post: self.copies->forAll(c |
+      if c.copyId = copyId then c.copyStatus = 'LOANED' else true endif
+    );
+    modifies: self.copies;
+  }
+  event markCopyReserved(copyId: String) {
+    pre: self.copies->exists(c | c.copyId = copyId);
+    pre: self.copies->forAll(c |
+      if c.copyId = copyId then c.copyStatus = 'LOANED' else true endif
+    );
+    post: self.copies->forAll(c |
+      if c.copyId = copyId then c.copyStatus = 'RESERVED' else true endif
+    );
+    modifies: self.copies;
+  }
+  event markCopyAvailable(copyId: String) {
+    pre: self.copies->exists(c | c.copyId = copyId);
+    pre: self.copies->forAll(c |
+      if c.copyId = copyId then
+        (c.copyStatus = 'LOANED' or c.copyStatus = 'RESERVED')
+      else true endif
+    );
+    post: self.copies->forAll(c |
+      if c.copyId = copyId then c.copyStatus = 'AVAILABLE' else true endif
+    );
+    modifies: self.copies;
+  }
+  query isCopyAvailable(copyId: String): Boolean {
+    body: self.copies->exists(c | c.copyId = copyId and c.copyStatus = 'AVAILABLE');
+  }
+  event registerCopy(title: String, isbn: String): BookCopy
+    refines library_system_requirements::LibrarySystem.checkout {
+    pre: title <> null;
+    pre: isbn <> null;
+    post: result.copyStatus = 'AVAILABLE';
+    post: self.copies->includes(result);
+    modifies: self.copies;
+  }
+}
+
+// ─── Component 2: LoanManager ────────────────────────────────────────────
+kind LoanManager {
+  identity: loanManagerId;
+  property loanManagerId: String;
+  property loans: Set<LoanRecord>;
+  property dailyLateFeeRate: Real;
+  invariants {
+    self.loanManagerId <> null;
+    self.dailyLateFeeRate >= 0.0;
+    self.loans->forAll(l1 |
+      self.loans->forAll(l2 |
+        l1.loanId <> l2.loanId and l1.copyId = l2.copyId
+          implies (l1.returnDate <> null or l2.returnDate <> null)
+      )
+    );
+  }
+  event createLoan(copyId: String, borrowerId: String, dueDate: String): LoanRecord
+    refines library_system_requirements::LibrarySystem.checkout {
+    pre: copyId <> null;
+    pre: borrowerId <> null;
+    pre: dueDate <> null;
+    pre: not self.loans->exists(l | l.copyId = copyId and l.returnDate = null);
+    post: result.copyId = copyId;
+    post: result.borrowerId = borrowerId;
+    post: result.dueDate = dueDate;
+    post: result.returnDate = null;
+    post: result.lateFee = 0.0;
+    post: result.startDate <> null;
+    post: self.loans->includes(result);
+    modifies: self.loans;
+  }
+  event recordReturn(loanId: String, returnDate: String): Real
+    refines library_system_requirements::LibrarySystem.returnCopy {
+    pre: self.loans->exists(l | l.loanId = loanId);
+    pre: self.loans->forAll(l |
+      if l.loanId = loanId then l.returnDate = null else true endif
+    );
+    pre: returnDate <> null;
+    post: self.loans->forAll(l |
+      if l.loanId = loanId then
+        l.returnDate = returnDate
+      else true endif
+    );
+    post: self.loans->forAll(l |
+      if l.loanId = loanId then
+        if returnDate <> l.dueDate then
+          l.lateFee = self.dailyLateFeeRate
+        else
+          l.lateFee = 0.0
+        endif
+      else true endif
+    );
+    post: result >= 0.0;
+    modifies: self.loans;
+  }
+  query findActiveLoan(copyId: String): LoanRecord {
+    body: self.loans->exists(l | l.copyId = copyId and l.returnDate = null);
+  }
+}
+
+// ─── Component 3: BorrowerManager ────────────────────────────────────────
+kind BorrowerManager {
+  identity: borrowerManagerId;
+  property borrowerManagerId: String;
+  property borrowers: Set<BorrowerAgent>;
+  invariants {
+    self.borrowerManagerId <> null;
+    self.borrowers->forAll(b | b.outstandingFees >= 0.0);
+  }
+  event registerBorrower(borrowerId: String, name: String, email: String): BorrowerAgent {
+    pre: borrowerId <> null;
+    pre: name <> null;
+    pre: email <> null;
+    pre: not self.borrowers->exists(b | b.borrowerId = borrowerId);
+    post: result.borrowerId = borrowerId;
+    post: result.name = name;
+    post: result.email = email;
+    post: result.outstandingFees = 0.0;
+    post: self.borrowers->includes(result);
+    modifies: self.borrowers;
+  }
+  query hasOutstandingFees(borrowerId: String): Boolean {
+    body: self.borrowers->exists(b |
+      b.borrowerId = borrowerId and b.outstandingFees > 0.0
+    );
+  }
+  event accrueLateFee(borrowerId: String, feeAmount: Real)
+    refines library_system_requirements::LibrarySystem.returnCopy,
+            library_system_formalization::LibrarySystemFormalized.enforceLateFeeOnReturn {
+    pre: self.borrowers->exists(b | b.borrowerId = borrowerId);
+    pre: feeAmount >= 0.0;
+    post: self.borrowers->forAll(b |
+      if b.borrowerId = borrowerId then
+        b.outstandingFees = b.outstandingFees@pre + feeAmount
+      else true endif
+    );
+    modifies: self.borrowers;
+  }
+  event deductFees(borrowerId: String, amount: Real)
+    refines library_system_requirements::LibrarySystem.payFees {
+    pre: self.borrowers->exists(b | b.borrowerId = borrowerId);
+    pre: amount >= 0.0;
+    pre: self.borrowers->forAll(b |
+      if b.borrowerId = borrowerId then b.outstandingFees >= amount else true endif
+    );
+    post: self.borrowers->forAll(b |
+      if b.borrowerId = borrowerId then
+        b.outstandingFees = b.outstandingFees@pre - amount
+      else true endif
+    );
+    modifies: self.borrowers;
+  }
+  query getOutstandingFees(borrowerId: String): Real {
+    body: self.borrowers->exists(b | b.borrowerId = borrowerId and b.outstandingFees >= 0.0);
+  }
+}
+
+// ─── Component 4: ReservationManager ─────────────────────────────────────
+kind ReservationManager {
+  identity: reservationManagerId;
+  property reservationManagerId: String;
+  property reservations: Set<ReservationEntry>;
+  property maxWaitDays: Integer;
+  invariants {
+    self.reservationManagerId <> null;
+    self.maxWaitDays = 7;
+  }
+  event placeReservation(copyId: String, borrowerId: String, placedDate: String): ReservationEntry
+    refines library_system_requirements::LibrarySystem.placeReservation {
+    pre: copyId <> null;
+    pre: borrowerId <> null;
+    pre: placedDate <> null;
+    pre: not self.reservations->exists(r |
+      r.copyId = copyId and r.borrowerId = borrowerId and r.reservationStatus = 'ACTIVE'
+    );
+    post: result.copyId = copyId;
+    post: result.borrowerId = borrowerId;
+    post: result.placedDate = placedDate;
+    post: result.availableSinceDate = null;
+    post: result.reservationStatus = 'ACTIVE';
+    post: self.reservations->includes(result);
+    modifies: self.reservations;
+  }
+  event markReservationAvailable(reservationId: String, availableSinceDate: String) {
+    pre: self.reservations->exists(r | r.reservationId = reservationId);
+    pre: self.reservations->forAll(r |
+      if r.reservationId = reservationId then r.reservationStatus = 'ACTIVE' else true endif
+    );
+    pre: availableSinceDate <> null;
+    post: self.reservations->forAll(r |
+      if r.reservationId = reservationId then
+        r.availableSinceDate = availableSinceDate
+      else true endif
+    );
+    modifies: self.reservations;
+  }
+  event fulfillReservation(reservationId: String): LoanRecord
+    refines library_system_requirements::LibrarySystem.fulfillReservation {
+    pre: self.reservations->exists(r | r.reservationId = reservationId);
+    pre: self.reservations->forAll(r |
+      if r.reservationId = reservationId then
+        r.reservationStatus = 'ACTIVE' and r.availableSinceDate <> null
+      else true endif
+    );
+    post: self.reservations->forAll(r |
+      if r.reservationId = reservationId then
+        r.reservationStatus = 'FULFILLED'
+      else true endif
+    );
+    post: result <> null;
+    modifies: self.reservations;
+  }
+  event expireReservation(reservationId: String)
+    refines library_system_requirements::LibrarySystem.expireStaleReservations {
+    pre: self.reservations->exists(r | r.reservationId = reservationId);
+    pre: self.reservations->forAll(r |
+      if r.reservationId = reservationId then
+        r.reservationStatus = 'ACTIVE'
+      else true endif
+    );
+    post: self.reservations->forAll(r |
+      if r.reservationId = reservationId then
+        r.reservationStatus = 'EXPIRED'
+      else true endif
+    );
+    modifies: self.reservations;
+  }
+  query findActiveReservation(copyId: String): ReservationEntry {
+    body: self.reservations->exists(r | r.copyId = copyId and r.reservationStatus = 'ACTIVE');
+  }
+}
+
+// ─── Component 5: PaymentProcessor ───────────────────────────────────────
+kind PaymentProcessor {
+  identity: paymentProcessorId;
+  property paymentProcessorId: String;
+  property paymentLog: Set<String>;
+  invariants {
+    self.paymentProcessorId <> null;
+  }
+  event processPayment(borrowerId: String, amount: Real): Boolean
+    refines library_system_requirements::LibrarySystem.payFees {
+    pre: borrowerId <> null;
+    pre: amount >= 0.0;
+    post: result = true;
+    modifies: self.paymentLog;
+  }
+}
+
+// =========================================================================
+// INTERFACES (Relators) — mediate between two component roles
+// =========================================================================
+
+role LoanManagerRole mediated-by LoanCopyAssignment of LoanManager {
+  property loanManagerId: String;
+}
+
+role CopyManagerRole mediated-by LoanCopyAssignment of CopyManager {
+  property copyManagerId: String;
+}
+
+relator LoanCopyAssignment mediates (LoanManagerRole, CopyManagerRole) {
+  identity: assignmentId;
+  property assignmentId: String;
+  property loanManagerRole: LoanManagerRole;
+  property copyManagerRole: CopyManagerRole;
+  invariants {
+    self.assignmentId <> null;
+    self.loanManagerRole <> null;
+    self.copyManagerRole <> null;
+  }
+  event associateLoanWithCopy(loanId: String, copyId: String) {
+    pre: loanId <> null;
+    pre: copyId <> null;
+    post: true;
+  }
+}
+
+role ReservationManagerRole mediated-by ReservationCopyAssignment of ReservationManager {
+  property reservationManagerId: String;
+}
+
+role CopyManagerRole2 mediated-by ReservationCopyAssignment of CopyManager {
+  property copyManagerId: String;
+}
+
+relator ReservationCopyAssignment mediates (ReservationManagerRole, CopyManagerRole2) {
+  identity: assignmentId;
+  property assignmentId: String;
+  property reservationManagerRole: ReservationManagerRole;
+  property copyManagerRole: CopyManagerRole2;
+  invariants {
+    self.assignmentId <> null;
+    self.reservationManagerRole <> null;
+    self.copyManagerRole <> null;
+  }
+}
+
+role LoanManagerRole2 mediated-by BorrowerLoanRelator of LoanManager {
+  property loanManagerId: String;
+}
+
+role BorrowerManagerRole mediated-by BorrowerLoanRelator of BorrowerManager {
+  property borrowerManagerId: String;
+}
+
+relator BorrowerLoanRelator mediates (LoanManagerRole2, BorrowerManagerRole) {
+  identity: assignmentId;
+  property assignmentId: String;
+  property loanManagerRole: LoanManagerRole2;
+  property borrowerManagerRole: BorrowerManagerRole;
+  invariants {
+    self.assignmentId <> null;
+    self.loanManagerRole <> null;
+    self.borrowerManagerRole <> null;
+  }
+}
+
+role PaymentProcessorRole mediated-by PaymentBorrowerRelator of PaymentProcessor {
+  property paymentProcessorId: String;
+}
+
+role BorrowerManagerRole2 mediated-by PaymentBorrowerRelator of BorrowerManager {
+  property borrowerManagerId: String;
+}
+
+relator PaymentBorrowerRelator mediates (PaymentProcessorRole, BorrowerManagerRole2) {
+  identity: assignmentId;
+  property assignmentId: String;
+  property paymentProcessorRole: PaymentProcessorRole;
+  property borrowerManagerRole: BorrowerManagerRole2;
+  invariants {
+    self.assignmentId <> null;
+    self.paymentProcessorRole <> null;
+    self.borrowerManagerRole <> null;
+  }
+}
+
+// =========================================================================
+// DATA FLOWS (Happenings) — end-to-end stories
+// =========================================================================
+
+happening LoanFlow {
+  identity: flowId;
+  property flowId: String;
+  property stepStatus: String;
+  invariants {
+    self.flowId <> null;
+    self.stepStatus = 'REQUESTED'
+      or self.stepStatus = 'ELIGIBILITY_CHECKED'
+      or self.stepStatus = 'LOAN_CREATED'
+      or self.stepStatus = 'COPY_TRANSITIONED';
+  }
+}
+
+happening LoanRequestStep specializes LoanFlow {
+  property borrowerId: String;
+  property copyId: String;
+}
+
+happening BorrowerFeeCheckStep specializes LoanFlow {
+  property borrowerId: String;
+  property feesCleared: Boolean;
+}
+
+happening CopyAvailabilityCheckStep specializes LoanFlow {
+  property copyId: String;
+  property isAvailable: Boolean;
+}
+
+happening LoanCreationStep specializes LoanFlow {
+  property loanRecord: LoanRecord;
+}
+
+happening CopyTransitionStep specializes LoanFlow {
+  property copyId: String;
+  property newStatus: String;
+}
+
+happening ReturnFlow {
+  identity: flowId;
+  property flowId: String;
+  property stepStatus: String;
+  invariants {
+    self.flowId <> null;
+    self.stepStatus = 'RETURN_RECORDED'
+      or self.stepStatus = 'LATE_FEE_CALCULATED'
+      or self.stepStatus = 'COPY_TRANSITIONED'
+      or self.stepStatus = 'RESERVATION_CHECKED';
+  }
+}
+
+happening ReturnRecordingStep specializes ReturnFlow {
+  property loanId: String;
+  property returnDate: String;
+}
+
+happening LateFeeCalculationStep specializes ReturnFlow {
+  property loanId: String;
+  property feeAmount: Real;
+}
+
+happening CopyStatusUpdateStep specializes ReturnFlow {
+  property copyId: String;
+  property newStatus: String;
+}
+
+happening ReservationCheckStep specializes ReturnFlow {
+  property copyId: String;
+  property hasActiveReservation: Boolean;
+}
+
+happening ReservationFlow {
+  identity: flowId;
+  property flowId: String;
+  property stepStatus: String;
+  invariants {
+    self.flowId <> null;
+    self.stepStatus = 'PLACED'
+      or self.stepStatus = 'MARKED_AVAILABLE'
+      or self.stepStatus = 'FULFILLED'
+      or self.stepStatus = 'EXPIRED';
+  }
+}
+
+happening ReservationPlacementStep specializes ReservationFlow {
+  property copyId: String;
+  property borrowerId: String;
+}
+
+happening ReservationFulfillmentStep specializes ReservationFlow {
+  property reservationId: String;
+}
+
+happening ReservationExpirationStep specializes ReservationFlow {
+  property reservationId: String;
+}
+
+// =========================================================================
+// EXPLICIT RELATIONS (UFO-A stereotypes)
+// =========================================================================
+
+relation loanToCopyMed: <<mediation>> from LoanManager [1] to CopyManager [1];
+relation reservationToCopyMed: <<mediation>> from ReservationManager [1] to CopyManager [1];
+relation loanToBorrowerMed: <<mediation>> from LoanManager [1] to BorrowerManager [1];
+relation paymentToBorrowerMed: <<mediation>> from PaymentProcessor [1] to BorrowerManager [1];
+relation copyMember: <<memberOf>> from BookCopy [1..*] to CopyManager [1];
+relation loanMember: <<memberOf>> from LoanRecord [1..*] to LoanManager [1];
+relation reservationMember: <<memberOf>> from ReservationEntry [1..*] to ReservationManager [1];
+relation borrowerMember: <<memberOf>> from BorrowerAgent [1..*] to BorrowerManager [1];

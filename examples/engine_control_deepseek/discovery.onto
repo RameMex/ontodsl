@@ -1,0 +1,146 @@
+schema "onto/0.1";
+namespace engine_control_discovery;
+
+// ─── Stakeholders ─────────────────────────────────────────────────────────
+agent Pilot {
+  identity: pilotId;
+  property pilotId: String;
+  property name: String;
+  property certification: String;
+}
+
+agent Airline {
+  identity: airlineId;
+  property airlineId: String;
+  property name: String;
+  property fleetSize: Integer;
+}
+
+agent MaintenanceProvider {
+  identity: maintenanceId;
+  property maintenanceId: String;
+  property name: String;
+}
+
+agent Passengers {
+  identity: passengerId;
+  property passengerId: String;
+}
+
+// The vendor/dev team — debitor of every stakeholder commitment.
+// The engine control system kind does not exist yet at Discovery.
+agent EngineVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+}
+
+// ─── Hard Goals (Commitments) ────────────────────────────────────────────
+// GOAL-1: Keep engine within safe operating limits.
+// The predicate references system-visible properties that will exist
+// on EngineControlSystem in the Requirements stage.
+commitment OverspeedPrevention
+  debitor: EngineVendor
+  creditor: Pilot {
+    identity: commitmentId;
+    property commitmentId: String;
+    property maxSafeSpeed: Real;
+    predicate: self.maxSafeSpeed > 0.0;
+  }
+
+// GOAL-2: Manage ignition, thrust, and reverser correctly across flight phases.
+// The predicate captures the non-negotiable: reverser only on ground.
+commitment ThrustManagement
+  debitor: EngineVendor
+  creditor: Pilot {
+    identity: commitmentId;
+    property commitmentId: String;
+    property onGround: Boolean;
+    property reverserCommanded: Boolean;
+    property reverserEnabled: Boolean;
+    predicate: self.reverserEnabled implies (self.onGround and self.reverserCommanded);
+  }
+
+// GOAL-3: Tolerate sensor faults without losing control.
+// The predicate requires that on any sensor fault, a modelled value is available.
+commitment SensorFaultTolerance
+  debitor: EngineVendor
+  creditor: MaintenanceProvider {
+    identity: commitmentId;
+    property commitmentId: String;
+    property faultDetected: Boolean;
+    property modelledValueAvailable: Boolean;
+    predicate: self.faultDetected implies self.modelledValueAvailable;
+  }
+
+// ─── Glossary Terms (Sortals) ────────────────────────────────────────────
+kind Overspeed {
+  identity: overspeedId;
+  property overspeedId: String;
+  property description: String;
+  property certifiedMaxSpeedReached: Boolean;
+}
+
+kind ContinuousIgnition {
+  identity: ignitionId;
+  property ignitionId: String;
+  property modeName: String;
+  property enabled: Boolean;
+}
+
+kind ThrustReverser {
+  identity: reverserId;
+  property reverserId: String;
+  property isDeployed: Boolean;
+}
+
+kind ModelledValue {
+  identity: modelledValueId;
+  property modelledValueId: String;
+  property sensorName: String;
+  property estimatedValue: Real;
+}
+
+// ─── Placeholder Agent for Stakeholder Concern (commitment references) ──
+// The Pilot is already declared above; no additional agent needed.
+
+// ─── Domain Stories (Happenings) with identity ──────────────────────────
+happening OverspeedDetectionFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+happening IgnitionManagementFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+happening ReverserDeploymentFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+happening SensorFaultHandlingFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}

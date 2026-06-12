@@ -1,0 +1,525 @@
+schema "onto/0.1";
+namespace smart_thermostat_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// =====================================================================
+// Design stage — Smart Thermostat HVAC Controller
+//
+// Decomposition of SmartThermostatSystem into four sibling components:
+//
+//   1. TemperatureSensorComponent  — reads and validates sensor input
+//   2. SetpointControllerComponent — manages user setpoint + clamping
+//   3. ActuatorDriverComponent     — drives HEAT/COOL/OFF with cycle guard
+//   4. DisplayComponent            — mirrors system state to the user
+//
+// Inter-component interfaces are modeled as relators mediating role
+// pairs. End-to-end cross-component stories are modeled as happenings.
+//
+// Every component event carries a 'refines:' clause pointing to the
+// Requirements or Formalization parent it implements, enabling
+// Obligation 4 / W38 / W39 auditing.
+// =====================================================================
+
+// ─── 1. TEMPERATURE SENSOR COMPONENT ────────────────────────────────────
+//
+// Owns: sensor reading, plausibility window, raw clock input.
+// Responsibilities: ingest raw Fahrenheit values, tag them plausible/
+// implausible, own the currentMinute clock as received from the
+// environment.
+
+kind TemperatureSensorComponent {
+  identity: sensorComponentId;
+  property sensorComponentId: String;
+
+  // Sensor state
+  property currentTempF: Real;
+  property sensorPlausible: Boolean;
+  property plausibleMinF: Real;
+  property plausibleMaxF: Real;
+  property currentMinute: Real;
+
+  // Safe-halt flag owned here — sensor faults originate here
+  property sensorAlertActive: Boolean;
+
+  invariants {
+    self.sensorComponentId <> null;
+    self.plausibleMinF = -40.0;
+    self.plausibleMaxF = 150.0;
+    self.plausibleMaxF > self.plausibleMinF;
+    self.currentMinute >= 0.0;
+    // If implausible, alert must be raised
+    self.sensorPlausible = true or self.sensorAlertActive = true;
+  }
+
+  // ── ingestReading ────────────────────────────────────────────────────
+  // Implements FR-2 (processSensorReading) + BR-2 (rejectImplausibleReading).
+  // For a plausible reading: updates currentTempF, clears alert.
+  // For an implausible reading: retains old currentTempF, raises alert.
+  event ingestReading(readingF: Real, atMinute: Real)
+    refines smart_thermostat_requirements::SmartThermostatSystem.processSensorReading,
+            smart_thermostat_formalization::SmartThermostatSystemFormalized.rejectImplausibleReading {
+    pre: atMinute >= self.currentMinute;
+    post: self.currentMinute = atMinute;
+    post: self.sensorPlausible =
+            (readingF >= self.plausibleMinF and readingF <= self.plausibleMaxF);
+    post: if (readingF >= self.plausibleMinF and readingF <= self.plausibleMaxF)
+          then self.currentTempF = readingF
+          else self.currentTempF = self.currentTempF@pre
+          endif;
+    post: if not (readingF >= self.plausibleMinF and readingF <= self.plausibleMaxF)
+          then self.sensorAlertActive = true
+          else self.sensorAlertActive = false
+          endif;
+    modifies: self.currentTempF, self.sensorPlausible,
+              self.sensorAlertActive, self.currentMinute;
+  }
+
+  // ── clearSensorAlert ────────────────────────────────────────────────
+  // Implements FR-6 (clearSafeHalt) from Requirements.
+  // An authorized actor provides a verified reading to restore normal
+  // operation.
+  event clearSensorAlert(verifiedReadingF: Real, atMinute: Real)
+    refines smart_thermostat_requirements::SmartThermostatSystem.clearSafeHalt {
+    pre: self.sensorAlertActive = true;
+    pre: verifiedReadingF >= self.plausibleMinF;
+    pre: verifiedReadingF <= self.plausibleMaxF;
+    pre: atMinute >= self.currentMinute;
+    post: self.sensorPlausible = true;
+    post: self.sensorAlertActive = false;
+    post: self.currentTempF = verifiedReadingF;
+    post: self.currentMinute = atMinute;
+    modifies: self.sensorPlausible, self.sensorAlertActive,
+              self.currentTempF, self.currentMinute;
+  }
+}
+
+// ─── 2. SETPOINT CONTROLLER COMPONENT ───────────────────────────────────
+//
+// Owns: user-requested setpoint, clamped setpoint, safe-range limits.
+// Responsibilities: accept user requests, clamp to [40, 90] °F, expose
+// clampedSetpointF for the actuator driver to consume.
+
+kind SetpointControllerComponent {
+  identity: setpointControllerId;
+  property setpointControllerId: String;
+
+  property requestedSetpointF: Real;
+  property clampedSetpointF: Real;
+  property safeMinTempF: Real;
+  property safeMaxTempF: Real;
+
+  invariants {
+    self.setpointControllerId <> null;
+    self.safeMinTempF = 40.0;
+    self.safeMaxTempF = 90.0;
+    self.clampedSetpointF >= self.safeMinTempF;
+    self.clampedSetpointF <= self.safeMaxTempF;
+  }
+
+  // ── updateSetpoint ───────────────────────────────────────────────────
+  // Implements FR-1 (adjustSetpoint).
+  // Clamps the user-requested temperature into [safeMinTempF, safeMaxTempF].
+  event updateSetpoint(requestedF: Real, sensorOk: Boolean, alertActive: Boolean)
+    refines smart_thermostat_requirements::SmartThermostatSystem.adjustSetpoint,
+            smart_thermostat_formalization::SmartThermostatSystemFormalized.rejectSetpointDuringSafeHalt {
+    pre: sensorOk = true;
+    pre: not alertActive;
+    post: self.requestedSetpointF = requestedF;
+    post: self.clampedSetpointF =
+            if requestedF < self.safeMinTempF then self.safeMinTempF
+            else if requestedF > self.safeMaxTempF then self.safeMaxTempF
+            else requestedF
+            endif endif;
+    post: self.clampedSetpointF >= self.safeMinTempF;
+    post: self.clampedSetpointF <= self.safeMaxTempF;
+    modifies: self.requestedSetpointF, self.clampedSetpointF;
+  }
+
+  // ── rejectSetpointWhileHalted ────────────────────────────────────────
+  // Implements BR-4 (rejectSetpointDuringSafeHalt).
+  // While the system is in safe halt the setpoint is frozen.
+  event rejectSetpointWhileHalted(requestedF: Real)
+    refines smart_thermostat_formalization::SmartThermostatSystemFormalized.rejectSetpointDuringSafeHalt {
+    pre: requestedF <> requestedF or self.clampedSetpointF >= self.safeMinTempF;
+    post: self.clampedSetpointF = self.clampedSetpointF@pre;
+    post: self.requestedSetpointF = self.requestedSetpointF@pre;
+    modifies: self.clampedSetpointF, self.requestedSetpointF;
+  }
+}
+
+// ─── 3. ACTUATOR DRIVER COMPONENT ───────────────────────────────────────
+//
+// Owns: actuatorSignal, lastTransitionMinute, minCycleIntervalMinutes.
+// Responsibilities: issue HEAT/COOL/OFF commands, enforce compressor
+// cycling guard, enforce safe-halt signal lock.
+
+kind ActuatorDriverComponent {
+  identity: actuatorDriverId;
+  property actuatorDriverId: String;
+
+  property actuatorSignal: String;
+  property lastTransitionMinute: Real;
+  property minCycleIntervalMinutes: Real;
+  property alertActive: Boolean;
+
+  invariants {
+    self.actuatorDriverId <> null;
+    self.minCycleIntervalMinutes = 5.0;
+    self.lastTransitionMinute >= 0.0;
+    // Safe-halt consistency: alertActive implies signal is OFF
+    self.alertActive = false or self.actuatorSignal = 'OFF';
+  }
+
+  // ── driveActuator ────────────────────────────────────────────────────
+  // Implements FR-3 (commandActuator).
+  // Compares currentTempF (passed in from sensor component) with
+  // clampedSetpointF (passed in from setpoint controller) and issues
+  // the appropriate signal, subject to the compressor cycle guard.
+  event driveActuator(currentTempF: Real, clampedSetpointF: Real, atMinute: Real)
+    refines smart_thermostat_requirements::SmartThermostatSystem.commandActuator,
+            smart_thermostat_formalization::SmartThermostatSystemFormalized.rejectUnsafeActuatorCommand {
+    pre: not self.alertActive;
+    pre: atMinute >= self.lastTransitionMinute;
+    pre: (atMinute - self.lastTransitionMinute) >= self.minCycleIntervalMinutes;
+    post: if currentTempF < clampedSetpointF
+          then self.actuatorSignal = 'HEAT'
+          else if currentTempF > clampedSetpointF
+          then self.actuatorSignal = 'COOL'
+          else self.actuatorSignal = 'OFF'
+          endif endif;
+    post: self.lastTransitionMinute = atMinute;
+    modifies: self.actuatorSignal, self.lastTransitionMinute;
+  }
+
+  // ── engageSafeHalt ───────────────────────────────────────────────────
+  // Implements FR-4 (rejectCommandDuringSafeHalt) and the safe-halt
+  // portion of FR-2. Called by the control-loop coordinator whenever
+  // the sensor component raises its alert.
+  event engageSafeHalt()
+    refines smart_thermostat_requirements::SmartThermostatSystem.rejectCommandDuringSafeHalt {
+    pre: not self.alertActive;
+    post: self.actuatorSignal = 'OFF';
+    post: self.alertActive = true;
+    modifies: self.actuatorSignal, self.alertActive;
+  }
+
+  // ── clearHalt ────────────────────────────────────────────────────────
+  // Called once the sensor component confirms a valid verified reading.
+  // Re-enables actuator driving.
+  event clearHalt()
+    refines smart_thermostat_requirements::SmartThermostatSystem.clearSafeHalt {
+    pre: self.alertActive = true;
+    post: self.alertActive = false;
+    modifies: self.alertActive;
+  }
+
+  // ── rejectEarlyCycle ─────────────────────────────────────────────────
+  // Implements BR-3 (rejectEarlyCompressorCycle).
+  // Explicit named rejection when the caller attempts a transition
+  // before the minimum interval has elapsed.
+  event rejectEarlyCycle(atMinute: Real)
+    refines smart_thermostat_formalization::SmartThermostatSystemFormalized.rejectEarlyCompressorCycle {
+    pre: (atMinute - self.lastTransitionMinute) < self.minCycleIntervalMinutes;
+    post: self.actuatorSignal = self.actuatorSignal@pre;
+    post: self.lastTransitionMinute = self.lastTransitionMinute@pre;
+    modifies: self.actuatorSignal, self.lastTransitionMinute;
+  }
+}
+
+// ─── 4. DISPLAY COMPONENT ───────────────────────────────────────────────
+//
+// Owns: display-side mirror of currentTempF, setpointF, actuatorSignal,
+//       plus the alertActive flag for the error indicator.
+// Responsibilities: maintain a coherent snapshot visible to the user
+// at all times; refresh on demand or triggered by control-loop events.
+
+kind DisplayComponent {
+  identity: displayComponentId;
+  property displayComponentId: String;
+
+  property displayCurrentTempF: Real;
+  property displaySetpointF: Real;
+  property displayActuatorSignal: String;
+  property displayAlertActive: Boolean;
+  property displayRefreshSeconds: Real;
+
+  invariants {
+    self.displayComponentId <> null;
+    self.displayRefreshSeconds > 0.0;
+  }
+
+  // ── refreshDisplay ───────────────────────────────────────────────────
+  // Implements FR-5 (refreshDisplay).
+  // Accepts current values from the other three components and mirrors
+  // them onto the display state properties.
+  event refreshDisplay(tempF: Real, setpointF: Real,
+                       actuatorSig: String, alertActive: Boolean)
+    refines smart_thermostat_requirements::SmartThermostatSystem.refreshDisplay {
+    pre: self.displayRefreshSeconds > 0.0;
+    post: self.displayCurrentTempF = tempF;
+    post: self.displaySetpointF = setpointF;
+    post: self.displayActuatorSignal = actuatorSig;
+    post: self.displayAlertActive = alertActive;
+    modifies: self.displayCurrentTempF, self.displaySetpointF,
+              self.displayActuatorSignal, self.displayAlertActive;
+  }
+
+  // ── showAlert ────────────────────────────────────────────────────────
+  // Called when the sensor component raises a safe-halt alert.
+  // Marks the display as showing the error state.
+  event showAlert()
+    refines smart_thermostat_requirements::SmartThermostatSystem.rejectCommandDuringSafeHalt {
+    pre: not self.displayAlertActive;
+    post: self.displayAlertActive = true;
+    post: self.displayActuatorSignal = 'OFF';
+    modifies: self.displayAlertActive, self.displayActuatorSignal;
+  }
+
+  // ── clearAlert ───────────────────────────────────────────────────────
+  // Called when safe halt is cleared; restores normal display state.
+  event clearAlert()
+    refines smart_thermostat_requirements::SmartThermostatSystem.clearSafeHalt {
+    pre: self.displayAlertActive = true;
+    post: self.displayAlertActive = false;
+    modifies: self.displayAlertActive;
+  }
+}
+
+// ─── ROLES ───────────────────────────────────────────────────────────────
+//
+// Each relator endpoint is a role of the component kind it mediates.
+
+role SensorEndpoint mediated-by SensorActuatorChannel of TemperatureSensorComponent {
+  property sensorComponentId: String;
+}
+
+role ActuatorEndpoint mediated-by SensorActuatorChannel of ActuatorDriverComponent {
+  property actuatorDriverId: String;
+}
+
+role SetpointProviderEndpoint mediated-by SetpointActuatorChannel of SetpointControllerComponent {
+  property setpointControllerId: String;
+}
+
+role ActuatorConsumerEndpoint mediated-by SetpointActuatorChannel of ActuatorDriverComponent {
+  property actuatorDriverId: String;
+}
+
+role SensorDisplayEndpoint mediated-by SensorDisplayChannel of TemperatureSensorComponent {
+  property sensorComponentId: String;
+}
+
+role DisplaySensorEndpoint mediated-by SensorDisplayChannel of DisplayComponent {
+  property displayComponentId: String;
+}
+
+role SetpointDisplayEndpoint mediated-by SetpointDisplayChannel of SetpointControllerComponent {
+  property setpointControllerId: String;
+}
+
+role DisplaySetpointEndpoint mediated-by SetpointDisplayChannel of DisplayComponent {
+  property displayComponentId: String;
+}
+
+role ActuatorDisplayEndpoint mediated-by ActuatorDisplayChannel of ActuatorDriverComponent {
+  property actuatorDriverId: String;
+}
+
+role DisplayActuatorEndpoint mediated-by ActuatorDisplayChannel of DisplayComponent {
+  property displayComponentId: String;
+}
+
+// ─── INTERFACE RELATORS ───────────────────────────────────────────────────
+//
+// One relator per directed interface between sibling components.
+// Each relator's invariants encode the contract between the two
+// endpoints (the "interface specification" in Design).
+
+// Interface: TemperatureSensorComponent ↔ ActuatorDriverComponent
+// Carries: sensorPlausible flag and sensorAlertActive to the actuator.
+relator SensorActuatorChannel mediates (SensorEndpoint, ActuatorEndpoint) {
+  identity: saChanId;
+  property saChanId: String;
+  property latestTempF: Real;
+  property latestPlausible: Boolean;
+  property latestAlertActive: Boolean;
+
+  invariants {
+    self.saChanId <> null;
+    // If reading is implausible, the channel must reflect alert
+    self.latestPlausible = true or self.latestAlertActive = true;
+  }
+}
+
+// Interface: SetpointControllerComponent ↔ ActuatorDriverComponent
+// Carries: clampedSetpointF for the actuator's heating/cooling decision.
+relator SetpointActuatorChannel mediates (SetpointProviderEndpoint, ActuatorConsumerEndpoint) {
+  identity: spActChanId;
+  property spActChanId: String;
+  property clampedSetpointF: Real;
+  property safeMinTempF: Real;
+  property safeMaxTempF: Real;
+
+  invariants {
+    self.spActChanId <> null;
+    self.clampedSetpointF >= self.safeMinTempF;
+    self.clampedSetpointF <= self.safeMaxTempF;
+    self.safeMinTempF = 40.0;
+    self.safeMaxTempF = 90.0;
+  }
+}
+
+// Interface: TemperatureSensorComponent ↔ DisplayComponent
+// Carries: current temperature and alert state for display.
+relator SensorDisplayChannel mediates (SensorDisplayEndpoint, DisplaySensorEndpoint) {
+  identity: sdChanId;
+  property sdChanId: String;
+  property displayTempF: Real;
+  property displayAlertActive: Boolean;
+
+  invariants {
+    self.sdChanId <> null;
+  }
+}
+
+// Interface: SetpointControllerComponent ↔ DisplayComponent
+// Carries: clamped setpoint for the display.
+relator SetpointDisplayChannel mediates (SetpointDisplayEndpoint, DisplaySetpointEndpoint) {
+  identity: spDispChanId;
+  property spDispChanId: String;
+  property displaySetpointF: Real;
+
+  invariants {
+    self.spDispChanId <> null;
+    self.displaySetpointF >= 40.0;
+    self.displaySetpointF <= 90.0;
+  }
+}
+
+// Interface: ActuatorDriverComponent ↔ DisplayComponent
+// Carries: actuator signal string and halt flag for display.
+relator ActuatorDisplayChannel mediates (ActuatorDisplayEndpoint, DisplayActuatorEndpoint) {
+  identity: adChanId;
+  property adChanId: String;
+  property displayActuatorSignal: String;
+  property displayAlertActive: Boolean;
+
+  invariants {
+    self.adChanId <> null;
+    self.displayActuatorSignal <> null;
+  }
+}
+
+// ─── HAPPENINGS (Cross-Component Data-Flow Stories) ──────────────────────
+
+// Story 1: Normal control cycle
+// Sensor → ActuatorDriver → Display (happy path, plausible reading)
+happening NormalControlCycleDesign {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}
+
+// Story 2: Sensor fault → safe halt propagation
+// Sensor raises alert → ActuatorDriver engages halt → Display shows error
+happening SensorFaultHaltDesign {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}
+
+// Story 3: User adjusts setpoint
+// User input → SetpointController clamps → Display mirrors new setpoint
+happening UserSetpointAdjustmentDesign {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}
+
+// Story 4: Safe-halt clearance by technician
+// Technician provides verified reading → Sensor clears alert →
+// ActuatorDriver re-enables → Display clears error
+happening SafeHaltClearanceDesign {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+    self.outcome <> null;
+  }
+}
+
+// ─── ARCHITECTURAL DECISION RECORDS (as Commitments) ─────────────────────
+
+agent DesignTeam {
+  identity: teamId;
+  property teamId: String;
+  property name: String;
+
+  invariants {
+    self.teamId <> null;
+    self.name <> null;
+  }
+}
+
+agent SystemArchitect {
+  identity: architectId;
+  property architectId: String;
+  property name: String;
+
+  invariants {
+    self.architectId <> null;
+    self.name <> null;
+  }
+}
+
+// ADR-1: Encapsulate compressor cycle guard inside ActuatorDriverComponent
+// so no other component can bypass it.
+commitment AdrCycleGuardEncapsulation
+  debitor: DesignTeam
+  creditor: SystemArchitect {
+    identity: adrId;
+    property adrId: String;
+    property rationale: String;
+    predicate: self.adrId <> null;
+  }
+
+// ADR-2: SetpointControllerComponent owns all clamping logic;
+// ActuatorDriverComponent receives only the already-clamped value.
+commitment AdrSetpointClampOwnership
+  debitor: DesignTeam
+  creditor: SystemArchitect {
+    identity: adrId;
+    property adrId: String;
+    property rationale: String;
+    predicate: self.adrId <> null;
+  }
+
+// ADR-3: DisplayComponent is purely reactive — it never initiates
+// control actions; it

@@ -1,0 +1,124 @@
+schema "onto/0.1";
+namespace ap_hal_chibios_i2c_spi;
+
+// Bus is the hardware abstraction for I2C and SPI bus access.
+kind Bus {
+  identity: busId;
+
+  property busId: String;
+  property enabled: Boolean;
+  property lastError: String internal default ""; // Stores last error message, empty string for no error.
+  property currentAddress: Integer internal default 0; // Current I2C slave address (7-bit)
+  property transferCount: Integer internal default 0; // Total bytes transferred on this bus
+
+  invariants {
+    self.busId <> null;
+    self.currentAddress >= 0;
+    self.currentAddress <= 127; // Valid I2C 7-bit addresses are 0-127
+    self.transferCount >= 0;
+  }
+
+  // Initializes the bus hardware. Returns true on success.
+  event init(): Boolean {
+    post: self.enabled = true;
+    post: self.lastError = "";
+    post: self.transferCount = 0;
+    post: result = true; // Assume initialization is always successful from a clean state.
+    modifies: self.enabled, self.lastError, self.transferCount;
+    effects: { Mutex };
+  }
+
+  // Disables the bus hardware. Returns true on success.
+  event disable(): Boolean {
+    pre: self.enabled = true;
+    post: self.enabled = false;
+    post: self.lastError = "";
+    post: result = true;
+    modifies: self.enabled, self.lastError;
+    effects: { Mutex };
+  }
+
+  // Sets the I2C slave address for subsequent operations.
+  // This is primarily relevant for I2C, less so for SPI. Returns true on success.
+  event set_address(newAddress: Integer): Boolean {
+    pre: self.enabled = true;
+    pre: newAddress >= 0;
+    pre: newAddress <= 127;
+    post: self.currentAddress = newAddress;
+    post: self.lastError = "";
+    post: result = true;
+    modifies: self.currentAddress, self.lastError;
+  }
+
+  // Performs a combined write-then-read transfer operation.
+  // writeBuffer is the data to write, writeSize is its length.
+  // readSize is the number of bytes to read.
+  // Returns true on success, false on error.
+  event transfer(writeBuffer: String, writeSize: Integer, readSize: Integer): Boolean {
+    pre: self.enabled = true;
+    pre: writeSize >= 0;
+    pre: readSize >= 0;
+    pre: writeSize + readSize > 0; // Must transfer at least one byte.
+
+    post: if result = true then
+            self.transferCount = self.transferCount@pre + writeSize + readSize
+          else
+            self.transferCount = self.transferCount@pre
+          endif;
+    post: if result = true then
+            self.lastError = ""
+          else
+            self.lastError <> ""
+          endif;
+
+    modifies: self.transferCount, self.lastError;
+    effects: { HardwareRead, HardwareWrite, Mutex };
+    reads: { writeBuffer, writeSize, readSize };
+  }
+
+  // Reads data from the bus.
+  // readSize is the number of bytes to read.
+  // Returns true on success, false on error.
+  event read(readSize: Integer): Boolean {
+    pre: self.enabled = true;
+    pre: readSize > 0;
+
+    post: if result = true then
+            self.transferCount = self.transferCount@pre + readSize
+          else
+            self.transferCount = self.transferCount@pre
+          endif;
+    post: if result = true then
+            self.lastError = ""
+          else
+            self.lastError <> ""
+          endif;
+
+    modifies: self.transferCount, self.lastError;
+    effects: { HardwareRead, Mutex };
+    reads: { readSize };
+  }
+
+  // Writes data to the bus.
+  // writeBuffer is the data to write, writeSize is its length.
+  // Returns true on success, false on error.
+  event write(writeBuffer: String, writeSize: Integer): Boolean {
+    pre: self.enabled = true;
+    pre: writeSize > 0;
+
+    post: if result = true then
+            self.transferCount = self.transferCount@pre + writeSize
+          else
+            self.transferCount = self.transferCount@pre
+          endif;
+    post: if result = true then
+            self.lastError = ""
+          else
+            self.lastError <> ""
+          endif;
+
+    modifies: self.transferCount, self.lastError;
+    effects: { HardwareWrite, Mutex };
+    reads: { writeBuffer, writeSize };
+  }
+}

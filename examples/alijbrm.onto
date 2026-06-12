@@ -1,0 +1,347 @@
+schema "onto/0.1";
+namespace alijbrm_league;
+
+// ════════════════════════════════════════════════════════════════════════
+// Modelo formal del Reglamento ALIJBRM (Asociacion de Ligas Infantiles y
+// Juveniles de Beisbol de la Republica Mexicana).
+//
+// Fuente: "Reglamento Compilado ALIJBRM y Analisis de Inconsistencias" +
+// "Especificaciones de Dominio y Parametros del Sistema (ALIJBRM)".
+//
+// Las reglas siguen el reglamento LITERAL, no Pitch Smart / USA Baseball.
+// Donde ALIJBRM es mas estricto (ej. pitcher->catcher = 0 tolerancia),
+// el modelo es estricto.
+// ════════════════════════════════════════════════════════════════════════
+
+// ─── Categorias y configuracion ─────────────────────────────────────────
+
+kind TournamentCategory {
+  identity: categoryId;
+  property categoryId: String;
+  property name: String;
+  property minBirthYear: Integer;
+  property maxBirthYear: Integer;
+  property regulationInnings: Integer;
+  property maxPitchesPerGame: Integer;
+  property curvesAreLegal: Boolean;
+  property intentionalWalkAddsPitches: Integer;
+
+  invariants {
+    self.categoryId <> null;
+    self.name <> null;
+    self.minBirthYear > 1900;
+    self.maxBirthYear >= self.minBirthYear;
+    self.regulationInnings > 0;
+    self.maxPitchesPerGame > 0;
+    self.intentionalWalkAddsPitches >= 0;
+  }
+}
+
+kind Competition {
+  identity: competitionId;
+  property competitionId: String;
+  property name: String;
+  property location: String;
+  property isActive: Boolean;
+  property competitionType: String;
+  property registrationFeeMxn: Real;
+  property monthlyFeeMxn: Real;
+  property taxRate: Real;
+
+  invariants {
+    self.competitionId <> null;
+    self.name <> null;
+    self.location <> null;
+    self.isActive <> null;
+    self.competitionType <> null;
+    self.registrationFeeMxn >= 0.0;
+    self.monthlyFeeMxn >= 0.0;
+    self.taxRate >= 0.0;
+    not (self.location = 'Tijuana') or (self.taxRate = 0.08);
+    self.competitionType = 'liga' or self.competitionType = 'torneo';
+  }
+}
+
+// ─── Jugadores y equipos ────────────────────────────────────────────────
+//
+// LFPDPPP: si perfil es publico, NO exponer CURP ni RFC.
+// Si pitcheo al menos 1 vez en un juego, NO puede catchear.
+
+kind Player {
+  identity: playerId;
+  property playerId: String;
+  property firstName: String;
+  property lastName: String;
+  property birthYear: Integer;
+  property curp: String;
+  property rfc: String;
+  property isProfilePublic: Boolean;
+
+  invariants {
+    self.playerId <> null;
+    self.firstName <> null;
+    self.lastName <> null;
+    self.birthYear > 1900;
+    self.isProfilePublic <> null;
+    not self.isProfilePublic or (self.curp = null and self.rfc = null);
+  }
+}
+
+kind Team {
+  identity: teamId;
+  property teamId: String;
+  property name: String;
+  property leagueCategory: TournamentCategory;
+
+  invariants {
+    self.teamId <> null;
+    self.name <> null;
+    self.leagueCategory <> null;
+  }
+}
+
+// ─── Roles ──────────────────────────────────────────────────────────────
+
+role HomeTeam mediated-by Game of Team {
+  property teamId: String;
+  property leagueCategory: TournamentCategory;
+}
+
+role AwayTeam mediated-by Game of Team {
+  property teamId: String;
+  property leagueCategory: TournamentCategory;
+}
+
+// ─── Juegos ─────────────────────────────────────────────────────────────
+//
+// Tolerancia ALIJBRM: 15 min solo si es el 1er juego del dia en la cancha.
+// Para los demas juegos debe arrancar inmediato (0 min).
+//
+// REGLA ESTRICTA: pitcher y catcher mutuamente excluyentes. Cualquier
+// jugador que pitcheo NO puede catchear en el mismo juego.
+//
+// Mound visits: maximo 1 por inning antes de forzar remocion del pitcher.
+
+relator Game mediates (HomeTeam, AwayTeam) {
+  identity: gameId;
+  property gameId: String;
+  property leagueCategory: TournamentCategory;
+  property homeTeam: HomeTeam;
+  property awayTeam: AwayTeam;
+  property status: String;
+  property homeScore: Integer;
+  property awayScore: Integer;
+  property inningsPlayed: Integer;
+  property year: Integer;
+  property isFirstGameOfDay: Boolean;
+  property toleranceMinutes: Integer;
+
+  property pitchers: Set<Player>;
+  property catchers: Set<Player>;
+  property moundVisitsThisInning: Integer;
+
+  invariants {
+    self.gameId <> null;
+    self.leagueCategory <> null;
+    self.homeTeam <> null;
+    self.awayTeam <> null;
+    self.status <> null;
+    self.homeTeam.leagueCategory = self.leagueCategory;
+    self.awayTeam.leagueCategory = self.leagueCategory;
+    self.homeTeam.teamId <> self.awayTeam.teamId;
+    self.homeScore >= 0;
+    self.awayScore >= 0;
+    self.inningsPlayed >= 0;
+    self.year > 2000;
+    self.toleranceMinutes = (if self.isFirstGameOfDay then 15 else 0 endif);
+    self.pitchers->forAll(p | not self.catchers->includes(p));
+    self.moundVisitsThisInning >= 0;
+    self.moundVisitsThisInning <= 2;
+  }
+
+  event registerPitcher(p: Player) {
+    pre: p <> null;
+    pre: self.status = 'LIVE';
+    pre: not self.catchers->includes(p);
+    post: self.pitchers->includes(p);
+    modifies: self.pitchers;
+  }
+
+  event registerCatcher(p: Player) {
+    pre: p <> null;
+    pre: self.status = 'LIVE';
+    pre: not self.pitchers->includes(p);
+    post: self.catchers->includes(p);
+    modifies: self.catchers;
+  }
+
+  event recordMoundVisit() {
+    pre: self.status = 'LIVE';
+    pre: self.moundVisitsThisInning < 2;
+    post: self.moundVisitsThisInning = self.moundVisitsThisInning@pre + 1;
+    modifies: self.moundVisitsThisInning;
+  }
+
+  event completeGame(hScore: Integer, aScore: Integer, inns: Integer) {
+    pre: self.status = 'LIVE';
+    pre: hScore >= 0;
+    pre: aScore >= 0;
+    pre: inns > 0;
+    post: self.homeScore = hScore;
+    post: self.awayScore = aScore;
+    post: self.inningsPlayed = inns;
+    post: self.status = 'COMPLETED';
+    modifies: self.homeScore, self.awayScore, self.inningsPlayed, self.status;
+  }
+}
+
+// ─── Performance del lanzador (cross-game tracking) ─────────────────────
+//
+// ALIJBRM ESTRICTO: si pitcheo > 0, inningsCaught DEBE ser 0.
+// Catcher 4+ innings -> NO puede pitchear hoy.
+//
+// Matriz de descanso ALIJBRM: PLANA (no estratificada por edad).
+//   0-20 pitcheos = 0 dias
+//   21-35 = 1 dia
+//   36-50 = 2 dias
+//   51-65 = 3 dias
+//   66+ = 4 dias
+
+relator PitcherPerformance mediates (Player, Game) {
+  identity: performanceId;
+  property performanceId: String;
+  property pitchesThrown: Integer;
+  property inningsPitched: Real;
+  property inningsCaught: Integer;
+
+  property pitcher: Player;
+  property game: Game;
+
+  invariants {
+    self.performanceId <> null;
+    self.pitcher <> null;
+    self.game <> null;
+    self.pitchesThrown >= 0;
+    self.inningsPitched >= 0.0;
+    self.inningsCaught >= 0;
+    not (self.pitchesThrown > 0) or (self.inningsCaught = 0);
+    not (self.inningsCaught >= 4) or (self.pitchesThrown = 0);
+  }
+
+  query leagueAge(): Integer {
+    body: self.game.year - self.pitcher.birthYear;
+  }
+
+  query requiredRestDays(): Integer {
+    body: if self.pitchesThrown <= 20 then 0
+          else if self.pitchesThrown <= 35 then 1
+          else if self.pitchesThrown <= 50 then 2
+          else if self.pitchesThrown <= 65 then 3
+          else 4 endif endif endif endif;
+  }
+}
+
+// ─── Standings con regla correcta de empates ────────────────────────────
+//
+// Formula ALIJBRM/MLB: empate cuenta como 0.5 ganado
+// PCT = (W + 0.5*T) / (W+L+T)
+
+kind TeamStanding {
+  identity: standingId;
+  property standingId: String;
+  property team: Team;
+  property wins: Integer;
+  property losses: Integer;
+  property ties: Integer;
+  property pct: Real;
+
+  invariants {
+    self.standingId <> null;
+    self.team <> null;
+    self.wins >= 0;
+    self.losses >= 0;
+    self.ties >= 0;
+    self.pct = (if (self.wins + self.losses + self.ties) > 0
+                then ((self.wins + (self.ties / 2.0)) / (self.wins + self.losses + self.ties))
+                else 0.0 endif);
+  }
+}
+
+// ─── FSM de Protestas ───────────────────────────────────────────────────
+//
+// Estados:
+//   NOTIFIED -> SUBMITTED -> UNDER_REVIEW -> RESOLVED
+//          \         \
+//        CADUCADA  CADUCADA
+//
+// TTL para SUBMITTED: liga = 24h, torneo = 2h.
+//
+// Solo motivos por regla o elegibilidad (NUNCA apreciacion del umpire).
+
+relator Protest mediates (Game, Competition) {
+  identity: protestId;
+  property protestId: String;
+  property game: Game;
+  property competition: Competition;
+  property status: String;
+  property reason: String;
+  property formalizationDeadlineHours: Integer;
+  property hasFormalEvidence: Boolean;
+  property bondPaid: Boolean;
+  property outcome: String;
+
+  invariants {
+    self.protestId <> null;
+    self.game <> null;
+    self.competition <> null;
+    self.status = 'NOTIFIED' or
+      self.status = 'SUBMITTED' or
+      self.status = 'CADUCADA' or
+      self.status = 'UNDER_REVIEW' or
+      self.status = 'RESOLVED';
+    self.reason = 'RULE_VIOLATION' or self.reason = 'ROSTER_ELIGIBILITY';
+    self.formalizationDeadlineHours = (if self.competition.competitionType = 'torneo' then 2 else 24 endif);
+    not (self.status = 'SUBMITTED') or self.hasFormalEvidence;
+    not (self.status = 'RESOLVED') or (self.outcome = 'IN_FAVOR' or self.outcome = 'AGAINST');
+    not (self.status = 'CADUCADA') or (self.outcome = null);
+  }
+
+  event submit(evidence: Boolean, bond: Boolean) {
+    pre: self.status = 'NOTIFIED';
+    pre: evidence;
+    post: self.status = 'SUBMITTED';
+    post: self.hasFormalEvidence = evidence;
+    post: self.bondPaid = bond;
+    modifies: self.status, self.hasFormalEvidence, self.bondPaid;
+  }
+
+  event openReview() {
+    pre: self.status = 'SUBMITTED';
+    post: self.status = 'UNDER_REVIEW';
+    modifies: self.status;
+  }
+
+  event resolve(decision: String) {
+    pre: self.status = 'UNDER_REVIEW';
+    pre: decision = 'IN_FAVOR' or decision = 'AGAINST';
+    post: self.status = 'RESOLVED';
+    post: self.outcome = decision;
+    modifies: self.status, self.outcome;
+  }
+
+  event expire() {
+    pre: self.status = 'NOTIFIED' or self.status = 'SUBMITTED';
+    post: self.status = 'CADUCADA';
+    modifies: self.status;
+  }
+}
+
+// ─── Relaciones explicitas (OntoUML) ────────────────────────────────────
+
+relation playerRoster: <<memberOf>> from Player [1..*] to Team [1];
+relation gameHomeTeamMed: <<mediation>> from Game [1] to HomeTeam [1];
+relation gameAwayTeamMed: <<mediation>> from Game [1] to AwayTeam [1];
+relation perfPlayerMed: <<mediation>> from PitcherPerformance [1] to Player [1];
+relation perfGameMed: <<mediation>> from PitcherPerformance [1] to Game [1];
+relation protestGameMed: <<mediation>> from Protest [1] to Game [1];
+relation protestCompMed: <<mediation>> from Protest [1] to Competition [1];

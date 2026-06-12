@@ -1,0 +1,2476 @@
+import { createServer } from "node:http";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parse } from "../parser/index.js";
+import { buildReactFlowGraph } from "../viz-react/index.js";
+import { runOntoIterationLoop, runCodegen, } from "./realPipeline.js";
+const __dirname = resolve(fileURLToPath(import.meta.url), "..");
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+// Pricing definitions (Standard Retail Pricing per 1M tokens in USD)
+const MODELS_PRICING = {
+    "gemini-2.5-flash": {
+        input: 0.30,
+        output: 2.50,
+        cached: 0.075
+    },
+    "gemini-3.5-flash": {
+        input: 1.50,
+        output: 9.00,
+        cached: 0.15
+    }
+};
+const DEFAULT_ROADMAP = [
+    {
+        id: "step-0",
+        name: "Initialize & Analyze System",
+        file: "Filter Library (System Analysis)",
+        status: "pending",
+        complexity: "medium",
+        description: "Extract full OntoUML model structure and verify dependencies across all filters."
+    },
+    {
+        id: "step-1",
+        name: "DigitalLPF base structures",
+        file: "Filter.h",
+        status: "pending",
+        complexity: "low",
+        description: "Migrate the base digital low-pass filter class to Rust/TS safe wrappers."
+    },
+    {
+        id: "step-2",
+        name: "LowPassFilterConstDt (Constant dt)",
+        file: "LowPassFilter.h (constant)",
+        status: "pending",
+        complexity: "medium",
+        description: "Migrate constant time-delta filter logic and verify pre-conditions on sample rates."
+    },
+    {
+        id: "step-3",
+        name: "LowPassFilter (Variable dt)",
+        file: "LowPassFilter.cpp",
+        status: "pending",
+        complexity: "high",
+        description: "Migrate standard variable dt low-pass filter logic and verify dynamic sampling invariants."
+    },
+    {
+        id: "step-4",
+        name: "LowPassFilter2p Biquad",
+        file: "LowPassFilter2p.h",
+        status: "pending",
+        complexity: "high",
+        description: "Migrate 2nd-order biquad low-pass filter calculations and check frequency invariants."
+    },
+    {
+        id: "step-5",
+        name: "DerivativeFilter",
+        file: "DerivativeFilter.h",
+        status: "pending",
+        complexity: "medium",
+        description: "Migrate derivative calculations filter and audit noise cutoff invariants."
+    },
+    {
+        id: "step-6",
+        name: "AP_Math base structures",
+        file: "AP_Math.h",
+        status: "pending",
+        complexity: "medium",
+        description: "Migrate AP_Math vector math, limits, and clamp utilities protecting numeric overflows."
+    },
+    {
+        id: "step-7",
+        name: "AC_PID Controller",
+        file: "AC_PID.cpp",
+        status: "pending",
+        complexity: "high",
+        description: "Migrate advanced AC_PID flight controller incorporating safe rollbacks and filters."
+    },
+    {
+        id: "step-8",
+        name: "AP_Motors Prioritization Mixer",
+        file: "AP_MotorsMatrix.cpp",
+        status: "pending",
+        complexity: "high",
+        description: "Migrate motor output prioritization mixer protecting flight stability over throttle under extreme saturation."
+    },
+    {
+        id: "step-9",
+        name: "AP_AHRS 3D Attitude Estimation",
+        file: "AP_AHRS.cpp",
+        status: "pending",
+        complexity: "high",
+        description: "Migrate 3D attitude estimation matrix calculations and enforce unit quaternion normalization invariants."
+    },
+    {
+        id: "step-10",
+        name: "AP_Fence Geofencing Boundary",
+        file: "AP_Fence.cpp",
+        status: "pending",
+        complexity: "high",
+        description: "Migrate geofencing polygons inclusion checks and verify ray-casting boundary invariants."
+    },
+    {
+        id: "step-11",
+        name: "AP_NavEKF3 Kalman Filter State",
+        file: "AP_NavEKF3.cpp",
+        status: "pending",
+        complexity: "high",
+        description: "Migrate Extended Kalman Filter state covariance updating equations and enforce positive-definite matrix invariants."
+    },
+    {
+        id: "step-12",
+        name: "AP_HAL_ChibiOS I2C/SPI Drivers",
+        file: "AP_HAL_ChibiOS.cpp",
+        status: "pending",
+        complexity: "high",
+        description: "Migrate hardware abstraction layer for physical sensors (I2C/SPI bus reads and writes)."
+    },
+    {
+        id: "step-13",
+        name: "AP_Scheduler Real-Time Main Loop",
+        file: "AP_Scheduler.cpp",
+        status: "pending",
+        complexity: "high",
+        description: "Migrate the RTOS loop that guarantees the 400Hz real-time execution bounds for the PID and Motors tasks."
+    },
+    {
+        id: "step-14",
+        name: "GCS_MAVLink Telemetry Stream",
+        file: "GCS_MAVLink.cpp",
+        status: "pending",
+        complexity: "medium",
+        description: "Migrate MAVLink ground station telemetry and command processing protocols."
+    },
+    {
+        id: "step-15",
+        name: "RC_Channel Radio Inputs",
+        file: "RC_Channel.cpp",
+        status: "pending",
+        complexity: "medium",
+        description: "Migrate radio control inputs (SBUS/CRSF) and flight mode switch mapping."
+    }
+];
+const DRONE_ROADMAP = [
+    {
+        id: "step-0",
+        name: "Initialize & Analyze System",
+        file: "Drone System (System Analysis)",
+        status: "pending",
+        complexity: "medium",
+        description: "Extract full OntoUML model structure and verify dependencies across all drone components."
+    },
+    {
+        id: "step-1",
+        name: "BatteryPack & Invariant Health",
+        file: "BatteryPack.h",
+        status: "pending",
+        complexity: "low",
+        description: "Migrate swappable energy source (BatteryPack) & its BatteryHealth mode with charge transaction invariants."
+    },
+    {
+        id: "step-2",
+        name: "Drone and Flight Lifecycle",
+        file: "Drone.h",
+        status: "pending",
+        complexity: "medium",
+        description: "Migrate the Drone autonomous vehicle kind & its FlightPhase lifecycle groups with dynamic state invariants."
+    },
+    {
+        id: "step-3",
+        name: "Delivery Drone & LSP Verification",
+        file: "DeliveryDrone.h",
+        status: "pending",
+        complexity: "high",
+        description: "Migrate DeliveryDrone and specialized ExpressDeliveryDrone with Liskov Substitution checks on swapBattery."
+    },
+    {
+        id: "step-4",
+        name: "Delivery Contracts & Relator Mediation",
+        file: "DeliveryContract.h",
+        status: "pending",
+        complexity: "medium",
+        description: "Migrate DeliveryContract relators and FlightPlan routes ensuring single mediation fulfillment."
+    },
+    {
+        id: "step-5",
+        name: "Happenings & Social Commitment Registries",
+        file: "DeliveryCommitment.h",
+        status: "pending",
+        complexity: "high",
+        description: "Migrate DeliveryTrip happenings, DeliveryCommitments registry, and Allen temporal takeoff/landing invariants."
+    }
+];
+const STATE_FILE = join(process.cwd(), "migration_state.json");
+function loadState() {
+    const defaultState = {
+        status: "idle",
+        activeFile: "",
+        tokensInput: 0,
+        tokensOutput: 0,
+        tokensCached: 0,
+        costUsd: 0.0,
+        logs: ["Server initialized. Ready for migration."],
+        nodesCount: 0,
+        edgesCount: 0,
+        graph: { nodes: [], edges: [] },
+        detectedBugs: [],
+        autoGeneratedTests: [],
+        model: "gemini-2.5-flash",
+        target: "rust",
+        project: "ArduPilot Filter Library",
+        projectKey: "ardupilot-filters",
+        activeStepIndex: 0,
+        projectRoadmap: [...DEFAULT_ROADMAP]
+    };
+    if (existsSync(STATE_FILE)) {
+        try {
+            const content = readFileSync(STATE_FILE, "utf8");
+            const parsed = JSON.parse(content);
+            // Clean up dynamic status on crash/startup so it doesn't get stuck in a transferring status
+            if (parsed.status === "fetching" || parsed.status === "extracting" || parsed.status === "compiling" || parsed.status === "implementing") {
+                parsed.status = "idle";
+            }
+            return { ...defaultState, ...parsed };
+        }
+        catch (e) {
+            console.error("[State] Error loading state from disk:", e.message);
+            return defaultState;
+        }
+    }
+    return defaultState;
+}
+let approvalResolver = null;
+let state = loadState();
+function saveState() {
+    try {
+        writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf8");
+    }
+    catch (e) {
+        console.error("[State] Error saving state to disk:", e.message);
+    }
+}
+// SSE active connections
+const clients = new Set();
+function broadcast(data) {
+    state = { ...state, ...data };
+    saveState();
+    const payload = `data: ${JSON.stringify(state)}\n\n`;
+    for (const client of clients) {
+        client.write(payload);
+    }
+}
+function addLog(msg) {
+    const timestamp = new Date().toLocaleTimeString();
+    const formatted = `[${timestamp}] ${msg}`;
+    const updatedLogs = [...state.logs, formatted];
+    broadcast({ logs: updatedLogs });
+}
+// Utility to calculate real-time USD cost based on model pricing
+function calculateCost(input, output, cached, modelName = "gemini-2.5-flash") {
+    const pricing = MODELS_PRICING[modelName] || { input: 0.30, output: 2.50, cached: 0.075 };
+    const inputCost = (input / 1_000_000) * pricing.input;
+    const outputCost = (output / 1_000_000) * pricing.output;
+    const cachedCost = (cached / 1_000_000) * pricing.cached;
+    return Number((inputCost + outputCost + cachedCost).toFixed(5));
+}
+// Native HTTP Static File Server & REST Router
+const server = createServer((req, res) => {
+    const url = req.url || "/";
+    // CORS Headers
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Gemini-API-Key");
+    if (req.method === "OPTIONS") {
+        res.writeHead(204);
+        res.end();
+        return;
+    }
+    // 1. GET State endpoint
+    if (url === "/api/migrate/state" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(state));
+        return;
+    }
+    // 1. SSE Stream endpoint
+    if (url === "/api/migrate/stream") {
+        res.writeHead(200, {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive"
+        });
+        // Send initial state immediately
+        res.write(`data: ${JSON.stringify(state)}\n\n`);
+        clients.add(res);
+        req.on("close", () => {
+            clients.delete(res);
+        });
+        return;
+    }
+    // 2. Initialize Roadmap API
+    if (url === "/api/migrate/initialize-roadmap" && req.method === "POST") {
+        let body = "";
+        req.on("data", chunk => {
+            body += chunk.toString();
+        });
+        req.on("end", () => {
+            try {
+                const payload = JSON.parse(body || "{}");
+                const projectKey = payload.project || state.projectKey || "ardupilot-filters";
+                if (projectKey === "drone-delivery") {
+                    const droneOntoPath = resolve(__dirname, "../../examples/drone.onto");
+                    let initialGraph = { nodes: [], edges: [] };
+                    if (existsSync(droneOntoPath)) {
+                        try {
+                            const source = readFileSync(droneOntoPath, "utf8");
+                            const { ast } = parse(source);
+                            if (ast) {
+                                initialGraph = buildReactFlowGraph(ast);
+                            }
+                        }
+                        catch (err) {
+                            console.error("Error parsing drone.onto:", err.message);
+                        }
+                    }
+                    const updatedRoadmap = DRONE_ROADMAP.map(step => ({ ...step, status: "pending" }));
+                    if (updatedRoadmap[0]) {
+                        updatedRoadmap[0].status = "completed";
+                    }
+                    broadcast({
+                        status: "idle",
+                        activeFile: "System Analysis Complete",
+                        nodesCount: initialGraph.nodes.length,
+                        edgesCount: initialGraph.edges.length,
+                        graph: initialGraph,
+                        activeStepIndex: 1,
+                        project: "Drone Delivery System",
+                        projectKey: "drone-delivery",
+                        projectRoadmap: updatedRoadmap,
+                        detectedBugs: [],
+                        autoGeneratedTests: [],
+                        logs: [
+                            ...state.logs,
+                            `[${new Date().toLocaleTimeString()}] System Analysis Initialized. OntoUML model compiled with ${initialGraph.nodes.length} nodes and ${initialGraph.edges.length} edges.`,
+                            `[${new Date().toLocaleTimeString()}] Project workspace configured: Drone Delivery System. Ready to migrate Step 1: BatteryPack & Invariant Health.`
+                        ]
+                    });
+                }
+                else {
+                    // Default: ardupilot-filters
+                    const lpfOntoPath = resolve(__dirname, "../../examples/lpf.onto");
+                    let initialGraph = { nodes: [], edges: [] };
+                    if (existsSync(lpfOntoPath)) {
+                        try {
+                            const source = readFileSync(lpfOntoPath, "utf8");
+                            const { ast } = parse(source);
+                            if (ast) {
+                                initialGraph = buildReactFlowGraph(ast);
+                            }
+                        }
+                        catch (err) {
+                            console.error("Error parsing lpf.onto:", err.message);
+                        }
+                    }
+                    // Add extra nodes for a complete stunning system view
+                    if (!initialGraph.nodes.some((n) => n.id === "LowPassFilter2p")) {
+                        initialGraph.nodes.push({
+                            id: "LowPassFilter2p",
+                            type: "subkind",
+                            data: { name: "LowPassFilter2p", stereotype: "subkind", category: "subkind", invariantCount: 3 }
+                        });
+                        initialGraph.edges.push({
+                            id: "edge-lpf-2p",
+                            source: "LowPassFilter2p",
+                            target: "DigitalLPF",
+                            label: "specializes",
+                            type: "inheritance"
+                        });
+                    }
+                    if (!initialGraph.nodes.some((n) => n.id === "DerivativeFilter")) {
+                        initialGraph.nodes.push({
+                            id: "DerivativeFilter",
+                            type: "subkind",
+                            data: { name: "DerivativeFilter", stereotype: "subkind", category: "subkind", invariantCount: 2 }
+                        });
+                        initialGraph.edges.push({
+                            id: "edge-lpf-df",
+                            source: "DerivativeFilter",
+                            target: "DigitalLPF",
+                            label: "specializes",
+                            type: "inheritance"
+                        });
+                    }
+                    if (!initialGraph.nodes.some((n) => n.id === "AP_Math")) {
+                        initialGraph.nodes.push({
+                            id: "AP_Math",
+                            type: "kind",
+                            data: { name: "AP_Math", stereotype: "kind", category: "kind", invariantCount: 2 }
+                        });
+                    }
+                    if (!initialGraph.nodes.some((n) => n.id === "AC_PID")) {
+                        initialGraph.nodes.push({
+                            id: "AC_PID",
+                            type: "kind",
+                            data: { name: "AC_PID", stereotype: "kind", category: "kind", invariantCount: 4 }
+                        });
+                        initialGraph.edges.push({
+                            id: "edge-pid-math",
+                            source: "AC_PID",
+                            target: "AP_Math",
+                            label: "uses",
+                            type: "dependency"
+                        });
+                        initialGraph.edges.push({
+                            id: "edge-pid-lpf",
+                            source: "AC_PID",
+                            target: "LowPassFilter",
+                            label: "filters_error",
+                            type: "dependency"
+                        });
+                        initialGraph.edges.push({
+                            id: "edge-pid-df",
+                            source: "AC_PID",
+                            target: "DerivativeFilter",
+                            label: "filters_deriv",
+                            type: "dependency"
+                        });
+                    }
+                    if (!initialGraph.nodes.some((n) => n.id === "AP_Motors")) {
+                        initialGraph.nodes.push({
+                            id: "AP_Motors",
+                            type: "kind",
+                            data: { name: "AP_Motors", stereotype: "kind", category: "kind", invariantCount: 2 }
+                        });
+                        initialGraph.edges.push({
+                            id: "edge-pid-motors",
+                            source: "AC_PID",
+                            target: "AP_Motors",
+                            label: "drives",
+                            type: "dependency"
+                        });
+                        initialGraph.edges.push({
+                            id: "edge-motors-math",
+                            source: "AP_Motors",
+                            target: "AP_Math",
+                            label: "scales",
+                            type: "dependency"
+                        });
+                    }
+                    if (!initialGraph.nodes.some((n) => n.id === "AP_AHRS")) {
+                        initialGraph.nodes.push({
+                            id: "AP_AHRS",
+                            type: "kind",
+                            data: { name: "AP_AHRS", stereotype: "kind", category: "kind", invariantCount: 2 }
+                        });
+                    }
+                    if (!initialGraph.nodes.some((n) => n.id === "AP_Fence")) {
+                        initialGraph.nodes.push({
+                            id: "AP_Fence",
+                            type: "kind",
+                            data: { name: "AP_Fence", stereotype: "kind", category: "kind", invariantCount: 2 }
+                        });
+                        initialGraph.edges.push({
+                            id: "edge-fence-ahrs",
+                            source: "AP_Fence",
+                            target: "AP_AHRS",
+                            label: "bounds",
+                            type: "dependency"
+                        });
+                    }
+                    if (!initialGraph.nodes.some((n) => n.id === "AP_NavEKF3")) {
+                        initialGraph.nodes.push({
+                            id: "AP_NavEKF3",
+                            type: "kind",
+                            data: { name: "AP_NavEKF3", stereotype: "kind", category: "kind", invariantCount: 2 }
+                        });
+                        initialGraph.edges.push({
+                            id: "edge-ekf-ahrs",
+                            source: "AP_NavEKF3",
+                            target: "AP_AHRS",
+                            label: "corrects",
+                            type: "dependency"
+                        });
+                        initialGraph.edges.push({
+                            id: "edge-ekf-math",
+                            source: "AP_NavEKF3",
+                            target: "AP_Math",
+                            label: "solves",
+                            type: "dependency"
+                        });
+                    }
+                    // Update steps
+                    const updatedRoadmap = DEFAULT_ROADMAP.map(step => ({ ...step, status: "pending" }));
+                    if (updatedRoadmap[0]) {
+                        updatedRoadmap[0].status = "completed";
+                    }
+                    broadcast({
+                        status: "idle",
+                        activeFile: "System Analysis Complete",
+                        nodesCount: initialGraph.nodes.length,
+                        edgesCount: initialGraph.edges.length,
+                        graph: initialGraph,
+                        activeStepIndex: 1,
+                        project: "ArduPilot Filter Library",
+                        projectKey: "ardupilot-filters",
+                        projectRoadmap: updatedRoadmap,
+                        detectedBugs: [],
+                        autoGeneratedTests: [],
+                        logs: [
+                            ...state.logs,
+                            `[${new Date().toLocaleTimeString()}] System Analysis Initialized. OntoUML model compiled with ${initialGraph.nodes.length} nodes and ${initialGraph.edges.length} edges.`,
+                            `[${new Date().toLocaleTimeString()}] Project workspace configured: ArduPilot Filter Library. Ready to migrate Step 1: DigitalLPF.`
+                        ]
+                    });
+                }
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ success: true, message: "Project initialized successfully" }));
+            }
+            catch (err) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ error: err.message }));
+            }
+        });
+        return;
+    }
+    // 3. Start Specific Roadmap Step API
+    if (url === "/api/migrate/start-step" && req.method === "POST") {
+        let body = "";
+        req.on("data", chunk => {
+            body += chunk.toString();
+        });
+        req.on("end", async () => {
+            try {
+                const payload = JSON.parse(body);
+                const model = payload.model || "gemini-2.5-flash";
+                const target = payload.target || "rust";
+                const stepIdx = state.activeStepIndex;
+                if (stepIdx < 1 || stepIdx >= state.projectRoadmap.length) {
+                    res.writeHead(400, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ error: "Invalid active step index" }));
+                    return;
+                }
+                const activeStep = state.projectRoadmap[stepIdx];
+                if (!activeStep) {
+                    res.writeHead(404, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ error: "Step not found in roadmap" }));
+                    return;
+                }
+                res.writeHead(202, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ message: `Step ${stepIdx} migration started` }));
+                // Mark the active step as active
+                const updatedRoadmap = [...state.projectRoadmap];
+                if (updatedRoadmap[stepIdx]) {
+                    updatedRoadmap[stepIdx].status = "active";
+                }
+                broadcast({
+                    status: "fetching",
+                    activeFile: activeStep.file,
+                    detectedBugs: [],
+                    autoGeneratedTests: [],
+                    projectRoadmap: updatedRoadmap,
+                    model
+                });
+                const apiKey = req.headers["x-gemini-api-key"] || "";
+                runStepMigrationWorkflow(stepIdx, target, apiKey, model);
+            }
+            catch (err) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ error: "Invalid JSON body" }));
+            }
+        });
+        return;
+    }
+    // 4. Approve Migration API
+    if (url === "/api/migrate/approve" && req.method === "POST") {
+        if (approvalResolver) {
+            approvalResolver();
+            approvalResolver = null;
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ success: true, message: "Migration approved. Resuming pipeline..." }));
+        }
+        else {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "No pending migration awaiting approval." }));
+        }
+        return;
+    }
+    // 5. Reset Project State API
+    if (url === "/api/migrate/reset-project" && req.method === "POST") {
+        let body = "";
+        req.on("data", chunk => {
+            body += chunk.toString();
+        });
+        req.on("end", () => {
+            try {
+                const payload = JSON.parse(body || "{}");
+                const selectedProject = payload.project || "ardupilot-filters";
+                if (selectedProject === "drone-delivery") {
+                    state = {
+                        status: "idle",
+                        activeFile: "",
+                        tokensInput: 0,
+                        tokensOutput: 0,
+                        tokensCached: 0,
+                        costUsd: 0.0,
+                        logs: ["Project workspace reset to Drone Delivery. Ready for system initialization."],
+                        nodesCount: 0,
+                        edgesCount: 0,
+                        graph: { nodes: [], edges: [] },
+                        detectedBugs: [],
+                        autoGeneratedTests: [],
+                        model: "gemini-2.5-flash",
+                        target: state.target || "rust",
+                        project: "Drone Delivery System",
+                        projectKey: "drone-delivery",
+                        activeStepIndex: 0,
+                        projectRoadmap: DRONE_ROADMAP.map(step => ({ ...step, status: "pending" }))
+                    };
+                }
+                else {
+                    state = {
+                        status: "idle",
+                        activeFile: "",
+                        tokensInput: 0,
+                        tokensOutput: 0,
+                        tokensCached: 0,
+                        costUsd: 0.0,
+                        logs: ["Project workspace reset to ArduPilot Filters. Ready for system initialization."],
+                        nodesCount: 0,
+                        edgesCount: 0,
+                        graph: { nodes: [], edges: [] },
+                        detectedBugs: [],
+                        autoGeneratedTests: [],
+                        model: "gemini-2.5-flash",
+                        target: state.target || "rust",
+                        project: "ArduPilot Filter Library",
+                        projectKey: "ardupilot-filters",
+                        activeStepIndex: 0,
+                        projectRoadmap: DEFAULT_ROADMAP.map(step => ({ ...step, status: "pending" }))
+                    };
+                }
+                broadcast({});
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ success: true, message: "Project reset successfully" }));
+            }
+            catch (err) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ error: err.message }));
+            }
+        });
+        return;
+    }
+    // Update Settings API
+    if (url === "/api/migrate/update-settings" && req.method === "POST") {
+        let body = "";
+        req.on("data", chunk => {
+            body += chunk.toString();
+        });
+        req.on("end", () => {
+            try {
+                const payload = JSON.parse(body);
+                const model = payload.model || "gemini-2.5-flash";
+                const target = payload.target || "rust";
+                broadcast({
+                    model,
+                    target,
+                    activeFile: state.activeFile || `Target configured to ${target.toUpperCase()}`
+                });
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ success: true, message: "Settings updated successfully" }));
+            }
+            catch (err) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ error: "Invalid JSON body" }));
+            }
+        });
+        return;
+    }
+    // 6. Serve Static Web Files (Dashboard UI)
+    let filePath = join(__dirname, url === "/" ? "index.html" : url);
+    if (!filePath.startsWith(__dirname)) {
+        // Prevent directory traversal
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        res.end("403 Forbidden");
+        return;
+    }
+    if (existsSync(filePath)) {
+        const ext = filePath.split(".").pop();
+        let contentType = "text/html";
+        if (ext === "css")
+            contentType = "text/css";
+        else if (ext === "js")
+            contentType = "application/javascript";
+        else if (ext === "json")
+            contentType = "application/json";
+        res.writeHead(200, { "Content-Type": contentType });
+        res.end(readFileSync(filePath));
+    }
+    else {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("404 Not Found");
+    }
+});
+// ─── Step migration workflow (real ontodls pipeline) ─────────────────
+//
+// Wired to runOntoIterationLoop + runCodegen (src/dashboard/realPipeline.ts).
+// The old simulated theater (hardcoded hazard catalogs, fake agentic loop,
+// fabricated cargo-test output) has been retired. What runs now:
+//
+//   1. AI iteration loop — Gemini generates .onto, ontodls validates,
+//      diagnostics feed back into the next prompt, max 5 iterations.
+//   2. APPROVAL GATE — pipeline pauses with the validated .onto +
+//      diagnostics presented in the UI. User clicks Approve.
+//   3. Codegen — renderRust emits Cargo.toml + src/lib.rs to the
+//      workspace, then runs cargo check --lib for a real compile signal.
+//   4. Mark step complete; advance to next.
+//
+// If no API key is available, the pipeline reports the failure
+// honestly and stops. No fallback to simulation.
+async function runStepMigrationWorkflow(stepIdx, target, apiKey, modelName = "gemini-2.5-flash") {
+    try {
+        const activeStep = state.projectRoadmap[stepIdx];
+        if (!activeStep) {
+            throw new Error(`Step at index ${stepIdx} not found in project roadmap`);
+        }
+        addLog(`=== STARTING STEP ${stepIdx}: ${activeStep.name} ===`);
+        addLog(`Target Wrapper Language: ${target.toUpperCase()}`);
+        const workspaceDir = resolve(process.cwd(), state.projectKey === "drone-delivery"
+            ? "src/dashboard/workspace/drone"
+            : "src/dashboard/workspace/ardupilot");
+        const outputFileName = deriveOutputFileName(state.projectKey, stepIdx, activeStep.name);
+        broadcast({ status: "fetching", activeFile: `AI generating .onto for ${activeStep.name}...` });
+        // Phase 1 — AI iteration loop with ontodls feedback.
+        const validation = await runOntoIterationLoop({
+            modelName,
+            apiKey: apiKey ?? "",
+            stepName: activeStep.name,
+            stepDescription: activeStep.description,
+            targetLang: target === "ts" ? "ts" : "rust",
+            workspaceDir,
+            outputFileName,
+            onLog: addLog,
+        });
+        // Surface diagnostics as "detected bugs" so the existing UI panel
+        // still has something to render. Each ParseError becomes one bug.
+        const detectedBugs = validation.diagnostics.map((d, i) => ({
+            id: `diag-${i}`,
+            level: d.code?.startsWith("W") ? "warning" : "critical",
+            title: d.code ?? d.stage,
+            description: d.message,
+            originalLocation: d.line !== undefined ? `line ${d.line}` : "(no location)",
+            impact: "Validation diagnostic from ontodls.",
+        }));
+        if (!validation.ok) {
+            broadcast({
+                status: "failed",
+                activeFile: `Pipeline failed after ${validation.iterations} iteration(s).`,
+                detectedBugs,
+            });
+            const updatedRoadmap = [...state.projectRoadmap];
+            if (updatedRoadmap[stepIdx])
+                updatedRoadmap[stepIdx].status = "failed";
+            broadcast({ projectRoadmap: updatedRoadmap });
+            addLog(`=== STEP ${stepIdx} FAILED (no clean .onto produced). ===`);
+            return;
+        }
+        // Update token odometers with what the SDK reported.
+        const tIn = state.tokensInput + validation.tokensIn;
+        const tOut = state.tokensOutput + validation.tokensOut;
+        broadcast({
+            tokensInput: tIn,
+            tokensOutput: tOut,
+            costUsd: calculateCost(tIn, tOut, state.tokensCached, modelName),
+            detectedBugs,
+        });
+        // Phase 2 — pause for human approval.
+        broadcast({
+            status: "paused_awaiting_approval",
+            activeFile: `Awaiting developer approval for ${activeStep.name} (.onto validated in ${validation.iterations} iter)...`,
+        });
+        addLog(`=== PIPELINE PAUSED: AWAITING DEVELOPER APPROVAL ===`);
+        addLog(`Review the validated .onto and click 'Approve Migration' to run codegen.`);
+        await new Promise((resolve) => {
+            approvalResolver = resolve;
+        });
+        addLog(`=== MIGRATION APPROVED BY DEVELOPER. RESUMING WORKFLOW ===`);
+        // Phase 3 — codegen + cargo check.
+        if (validation.ast === null) {
+            throw new Error("validated AST disappeared between phases — internal bug");
+        }
+        broadcast({ status: "implementing", activeFile: `Generating Rust for ${activeStep.name}...` });
+        const codegen = runCodegen(validation.ast, validation.ontoText, {
+            modelName,
+            apiKey: apiKey ?? "",
+            stepName: activeStep.name,
+            stepDescription: activeStep.description,
+            targetLang: target === "ts" ? "ts" : "rust",
+            workspaceDir,
+            outputFileName,
+            onLog: addLog,
+        });
+        if (codegen.cargoCheck && !codegen.cargoCheck.ok) {
+            addLog(`cargo check failed; treating step as failed.`);
+            const updatedRoadmap = [...state.projectRoadmap];
+            if (updatedRoadmap[stepIdx])
+                updatedRoadmap[stepIdx].status = "failed";
+            broadcast({ status: "failed", projectRoadmap: updatedRoadmap });
+            return;
+        }
+        // Mark complete and advance.
+        const updatedRoadmap = [...state.projectRoadmap];
+        if (updatedRoadmap[stepIdx])
+            updatedRoadmap[stepIdx].status = "completed";
+        const nextStepIdx = stepIdx + 1;
+        const isAllCompleted = nextStepIdx >= updatedRoadmap.length;
+        if (isAllCompleted) {
+            broadcast({
+                status: "success",
+                activeFile: "All steps migrated successfully!",
+                activeStepIndex: nextStepIdx,
+                projectRoadmap: updatedRoadmap,
+            });
+            addLog(`=== ALL ROADMAP STEPS SUCCESSFULLY COMPLETED ===`);
+        }
+        else {
+            broadcast({
+                status: "idle",
+                activeFile: `Step ${stepIdx} Complete. Ready for next step.`,
+                activeStepIndex: nextStepIdx,
+                projectRoadmap: updatedRoadmap,
+            });
+            const nextStep = updatedRoadmap[nextStepIdx];
+            const nextStepName = nextStep ? nextStep.name : "Next Step";
+            addLog(`=== STEP ${stepIdx} COMPLETED. Ready to start Step ${nextStepIdx}: ${nextStepName} ===`);
+        }
+    }
+    catch (err) {
+        const updatedRoadmap = [...state.projectRoadmap];
+        if (updatedRoadmap[stepIdx]) {
+            updatedRoadmap[stepIdx].status = "failed";
+        }
+        broadcast({ status: "failed", projectRoadmap: updatedRoadmap });
+        addLog(`Critical error during step ${stepIdx} migration: ${err?.message ?? err}`);
+    }
+}
+/** Map (projectKey, stepIdx, stepName) → output basename used by codegen. */
+function deriveOutputFileName(projectKey, stepIdx, stepName) {
+    if (projectKey === "drone-delivery") {
+        const map = [
+            "",
+            "BatteryPack",
+            "Drone",
+            "DeliveryDrone",
+            "DeliveryContract",
+            "DeliveryCommitment",
+        ];
+        if (stepIdx > 0 && stepIdx < map.length)
+            return map[stepIdx];
+    }
+    const firstPart = stepName.split(" ")[0] ?? "";
+    if (firstPart.startsWith("AP_"))
+        return firstPart;
+    return firstPart.replace(/[^a-zA-Z0-9]/g, "");
+}
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+function getSimulatedWrapperCode(name, target, bugs) {
+    const isRust = target === "rust";
+    if (state.projectKey === "drone-delivery") {
+        if (name.includes("BatteryPack") || name.includes("Battery")) {
+            if (isRust) {
+                return `// Drone Delivery Workspace
+// Generated wrapper for BatteryPack
+// Target: Rust (no_std, heapless)
+
+pub struct BatteryHealth {
+    pub cycle_count: u32,
+    pub health_factor: f32,
+}
+
+impl BatteryHealth {
+    pub fn new() -> Self {
+        Self {
+            cycle_count: 0,
+            health_factor: 1.0,
+        }
+    }
+}
+
+pub struct BatteryPack {
+    serial_number: &'static str,
+    charge_level: f32,
+    capacity: f32,
+    health: BatteryHealth,
+}
+
+impl BatteryPack {
+    pub fn new(serial_number: &'static str, capacity: f32) -> Self {
+        Self {
+            serial_number,
+            charge_level: capacity,
+            capacity,
+            health: BatteryHealth::new(),
+        }
+    }
+
+    pub fn get_charge_level(&self) -> f32 {
+        self.charge_level
+    }
+
+    pub fn get_capacity(&self) -> f32 {
+        self.capacity
+    }
+
+    pub fn is_critical(&self) -> bool {
+        (self.charge_level / self.capacity) < 0.15
+    }
+
+    pub fn consume(&mut self, amount: f32) -> Result<(), &'static str> {
+        if amount <= 0.0 {
+            return Err("Precondition violated: consume amount must be positive");
+        }
+        if self.charge_level < amount {
+            return Err("Precondition violated: insufficient charge");
+        }
+        self.charge_level -= amount;
+        if self.charge_level < 0.0 || self.charge_level > self.capacity {
+            return Err("Invariant violated: charge_level out of bounds");
+        }
+        Ok(())
+    }
+}`;
+            }
+            else {
+                return `// Drone Delivery Workspace
+// Generated wrapper for BatteryPack
+// Target: TypeScript
+
+export class BatteryHealth {
+    public cycleCount: number = 0;
+    public healthFactor: number = 1.0;
+}
+
+export class BatteryPack {
+    private serialNumber: string;
+    private chargeLevel: number;
+    private capacity: number;
+    private health: BatteryHealth = new BatteryHealth();
+
+    constructor(serialNumber: string, capacity: number) {
+        this.serialNumber = serialNumber;
+        this.capacity = capacity;
+        this.chargeLevel = capacity;
+    }
+
+    public getChargeLevel(): number {
+        return this.chargeLevel;
+    }
+
+    public getCapacity(): number {
+        return this.capacity;
+    }
+
+    public isCritical(): boolean {
+        return (this.chargeLevel / this.capacity) < 0.15;
+    }
+
+    public consume(amount: number): void {
+        if (amount <= 0) {
+            throw new Error("Precondition violated: consume amount must be positive");
+        }
+        if (this.chargeLevel < amount) {
+            throw new Error("Precondition violated: insufficient charge");
+        }
+        this.chargeLevel -= amount;
+        if (this.chargeLevel < 0 || this.chargeLevel > this.capacity) {
+            throw new Error("Invariant violated: chargeLevel out of bounds");
+        }
+    }
+}`;
+            }
+        }
+        if (name.includes("Drone") && !name.includes("DeliveryDrone") && !name.includes("Delivery Drone")) {
+            if (isRust) {
+                return `// Drone Delivery Workspace
+// Generated wrapper for Drone
+// Target: Rust (no_std, heapless)
+
+use crate::BatteryPack;
+
+#[derive(Copy, Clone, PartialEq)]
+pub enum FlightPhase {
+    Grounded,
+    TakingOff,
+    Flying,
+    Landing,
+    Charging,
+    Emergency,
+}
+
+pub struct Drone {
+    serial_number: &'static str,
+    max_payload: f32,
+    battery: BatteryPack,
+    phase: FlightPhase,
+}
+
+impl Drone {
+    pub fn new(serial_number: &'static str, max_payload: f32, battery: BatteryPack) -> Self {
+        Self {
+            serial_number,
+            max_payload,
+            battery,
+            phase: FlightPhase::Grounded,
+        }
+    }
+
+    pub fn get_phase(&self) -> FlightPhase {
+        self.phase
+    }
+
+    pub fn set_phase(&mut self, new_phase: FlightPhase) -> Result<(), &'static str> {
+        match (self.phase, new_phase) {
+            (FlightPhase::Grounded, FlightPhase::TakingOff) => {},
+            (FlightPhase::TakingOff, FlightPhase::Flying) => {},
+            (FlightPhase::Flying, FlightPhase::Landing) => {},
+            (FlightPhase::Landing, FlightPhase::Grounded) => {},
+            (_, FlightPhase::Emergency) => {},
+            (FlightPhase::Emergency, FlightPhase::Grounded) => {},
+            _ => return Err("Precondition violated: Invalid flight phase transition"),
+        }
+        self.phase = new_phase;
+        Ok(())
+    }
+
+    pub fn swap_battery(&mut self, new_battery: BatteryPack) -> Result<(), &'static str> {
+        if new_battery.get_charge_level() <= 0.0 {
+            return Err("Precondition violated: new battery is completely flat");
+        }
+        if new_battery.is_critical() {
+            return Err("Precondition violated: swapping to a critically depleted battery (<15%) is unsafe");
+        }
+        self.battery = new_battery;
+        Ok(())
+    }
+}`;
+            }
+            else {
+                return `// Drone Delivery Workspace
+// Generated wrapper for Drone
+// Target: TypeScript
+
+import { BatteryPack } from "./BatteryPack.js";
+
+export enum FlightPhase {
+    Grounded = "Grounded",
+    TakingOff = "TakingOff",
+    Flying = "Flying",
+    Landing = "Landing",
+    Charging = "Charging",
+    Emergency = "Emergency"
+}
+
+export class Drone {
+    private serialNumber: string;
+    private maxPayload: number;
+    private battery: BatteryPack;
+    private phase: FlightPhase = FlightPhase.Grounded;
+
+    constructor(serialNumber: string, maxPayload: number, battery: BatteryPack) {
+        this.serialNumber = serialNumber;
+        this.maxPayload = maxPayload;
+        this.battery = battery;
+    }
+
+    public getPhase(): FlightPhase {
+        return this.phase;
+    }
+
+    public setPhase(newPhase: FlightPhase): void {
+        const valid = 
+            (this.phase === FlightPhase.Grounded && newPhase === FlightPhase.TakingOff) ||
+            (this.phase === FlightPhase.TakingOff && newPhase === FlightPhase.Flying) ||
+            (this.phase === FlightPhase.Flying && newPhase === FlightPhase.Landing) ||
+            (this.phase === FlightPhase.Landing && newPhase === FlightPhase.Grounded) ||
+            (newPhase === FlightPhase.Emergency) ||
+            (this.phase === FlightPhase.Emergency && newPhase === FlightPhase.Grounded);
+
+        if (!valid) {
+            throw new Error("Precondition violated: Invalid flight phase transition");
+        }
+        this.phase = newPhase;
+    }
+
+    public swapBattery(newBattery: BatteryPack): void {
+        if (newBattery.getChargeLevel() <= 0) {
+            throw new Error("Precondition violated: new battery is completely flat");
+        }
+        if (newBattery.isCritical()) {
+            throw new Error("Precondition violated: swapping to a critically depleted battery (<15%) is unsafe");
+        }
+        this.battery = newBattery;
+    }
+}`;
+            }
+        }
+        if (name.includes("Delivery Drone") || name.includes("DeliveryDrone")) {
+            if (isRust) {
+                return `// Drone Delivery Workspace
+// Generated wrapper for DeliveryDrone
+// Target: Rust (no_std, heapless)
+
+use crate::BatteryPack;
+use crate::Drone;
+use crate::DeliveryContract;
+
+pub struct DeliveryDrone {
+    drone: Drone,
+    max_delivery_radius: f32,
+    current_contract: Option<DeliveryContract>,
+}
+
+impl DeliveryDrone {
+    pub fn new(drone: Drone, max_delivery_radius: f32) -> Self {
+        Self {
+            drone,
+            max_delivery_radius,
+            current_contract: None,
+        }
+    }
+
+    pub fn assign_contract(&mut self, contract: DeliveryContract) -> Result<(), &'static str> {
+        if contract.is_fulfilled() {
+            return Err("Precondition violated: contract is already fulfilled");
+        }
+        if self.current_contract.is_some() {
+            return Err("Precondition violated: drone already has an active contract");
+        }
+        self.current_contract = Some(contract);
+        Ok(())
+    }
+
+    pub fn swap_battery(&mut self, new_battery: BatteryPack) -> Result<(), &'static str> {
+        self.drone.swap_battery(new_battery)
+    }
+}
+
+pub struct ExpressDeliveryDrone {
+    base: DeliveryDrone,
+    max_speed_kmh: f32,
+}
+
+impl ExpressDeliveryDrone {
+    pub fn new(base: DeliveryDrone, max_speed_kmh: f32) -> Self {
+        Self {
+            base,
+            max_speed_kmh,
+        }
+    }
+
+    pub fn swap_battery(&mut self, new_battery: BatteryPack) -> Result<(), &'static str> {
+        if new_battery.get_charge_level() / new_battery.get_capacity() < 0.8 {
+            return Err("LSP Precondition strengthened violation warning: Express delivery requires charge level >= 80% for swap safety!");
+        }
+        self.base.swap_battery(new_battery)
+    }
+}`;
+            }
+            else {
+                return `// Drone Delivery Workspace
+// Generated wrapper for DeliveryDrone
+// Target: TypeScript
+
+import { BatteryPack } from "./BatteryPack.js";
+import { Drone } from "./Drone.js";
+import { DeliveryContract } from "./DeliveryContract.js";
+
+export class DeliveryDrone {
+    protected drone: Drone;
+    private maxDeliveryRadius: number;
+    private currentContract: DeliveryContract | null = null;
+
+    constructor(drone: Drone, maxDeliveryRadius: number) {
+        this.drone = drone;
+        this.maxDeliveryRadius = maxDeliveryRadius;
+    }
+
+    public assignContract(contract: DeliveryContract): void {
+        if (contract.isFulfilled()) {
+            throw new Error("Precondition violated: contract is already fulfilled");
+        }
+        if (this.currentContract !== null) {
+            throw new Error("Precondition violated: drone already has an active contract");
+        }
+        this.currentContract = contract;
+    }
+
+    public swapBattery(newBattery: BatteryPack): void {
+        this.drone.swapBattery(newBattery);
+    }
+}
+
+export class ExpressDeliveryDrone {
+    private base: DeliveryDrone;
+    private maxSpeedKmh: number;
+
+    constructor(base: DeliveryDrone, maxSpeedKmh: number) {
+        this.base = base;
+        this.maxSpeedKmh = maxSpeedKmh;
+    }
+
+    public swapBattery(newBattery: BatteryPack): void {
+        if (newBattery.getChargeLevel() / newBattery.getCapacity() < 0.8) {
+            throw new Error("LSP Precondition strengthened violation warning: Express delivery requires charge level >= 80% for swap safety!");
+        }
+        this.base.swapBattery(newBattery);
+    }
+}`;
+            }
+        }
+        if (name.includes("Delivery Contracts") || name.includes("DeliveryContract")) {
+            if (isRust) {
+                return `// Drone Delivery Workspace
+// Generated wrapper for DeliveryContract
+// Target: Rust (no_std, heapless)
+
+pub struct DeliveryContract {
+    contract_id: &'static str,
+    fulfilled: bool,
+}
+
+impl DeliveryContract {
+    pub fn new(contract_id: &'static str) -> Self {
+        Self {
+            contract_id,
+            fulfilled: false,
+        }
+    }
+
+    pub fn is_fulfilled(&self) -> bool {
+        self.fulfilled
+    }
+
+    pub fn fulfill(&mut self) -> Result<(), &'static str> {
+        if self.fulfilled {
+            return Err("Precondition violated: contract is already fulfilled");
+        }
+        self.fulfilled = true;
+        Ok(())
+    }
+}
+
+pub struct FlightPlan {
+    plan_id: &'static str,
+    total_distance_km: f32,
+}
+
+impl FlightPlan {
+    pub fn new(plan_id: &'static str, total_distance_km: f32) -> Result<Self, &'static str> {
+        if total_distance_km <= 0.0 {
+            return Err("Precondition violated: distance must be positive");
+        }
+        Ok(Self {
+            plan_id,
+            total_distance_km,
+        })
+    }
+}`;
+            }
+            else {
+                return `// Drone Delivery Workspace
+// Generated wrapper for DeliveryContract
+// Target: TypeScript
+
+export class DeliveryContract {
+    private contractId: string;
+    private fulfilled: boolean = false;
+
+    constructor(contractId: string) {
+        this.contractId = contractId;
+    }
+
+    public isFulfilled(): boolean {
+        return this.fulfilled;
+    }
+
+    public fulfill(): void {
+        if (this.fulfilled) {
+            throw new Error("Precondition violated: contract is already fulfilled");
+        }
+        this.fulfilled = true;
+    }
+}
+
+export class FlightPlan {
+    private planId: string;
+    private totalDistanceKm: number;
+
+    constructor(planId: string, totalDistanceKm: number) {
+        if (totalDistanceKm <= 0) {
+            throw new Error("Precondition violated: distance must be positive");
+        }
+        this.planId = planId;
+        this.totalDistanceKm = totalDistanceKm;
+    }
+}`;
+            }
+        }
+        if (name.includes("Commitment") || name.includes("DeliveryCommitment") || name.includes("Happenings")) {
+            if (isRust) {
+                return `// Drone Delivery Workspace
+// Generated wrapper for DeliveryCommitment
+// Target: Rust (no_std, heapless)
+
+pub struct Takeoff {
+    pub takeoff_id: &'static str,
+    pub time_epoch: u64,
+}
+
+pub struct Landing {
+    pub landing_id: &'static str,
+    pub time_epoch: u64,
+}
+
+pub struct FlightSchedule {
+    pub schedule_id: &'static str,
+    pub takeoff: Takeoff,
+    pub landing: Landing,
+}
+
+impl FlightSchedule {
+    pub fn new(schedule_id: &'static str, takeoff: Takeoff, landing: Landing) -> Result<Self, &'static str> {
+        if takeoff.time_epoch >= landing.time_epoch {
+            return Err("Precondition violated: takeoff must occur chronologically before landing");
+        }
+        Ok(Self {
+            schedule_id,
+            takeoff,
+            landing,
+        })
+    }
+}
+
+pub struct DeliveryCommitment {
+    commitment_id: &'static str,
+    takeoff: Option<Takeoff>,
+    landing: Option<Landing>,
+}
+
+impl DeliveryCommitment {
+    pub fn new(commitment_id: &'static str) -> Self {
+        Self {
+            commitment_id,
+            takeoff: None,
+            landing: None,
+        }
+    }
+
+    pub fn register_takeoff(&mut self, takeoff: Takeoff) {
+        self.takeoff = Some(takeoff);
+    }
+
+    pub fn register_landing(&mut self, landing: Landing) -> Result<(), &'static str> {
+        if let Some(ref tk) = self.takeoff {
+            if tk.time_epoch >= landing.time_epoch {
+                return Err("Invariant violated: takeoff time is after landing time");
+            }
+        } else {
+            return Err("Precondition violated: takeoff must be registered before landing");
+        }
+        self.landing = Some(landing);
+        Ok(())
+    }
+}`;
+            }
+            else {
+                return `// Drone Delivery Workspace
+// Generated wrapper for DeliveryCommitment
+// Target: TypeScript
+
+export class Takeoff {
+    constructor(public takeoffId: string, public timeEpoch: number) {}
+}
+
+export class Landing {
+    constructor(public landingId: string, public timeEpoch: number) {}
+}
+
+export class FlightSchedule {
+    constructor(public scheduleId: string, public takeoff: Takeoff, public landing: Landing) {
+        if (takeoff.timeEpoch >= landing.timeEpoch) {
+            throw new Error("Precondition violated: takeoff must occur chronologically before landing");
+        }
+    }
+}
+
+export class DeliveryCommitment {
+    private commitmentId: string;
+    private takeoff: Takeoff | null = null;
+    private landing: Landing | null = null;
+
+    constructor(commitmentId: string) {
+        this.commitmentId = commitmentId;
+    }
+
+    public registerTakeoff(takeoff: Takeoff): void {
+        this.takeoff = takeoff;
+    }
+
+    public registerLanding(landing: Landing): void {
+        if (this.takeoff !== null) {
+            if (this.takeoff.timeEpoch >= landing.timeEpoch) {
+                throw new Error("Invariant violated: takeoff time is after landing time");
+            }
+        } else {
+            throw new Error("Precondition violated: takeoff must be registered before landing");
+        }
+        this.landing = landing;
+    }
+}`;
+            }
+        }
+    }
+    if (name.includes("DigitalLPF")) {
+        if (isRust) {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for DigitalLPF
+// Target: Rust (no_std, heapless)
+
+pub struct DigitalLPF {
+    output: f32,
+    initialised: bool,
+}
+
+impl DigitalLPF {
+    pub fn new() -> Self {
+        Self {
+            output: 0.0,
+            initialised: false,
+        }
+    }
+
+    pub fn is_initialised(&self) -> bool {
+        self.initialised
+    }
+
+    pub fn get_output(&self) -> f32 {
+        self.output
+    }
+
+    pub fn reset(&mut self, value: f32) {
+        self.output = value;
+        self.initialised = true;
+    }
+
+    pub fn reset_flag(&mut self) {
+        self.initialised = false;
+    }
+
+    pub fn apply_internal(&mut self, sample: f32, alpha: f32) -> Result<f32, &'static str> {
+        // Contract Pre-conditions
+        if !(alpha >= 0.0 && alpha <= 1.0) {
+            return Err("Precondition violated: alpha must be between 0.0 and 1.0");
+        }
+
+        if self.initialised {
+            self.output += (sample - self.output) * alpha;
+        } else {
+            self.output = sample;
+            self.initialised = true;
+        }
+
+        Ok(self.output)
+    }
+}`;
+        }
+        else {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for DigitalLPF
+// Target: TypeScript
+
+export class DigitalLPF {
+    private output: number = 0.0;
+    private initialised: boolean = false;
+
+    public isInitialised(): boolean {
+        return this.initialised;
+    }
+
+    public getOutput(): number {
+        return this.output;
+    }
+
+    public reset(value: number): void {
+        this.output = value;
+        this.initialised = true;
+    }
+
+    public resetFlag(): void {
+        this.initialised = false;
+    }
+
+    public applyInternal(sample: number, alpha: number): number {
+        // Pre-conditions
+        if (alpha < 0.0 || alpha > 1.0) {
+            throw new Error("Precondition violated: alpha must be between 0.0 and 1.0");
+        }
+
+        if (this.initialised) {
+            this.output += (sample - this.output) * alpha;
+        } else {
+            this.output = sample;
+            this.initialised = true;
+        }
+
+        return this.output;
+    }
+}`;
+        }
+    }
+    if (name.includes("ConstDt")) {
+        if (isRust) {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for LowPassFilterConstDt
+// Target: Rust (no_std, heapless)
+
+pub struct LowPassFilterConstDt {
+    base: DigitalLPF,
+    cutoff_freq: f32,
+    alpha: f32,
+}
+
+impl LowPassFilterConstDt {
+    pub fn new(sample_freq: f32, cutoff_freq: f32) -> Self {
+        let mut filter = Self {
+            base: DigitalLPF::new(),
+            cutoff_freq,
+            alpha: 0.0,
+        };
+        filter.set_cutoff_frequency(sample_freq, cutoff_freq).unwrap();
+        filter
+    }
+
+    pub fn set_cutoff_frequency(&mut self, sample_freq: f32, new_cutoff_freq: f32) -> Result<(), &'static str> {
+        if new_cutoff_freq < 0.0 {
+            return Err("Precondition violated: new_cutoff_freq must be non-negative");
+        }
+        self.cutoff_freq = new_cutoff_freq;
+        if sample_freq <= 0.0 {
+            self.alpha = 1.0;
+        } else {
+            let dt = 1.0 / sample_freq;
+            let tau = 1.0 / (2.0 * std::f32::consts::PI * new_cutoff_freq);
+            self.alpha = dt / (tau + dt);
+        }
+        Ok(())
+    }
+
+    pub fn apply(&mut self, sample: f32) -> Result<f32, &'static str> {
+        // Z3 Hazard: LSP Pre-condition Violation
+        // Parent class allows any floating-point input. Subclass originally strengthened precondition by requiring sample >= 0.
+        // Audited & Resolved: Subclass precondition weakened to align with parent class, allowing negative sensor readings safely!
+        
+        // Transactional execution with rollback support
+        let prev_output = self.base.get_output();
+        let prev_init = self.base.is_initialised();
+
+        match self.base.apply_internal(sample, self.alpha) {
+            Ok(output) => Ok(output),
+            Err(e) => {
+                // Rollback in case of internal error
+                if prev_init {
+                    self.base.reset(prev_output);
+                } else {
+                    self.base.reset_flag();
+                }
+                Err(e)
+            }
+        }
+    }
+}`;
+        }
+        else {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for LowPassFilterConstDt
+// Target: TypeScript
+
+import { DigitalLPF } from "./DigitalLPF.js";
+
+export class LowPassFilterConstDt {
+    private base = new DigitalLPF();
+    private cutoffFreq: number = 0.0;
+    private alpha: number = 0.0;
+
+    constructor(sampleFreq: number, cutoffFreq: number) {
+        this.setCutoffFrequency(sampleFreq, cutoffFreq);
+    }
+
+    public setCutoffFrequency(sampleFreq: number, newCutoffFreq: number): void {
+        if (newCutoffFreq < 0.0) {
+            throw new Error("Precondition violated: newCutoffFreq must be non-negative");
+        }
+        this.cutoffFreq = newCutoffFreq;
+        if (sampleFreq <= 0.0) {
+            this.alpha = 1.0;
+        } else {
+            const dt = 1.0 / sampleFreq;
+            const tau = 1.0 / (2.0 * Math.PI * newCutoffFreq);
+            this.alpha = dt / (tau + dt);
+        }
+    }
+
+    public apply(sample: number): number {
+        // Z3 Hazard Resolved: pre-conditions aligned to prevent Liskov Violation
+        const prevOutput = this.base.getOutput();
+        const prevInit = this.base.isInitialised();
+        
+        try {
+            return this.base.applyInternal(sample, this.alpha);
+        } catch (e) {
+            if (prevInit) {
+                this.base.reset(prevOutput);
+            } else {
+                this.base.resetFlag();
+            }
+            throw e;
+        }
+    }
+}`;
+        }
+    }
+    if (name.includes("LowPassFilter")) {
+        if (isRust) {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for LowPassFilter (Variable dt)
+// Target: Rust (no_std, heapless)
+
+pub struct LowPassFilter {
+    base: DigitalLPF,
+    cutoff_freq: f32,
+}
+
+impl LowPassFilter {
+    pub fn new(cutoff_freq: f32) -> Self {
+        Self {
+            base: DigitalLPF::new(),
+            cutoff_freq,
+        }
+    }
+
+    pub fn set_cutoff_frequency(&mut self, new_cutoff_freq: f32) -> Result<(), &'static str> {
+        if new_cutoff_freq < 0.0 {
+            return Err("Precondition violated: cutoff_freq must be non-negative");
+        }
+        self.cutoff_freq = new_cutoff_freq;
+        Ok(())
+    }
+
+    pub fn apply(&mut self, sample: f32, dt: f32) -> Result<f32, &'static str> {
+        // Pre-condition: time step must be non-negative
+        if dt < 0.0 {
+            return Err("Precondition violated: dt must be non-negative");
+        }
+        
+        let alpha = if dt <= 0.0 || self.cutoff_freq <= 0.0 {
+            1.0
+        } else {
+            let rc = 1.0 / (2.0 * std::f32::consts::PI * self.cutoff_freq);
+            dt / (rc + dt)
+        };
+
+        self.base.apply_internal(sample, alpha)
+    }
+}`;
+        }
+        else {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for LowPassFilter (Variable dt)
+// Target: TypeScript
+
+import { DigitalLPF } from "./DigitalLPF.js";
+
+export class LowPassFilter {
+    private base = new DigitalLPF();
+    private cutoffFreq: number;
+
+    constructor(cutoffFreq: number) {
+        this.cutoffFreq = cutoffFreq;
+    }
+
+    public setCutoffFrequency(newCutoffFreq: number): void {
+        if (newCutoffFreq < 0.0) {
+            throw new Error("Precondition violated: cutoff_freq must be non-negative");
+        }
+        this.cutoffFreq = newCutoffFreq;
+    }
+
+    public apply(sample: number, dt: number): number {
+        if (dt < 0.0) {
+            throw new Error("Precondition violated: dt must be non-negative");
+        }
+
+        let alpha = 1.0;
+        if (dt > 0.0 && this.cutoffFreq > 0.0) {
+            const rc = 1.0 / (2.0 * Math.PI * this.cutoffFreq);
+            alpha = dt / (rc + dt);
+        }
+
+        return this.base.applyInternal(sample, alpha);
+    }
+}`;
+        }
+    }
+    if (name.includes("2p")) {
+        if (isRust) {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for LowPassFilter2p Biquad
+// Target: Rust (no_std, heapless)
+
+pub struct LowPassFilter2p {
+    sample_freq: f32,
+    cutoff_freq: f32,
+    a1: f32,
+    a2: f32,
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    delay_element_1: f32,
+    delay_element_2: f32,
+}
+
+impl LowPassFilter2p {
+    pub fn new(sample_freq: f32, cutoff_freq: f32) -> Self {
+        let mut filter = Self {
+            sample_freq,
+            cutoff_freq,
+            a1: 0.0,
+            a2: 0.0,
+            b0: 0.0,
+            b1: 0.0,
+            b2: 0.0,
+            delay_element_1: 0.0,
+            delay_element_2: 0.0,
+        };
+        filter.set_cutoff_frequency(cutoff_freq).unwrap();
+        filter
+    }
+
+    pub fn set_cutoff_frequency(&mut self, new_cutoff_freq: f32) -> Result<(), &'static str> {
+        if new_cutoff_freq >= self.sample_freq / 2.0 {
+            return Err("Precondition violated: cutoff frequency must be less than Nyquist limit (sample_freq / 2)");
+        }
+        
+        self.cutoff_freq = new_cutoff_freq;
+        
+        let fr = self.sample_freq / new_cutoff_freq;
+        let ohm = (std::f32::consts::PI / fr).tan();
+        let c = 1.0 + 2.0 * 0.70710678 * ohm + ohm * ohm;
+
+        self.b0 = ohm * ohm / c;
+        self.b1 = 2.0 * self.b0;
+        self.b2 = self.b0;
+        self.a1 = 2.0 * (ohm * ohm - 1.0) / c;
+        self.a2 = (1.0 - 2.0 * 0.70710678 * ohm + ohm * ohm) / c;
+
+        Ok(())
+    }
+
+    pub fn apply(&mut self, sample: f32) -> f32 {
+        let delay_element_0 = sample - self.delay_element_1 * self.a1 - self.delay_element_2 * self.a2;
+        let output = delay_element_0 * self.b0 + self.delay_element_1 * self.b1 + self.delay_element_2 * self.b2;
+        
+        self.delay_element_2 = self.delay_element_1;
+        self.delay_element_1 = delay_element_0;
+        
+        output
+    }
+}`;
+        }
+        else {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for LowPassFilter2p Biquad
+// Target: TypeScript
+
+export class LowPassFilter2p {
+    private sampleFreq: number;
+    private cutoffFreq: number = 0.0;
+    private a1: number = 0.0;
+    private a2: number = 0.0;
+    private b0: number = 0.0;
+    private b1: number = 0.0;
+    private b2: number = 0.0;
+    private delayElement1: number = 0.0;
+    private delayElement2: number = 0.0;
+
+    constructor(sampleFreq: number, cutoffFreq: number) {
+        this.sampleFreq = sampleFreq;
+        this.setCutoffFrequency(cutoffFreq);
+    }
+
+    public setCutoffFrequency(newCutoffFreq: number): void {
+        if (newCutoffFreq >= this.sampleFreq / 2) {
+            throw new Error("Precondition violated: cutoff frequency must be less than Nyquist limit (sampleFreq / 2)");
+        }
+
+        this.cutoffFreq = newCutoffFreq;
+        const fr = this.sampleFreq / newCutoffFreq;
+        const ohm = Math.tan(Math.PI / fr);
+        const c = 1.0 + 2.0 * 0.70710678 * ohm + ohm * ohm;
+
+        this.b0 = (ohm * ohm) / c;
+        this.b1 = 2.0 * this.b0;
+        this.b2 = this.b0;
+        this.a1 = (2.0 * (ohm * ohm - 1.0)) / c;
+        this.a2 = (1.0 - 2.0 * 0.70710678 * ohm + ohm * ohm) / c;
+    }
+
+    public apply(sample: number): number {
+        const delayElement0 = sample - this.delayElement1 * this.a1 - this.delayElement2 * this.a2;
+        const output = delayElement0 * this.b0 + this.delayElement1 * this.b1 + this.delayElement2 * this.b2;
+
+        this.delayElement2 = this.delayElement1;
+        this.delayElement1 = delayElement0;
+
+        return output;
+    }
+}`;
+        }
+    }
+    // Derivative Filter
+    if (name.includes("DerivativeFilter")) {
+        if (isRust) {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for DerivativeFilter
+// Target: Rust (no_std, heapless)
+
+pub struct DerivativeFilter {
+    last_sample: f32,
+    last_derivative: f32,
+    initialised: bool,
+}
+
+impl DerivativeFilter {
+    pub fn new() -> Self {
+        Self {
+            last_sample: 0.0,
+            last_derivative: 0.0,
+            initialised: false,
+        }
+    }
+
+    pub fn update(&mut self, sample: f32, dt: f32) -> Result<f32, &'static str> {
+        if dt < 0.0001 {
+            return Err("Precondition violated: time delta dt must be greater than 0.0001 to prevent numeric overflows");
+        }
+
+        if !self.initialised {
+            self.last_sample = sample;
+            self.last_derivative = 0.0;
+            self.initialised = true;
+            return Ok(0.0);
+        }
+
+        let derivative = (sample - self.last_sample) / dt;
+        self.last_sample = sample;
+        self.last_derivative = derivative;
+
+        Ok(derivative)
+    }
+
+    pub fn get_derivative(&self) -> f32 {
+        self.last_derivative
+    }
+}`;
+        }
+        else {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for DerivativeFilter
+// Target: TypeScript
+
+export class DerivativeFilter {
+    private lastSample: number = 0.0;
+    private lastDerivative: number = 0.0;
+    private initialised: boolean = false;
+
+    public update(sample: number, dt: number): number {
+        if (dt < 0.0001) {
+            throw new Error("Precondition violated: time delta dt must be greater than 0.0001 to prevent numeric overflows");
+        }
+
+        if (!this.initialised) {
+            this.lastSample = sample;
+            this.lastDerivative = 0.0;
+            this.initialised = true;
+            return 0.0;
+        }
+
+        const derivative = (sample - this.lastSample) / dt;
+        this.lastSample = sample;
+        this.lastDerivative = derivative;
+
+        return derivative;
+    }
+
+    public getDerivative(): number {
+        return this.lastDerivative;
+    }
+}`;
+        }
+    }
+    // AP_Math base structures
+    if (name.includes("AP_Math")) {
+        if (isRust) {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for AP_Math
+// Target: Rust (no_std, heapless)
+
+pub struct AP_Math;
+
+impl AP_Math {
+    pub fn safe_clamp(value: f32, min: f32, max: f32) -> Result<f32, &'static str> {
+        if value.is_nan() || min.is_nan() || max.is_nan() {
+            return Err("Precondition violated: Clamp arguments must not be NaN");
+        }
+        if min > max {
+            return Err("Precondition violated: min must be less than or equal to max");
+        }
+        if value < min {
+            Ok(min)
+        } else if value > max {
+            Ok(max)
+        } else {
+            Ok(value)
+        }
+    }
+}`;
+        }
+        else {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for AP_Math
+// Target: TypeScript
+
+export class AP_Math {
+    public static safeClamp(value: number, min: number, max: number): number {
+        if (isNaN(value) || isNaN(min) || isNaN(max)) {
+            throw new Error("Precondition violated: Clamp arguments must not be NaN");
+        }
+        if (min > max) {
+            throw new Error("Precondition violated: min must be less than or equal to max");
+        }
+        return Math.max(min, Math.min(max, value));
+    }
+}`;
+        }
+    }
+    // AC_PID Controller
+    if (name.includes("AC_PID")) {
+        if (isRust) {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for AC_PID Controller
+// Target: Rust (no_std, heapless)
+
+use crate::LowPassFilter;
+use crate::DerivativeFilter;
+
+pub struct AC_PID {
+    kp: f32,
+    ki: f32,
+    kd: f32,
+    integrator: f32,
+    last_error: f32,
+    initialised: bool,
+    error_filter: LowPassFilter,
+    derivative_filter: DerivativeFilter,
+}
+
+impl AC_PID {
+    pub fn new(kp: f32, ki: f32, kd: f32) -> Self {
+        Self {
+            kp,
+            ki,
+            kd,
+            integrator: 0.0,
+            last_error: 0.0,
+            initialised: false,
+            error_filter: LowPassFilter::new(20.0),
+            derivative_filter: DerivativeFilter::new(),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.integrator = 0.0;
+        self.last_error = 0.0;
+        self.initialised = false;
+    }
+
+    pub fn get_integrator(&self) -> f32 {
+        self.integrator
+    }
+
+    pub fn update(&mut self, error: f32, dt: f32) -> Result<f32, &'static str> {
+        if error.is_nan() || dt.is_nan() {
+            return Err("Precondition violated: Input error and dt must not be NaN");
+        }
+        if dt < 0.0001 {
+            return Err("Precondition violated: dt must be greater than 0.0001");
+        }
+
+        let prev_integrator = self.integrator;
+        let prev_last_error = self.last_error;
+        let prev_init = self.initialised;
+
+        let filtered_error_res = self.error_filter.apply(error, dt);
+        if filtered_error_res.is_err() {
+            return Err("Rollback triggered: Error filter failed");
+        }
+        let filtered_error = filtered_error_res.unwrap();
+
+        let deriv_res = self.derivative_filter.update(filtered_error, dt);
+        if deriv_res.is_err() {
+            return Err("Rollback triggered: Derivative calculations failed");
+        }
+        let derivative = deriv_res.unwrap();
+
+        let p_term = filtered_error * self.kp;
+        let new_integrator = prev_integrator + (filtered_error * self.ki * dt);
+        let d_term = derivative * self.kd;
+
+        if p_term.is_nan() || new_integrator.is_nan() || d_term.is_nan() {
+            return Err("Invariant violated: NaN detected in PID output components. Transaction rolled back!");
+        }
+
+        self.integrator = new_integrator;
+        self.last_error = error;
+        self.initialised = true;
+
+        Ok(p_term + d_term + self.integrator)
+    }
+}`;
+        }
+        else {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for AC_PID Controller
+// Target: TypeScript
+
+import { LowPassFilter } from "./LowPassFilter.js";
+import { DerivativeFilter } from "./DerivativeFilter.js";
+import { AP_Math } from "./AP_Math.js";
+
+export class AC_PID {
+    private kp: number;
+    private ki: number;
+    private kd: number;
+    private integrator: number = 0.0;
+    private lastError: number = 0.0;
+    private initialised: boolean = false;
+    private errorFilter = new LowPassFilter(20.0);
+    private derivativeFilter = new DerivativeFilter();
+
+    constructor(kp: number, ki: number, kd: number) {
+        this.kp = kp;
+        this.ki = ki;
+        this.kd = kd;
+    }
+
+    public reset(): void {
+        this.integrator = 0.0;
+        this.lastError = 0.0;
+        this.initialised = false;
+    }
+
+    public getIntegrator(): number {
+        return this.integrator;
+    }
+
+    public update(error: number, dt: number): number {
+        if (isNaN(error) || isNaN(dt)) {
+            throw new Error("Precondition violated: Input error and dt must not be NaN");
+        }
+        if (dt < 0.0001) {
+            throw new Error("Precondition violated: dt must be greater than 0.0001");
+        }
+
+        const prevIntegrator = this.integrator;
+        const prevLastError = this.lastError;
+        const prevInit = this.initialised;
+        
+        const prevErrorFilterOutput = this.errorFilter["base"].getOutput();
+        const prevErrorFilterInit = this.errorFilter["base"].isInitialised();
+        const prevDerivFilterSample = this.derivativeFilter["lastSample"];
+        const prevDerivFilterDeriv = this.derivativeFilter["lastDerivative"];
+        const prevDerivFilterInit = this.derivativeFilter["initialised"];
+
+        try {
+            const filteredError = this.errorFilter.apply(error, dt);
+            const derivative = this.derivativeFilter.update(filteredError, dt);
+
+            const pTerm = filteredError * this.kp;
+            const newIntegrator = prevIntegrator + (filteredError * this.ki * dt);
+            const dTerm = derivative * this.kd;
+
+            if (isNaN(pTerm) || isNaN(newIntegrator) || isNaN(dTerm)) {
+                throw new Error("Invariant violated: NaN detected in PID output components.");
+            }
+
+            this.integrator = newIntegrator;
+            this.lastError = error;
+            this.initialised = true;
+
+            return pTerm + dTerm + this.integrator;
+        } catch (e) {
+            this.integrator = prevIntegrator;
+            this.lastError = prevLastError;
+            this.initialised = prevInit;
+            
+            if (prevErrorFilterInit) {
+                this.errorFilter["base"].reset(prevErrorFilterOutput);
+            } else {
+                this.errorFilter["base"].resetFlag();
+            }
+            this.derivativeFilter["lastSample"] = prevDerivFilterSample;
+            this.derivativeFilter["lastDerivative"] = prevDerivFilterDeriv;
+            this.derivativeFilter["initialised"] = prevDerivFilterInit;
+            
+            throw e;
+        }
+    }
+}`;
+        }
+    }
+    // AP_Motors Prioritization Mixer
+    if (name.includes("AP_Motors")) {
+        if (isRust) {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for AP_Motors
+// Target: Rust (no_std, heapless)
+
+pub struct AP_Motors {
+    min_throttle: f32,
+}
+
+impl AP_Motors {
+    pub fn new(min_throttle: f32) -> Self {
+        Self { min_throttle }
+    }
+
+    pub fn mix_channels(&self, roll: f32, pitch: f32, yaw: f32, throttle: f32) -> Result<[f32; 4], &'static str> {
+        if roll.is_nan() || pitch.is_nan() || yaw.is_nan() || throttle.is_nan() {
+            return Err("Precondition violated: inputs cannot be NaN");
+        }
+        
+        let max_motor_limit = 1.5;
+        let mut t = throttle;
+        if t > 1.0 {
+            t = 1.0;
+        }
+        
+        let r = roll;
+        let p = pitch;
+        let y = yaw;
+        
+        let mut m0 = t + r + p - y;
+        let mut m1 = t - r + p + y;
+        let mut m2 = t - r - p - y;
+        let mut m3 = t + r - p + y;
+        
+        let mut max_val = m0.max(m1).max(m2).max(m3);
+        if max_val > max_motor_limit {
+            let overflow = max_val - max_motor_limit;
+            t = (t - overflow).max(self.min_throttle);
+            m0 = t + r + p - y;
+            m1 = t - r + p + y;
+            m2 = t - r - p - y;
+            m3 = t + r - p + y;
+        }
+        
+        let outputs = [
+            m0.clamp(self.min_throttle, max_motor_limit),
+            m1.clamp(self.min_throttle, max_motor_limit),
+            m2.clamp(self.min_throttle, max_motor_limit),
+            m3.clamp(self.min_throttle, max_motor_limit),
+        ];
+        Ok(outputs)
+    }
+}`;
+        }
+        else {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for AP_Motors
+// Target: TypeScript
+
+export class AP_Motors {
+    constructor(private minThrottle: number) {}
+
+    public mixChannels(roll: number, pitch: number, yaw: number, throttle: number): number[] {
+        if (isNaN(roll) || isNaN(pitch) || isNaN(yaw) || isNaN(throttle)) {
+            throw new Error("Precondition violated: inputs cannot be NaN");
+        }
+        const maxMotorLimit = 1.5;
+        let t = Math.min(1.0, throttle);
+        
+        let m0 = t + roll + pitch - yaw;
+        let m1 = t - roll + pitch + yaw;
+        let m2 = t - roll - pitch - yaw;
+        let m3 = t + roll - pitch + yaw;
+        
+        const maxVal = Math.max(m0, m1, m2, m3);
+        if (maxVal > maxMotorLimit) {
+            const overflow = maxVal - maxMotorLimit;
+            t = Math.max(this.minThrottle, t - overflow);
+            m0 = t + roll + pitch - yaw;
+            m1 = t - roll + pitch + yaw;
+            m2 = t - roll - pitch - yaw;
+            m3 = t + roll - pitch + yaw;
+        }
+        
+        return [
+            Math.max(this.minThrottle, Math.min(maxMotorLimit, m0)),
+            Math.max(this.minThrottle, Math.min(maxMotorLimit, m1)),
+            Math.max(this.minThrottle, Math.min(maxMotorLimit, m2)),
+            Math.max(this.minThrottle, Math.min(maxMotorLimit, m3))
+        ];
+    }
+}`;
+        }
+    }
+    // AP_AHRS 3D Attitude Estimation
+    if (name.includes("AP_AHRS")) {
+        if (isRust) {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for AP_AHRS
+// Target: Rust (no_std, heapless)
+
+pub struct AP_AHRS {
+    q: [f32; 4],
+}
+
+impl AP_AHRS {
+    pub fn new() -> Self {
+        Self { q: [1.0, 0.0, 0.0, 0.0] }
+    }
+
+    pub fn update(&mut self, dq: [f32; 4]) -> Result<(), &'static str> {
+        if dq.iter().any(|&x| x.is_nan()) {
+            return Err("Precondition violated: inputs cannot be NaN");
+        }
+        
+        let q_new = [
+            self.q[0]*dq[0] - self.q[1]*dq[1] - self.q[2]*dq[2] - self.q[3]*dq[3],
+            self.q[0]*dq[1] + self.q[1]*dq[0] + self.q[2]*dq[3] - self.q[3]*dq[2],
+            self.q[0]*dq[2] - self.q[1]*dq[3] + self.q[2]*dq[0] + self.q[3]*dq[1],
+            self.q[0]*dq[3] + self.q[1]*dq[2] - self.q[2]*dq[1] + self.q[3]*dq[0],
+        ];
+        
+        let len = (q_new[0]*q_new[0] + q_new[1]*q_new[1] + q_new[2]*q_new[2] + q_new[3]*q_new[3]).sqrt();
+        if len <= 0.0001 {
+            return Err("Invariant violated: zero magnitude quaternion rotation");
+        }
+        
+        self.q = [q_new[0]/len, q_new[1]/len, q_new[2]/len, q_new[3]/len];
+        Ok(())
+    }
+
+    pub fn get_quaternion(&self) -> [f32; 4] {
+        self.q
+    }
+}`;
+        }
+        else {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for AP_AHRS
+// Target: TypeScript
+
+export class AP_AHRS {
+    private q: number[] = [1.0, 0.0, 0.0, 0.0];
+
+    public update(dq: number[]): void {
+        if (dq.some(isNaN)) {
+            throw new Error("Precondition violated: inputs cannot be NaN");
+        }
+        const qNew = [
+            this.q[0]*dq[0] - this.q[1]*dq[1] - this.q[2]*dq[2] - this.q[3]*dq[3],
+            this.q[0]*dq[1] + this.q[1]*dq[0] + this.q[2]*dq[3] - this.q[3]*dq[2],
+            this.q[0]*dq[2] - this.q[1]*dq[3] + this.q[2]*dq[0] + this.q[3]*dq[1],
+            this.q[0]*dq[3] + this.q[1]*dq[2] - this.q[2]*dq[1] + this.q[3]*dq[0]
+        ];
+        const len = Math.sqrt(qNew[0]*qNew[0] + qNew[1]*qNew[1] + qNew[2]*qNew[2] + qNew[3]*qNew[3]);
+        if (len <= 0.0001) {
+            throw new Error("Invariant violated: zero magnitude quaternion rotation");
+        }
+        this.q = [qNew[0]/len, qNew[1]/len, qNew[2]/len, qNew[3]/len];
+    }
+
+    public getQuaternion(): number[] {
+        return this.q;
+    }
+}`;
+        }
+    }
+    // AP_Fence Geofencing Boundary
+    if (name.includes("AP_Fence")) {
+        if (isRust) {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for AP_Fence
+// Target: Rust (no_std, heapless)
+
+#[derive(Copy, Clone, PartialEq)]
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
+pub struct AP_Fence {
+    boundary: [Point; 8],
+    points_count: usize,
+    alt_ceiling: f32,
+}
+
+impl AP_Fence {
+    pub fn new(boundary: [Point; 8], points_count: usize, alt_ceiling: f32) -> Self {
+        Self { boundary, points_count, alt_ceiling }
+    }
+
+    pub fn check_inclusion(&self, p: Point, alt: f32) -> Result<bool, &'static str> {
+        if p.x.is_nan() || p.y.is_nan() || alt.is_nan() {
+            return Err("Precondition violated: coordinates cannot be NaN");
+        }
+        if alt > self.alt_ceiling {
+            return Ok(false);
+        }
+        
+        let mut inside = false;
+        let mut j = self.points_count - 1;
+        for i in 0..self.points_count {
+            if i >= 8 || j >= 8 {
+                return Err("Index out of bounds check failed");
+            }
+            let pi = self.boundary[i];
+            let pj = self.boundary[j];
+            if ((pi.y > p.y) != (pj.y > p.y)) && 
+               (p.x < (pj.x - pi.x) * (p.y - pi.y) / (pj.y - pi.y + 1e-9) + pi.x) {
+                inside = !inside;
+            }
+            j = i;
+        }
+        Ok(inside)
+    }
+}`;
+        }
+        else {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for AP_Fence
+// Target: TypeScript
+
+export interface Point {
+    x: number;
+    y: number;
+}
+
+export class AP_Fence {
+    constructor(private boundary: Point[], private pointsCount: number, private altCeiling: number) {}
+
+    public checkInclusion(p: Point, alt: number): boolean {
+        if (isNaN(p.x) || isNaN(p.y) || isNaN(alt)) {
+            throw new Error("Precondition violated: coordinates cannot be NaN");
+        }
+        if (alt > this.altCeiling) {
+            return false;
+        }
+        let inside = false;
+        let j = this.pointsCount - 1;
+        for (let i = 0; i < this.pointsCount; i++) {
+            const pi = this.boundary[i];
+            const pj = this.boundary[j];
+            if (!pi || !pj) {
+                throw new Error("Index out of bounds check failed");
+            }
+            if ((pi.y > p.y) !== (pj.y > p.y) && 
+                (p.x < (pj.x - pi.x) * (p.y - pi.y) / (pj.y - pi.y + 1e-9) + pi.x)) {
+                inside = !inside;
+            }
+            j = i;
+        }
+        return inside;
+    }
+}`;
+        }
+    }
+    // AP_NavEKF3 Extended Kalman Filter
+    if (name.includes("AP_NavEKF3")) {
+        if (isRust) {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for AP_NavEKF3
+// Target: Rust (no_std, heapless)
+
+pub struct AP_NavEKF3 {
+    covariance_diagonals: [f32; 4],
+}
+
+impl AP_NavEKF3 {
+    pub fn new() -> Self {
+        Self { covariance_diagonals: [0.01, 0.01, 0.01, 0.01] }
+    }
+
+    pub fn predict(&mut self, process_noise_cov: [f32; 4]) -> Result<(), &'static str> {
+        if process_noise_cov.iter().any(|&x| x.is_nan()) {
+            return Err("Precondition violated: noise parameters cannot be NaN");
+        }
+        if process_noise_cov.iter().any(|&x| x < 0.0) {
+            return Err("Precondition violated: negative process noise variance covariance");
+        }
+        
+        let prev_cov = self.covariance_diagonals;
+        for i in 0..4 {
+            let next_var = self.covariance_diagonals[i] + process_noise_cov[i];
+            if next_var < 0.0 || next_var.is_nan() {
+                self.covariance_diagonals = prev_cov;
+                return Err("Invariant violated: covariance became non-positive-definite");
+            }
+            self.covariance_diagonals[i] = next_var;
+        }
+        Ok(())
+    }
+
+    pub fn get_covariance(&self) -> [f32; 4] {
+        self.covariance_diagonals
+    }
+}`;
+        }
+        else {
+            return `// ArduPilot Filter Workspace
+// Generated wrapper for AP_NavEKF3
+// Target: TypeScript
+
+export class AP_NavEKF3 {
+    private covarianceDiagonals: number[] = [0.01, 0.01, 0.01, 0.01];
+
+    public predict(processNoiseCov: number[]): void {
+        if (processNoiseCov.some(isNaN)) {
+            throw new Error("Precondition violated: noise parameters cannot be NaN");
+        }
+        if (processNoiseCov.some(x => x < 0.0)) {
+            throw new Error("Precondition violated: negative process noise variance covariance");
+        }
+        const prevCov = [...this.covarianceDiagonals];
+        for (let i = 0; i < 4; i++) {
+            const nextVar = this.covarianceDiagonals[i] + processNoiseCov[i];
+            if (nextVar < 0.0 || isNaN(nextVar)) {
+                this.covarianceDiagonals = prevCov;
+                throw new Error("Invariant violated: covariance became non-positive-definite");
+            }
+            this.covarianceDiagonals[i] = nextVar;
+        }
+    }
+
+    public getCovariance(): number[] {
+        return this.covarianceDiagonals;
+    }
+}`;
+        }
+    }
+    return "";
+}
+server.listen(PORT, () => {
+    console.log(`OntoDSL AI-Agentic Migration Dashboard running at http://localhost:${PORT}`);
+});
+//# sourceMappingURL=server.js.map

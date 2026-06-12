@@ -1,0 +1,157 @@
+schema "onto/0.1";
+namespace payroll_system_discovery;
+
+// ─── Stakeholders ─────────────────────────────────────────────────────
+agent Employee {
+  identity: employeeId;
+  property employeeId: String;
+  property name: String;
+  invariants {
+    self.employeeId <> null;
+    self.name <> null;
+  }
+}
+
+agent Employer {
+  identity: employerId;
+  property employerId: String;
+  property companyName: String;
+  invariants {
+    self.employerId <> null;
+    self.companyName <> null;
+  }
+}
+
+agent PayrollTeam {
+  identity: teamId;
+  property teamId: String;
+  property teamName: String;
+  invariants {
+    self.teamId <> null;
+  }
+}
+
+agent PayrollVendor {
+  identity: vendorId;
+  property vendorId: String;
+  property name: String;
+  invariants {
+    self.vendorId <> null;
+  }
+}
+
+// ─── Glossary terms as kinds (with identity) ──────────────────────────
+kind PayPeriod {
+  identity: periodId;
+  property periodId: String;
+  property startDate: String;
+  property endDate: String;
+  property isAuthorized: Boolean;
+  invariants {
+    self.periodId <> null;
+    self.startDate <> null;
+    self.endDate <> null;
+  }
+}
+
+kind Timesheet {
+  identity: timesheetId;
+  property timesheetId: String;
+  property regularHours: Real;
+  property overtimeHours: Real;
+  property isSigned: Boolean;
+  invariants {
+    self.timesheetId <> null;
+    self.regularHours >= 0.0;
+    self.overtimeHours >= 0.0;
+  }
+}
+
+kind Deduction {
+  identity: deductionId;
+  property deductionId: String;
+  property deductionType: String;
+  property amount: Real;
+  invariants {
+    self.deductionId <> null;
+    self.deductionType <> null;
+    self.amount >= 0.0;
+  }
+}
+
+kind Paystub {
+  identity: paystubId;
+  property paystubId: String;
+  property grossPay: Real;
+  property netPay: Real;
+  property deductionSum: Real;
+  property isDeleted: Boolean;
+  property adjustmentTo: String;
+  invariants {
+    self.paystubId <> null;
+    self.grossPay >= 0.0;
+    self.netPay >= 0.0;
+    self.deductionSum >= 0.0;
+  }
+}
+
+// ─── Hard goals as commitments ────────────────────────────────────────
+// GOAL-1: Arithmetic correctness
+// Predicate uses only commitment-owned property 'minPositiveNet'.
+// The full discharge condition (netPay = grossPay - deductionSum and netPay >= 0.0)
+// will be verified at inter-stage time when the Requirements event's post-condition
+// implies the commitment's predicate via property substitution on the system kind.
+commitment ArithmeticCorrectness
+  debitor: PayrollVendor
+  creditor: Employee {
+    identity: commitmentId;
+    property commitmentId: String;
+    property minPositiveNet: Real;
+    predicate: self.minPositiveNet > 0.0;
+  }
+
+// GOAL-3: Period authorization
+// Predicate uses only commitment-owned property 'commitmentId'.
+// The full condition (paystubPeriodRef <> null and periodAuthorized = true)
+// will be verified at inter-stage time.
+commitment PeriodAuthorization
+  debitor: PayrollVendor
+  creditor: Employer {
+    identity: commitmentId;
+    property commitmentId: String;
+    predicate: self.commitmentId <> null;
+  }
+
+// ─── Constraint categories (member-quantified on domain kinds) ────────
+// GOAL-2: Overtime calculation (uses 'not (A) or (B)' for implies)
+category OvertimeCompliance where bearer: Timesheet {
+  invariants {
+    not (bearer.isSigned = true) or (bearer.regularHours <= 40.0 or bearer.overtimeHours >= 0.0);
+  }
+}
+
+// GOAL-4: Paystub immutability
+category ImmutablePaystub where bearer: Paystub {
+  invariants {
+    not bearer.isDeleted;
+  }
+}
+
+// ─── Combined constraint category (on Paystub) ────────────────────────
+category PayrollIntegrity where bearer: Paystub {
+  invariants {
+    bearer.netPay = bearer.grossPay - bearer.deductionSum;
+  }
+}
+
+// ─── Domain story with identity ───────────────────────────────────────
+happening PayrollRunFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+  }
+}

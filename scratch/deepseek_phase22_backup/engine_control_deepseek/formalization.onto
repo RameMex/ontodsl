@@ -1,0 +1,223 @@
+schema "onto/0.1";
+namespace engine_control_formalization;
+import "./requirements.onto";
+import "./discovery.onto";
+
+// =====================================================================
+// Formalization Stage — Engine Control System
+//
+// Rules followed:
+//   - Kind can ONLY specialize Category or Mixin, NOT another Kind
+//   - Subkind can ONLY specialize Kind or Subkind, NOT Category
+//   - Category membership for domain-logical invariants is expressed
+//     on the Requirements-stage system kind via its 'specializes' clause
+//   - The formalized subkind specializes only the Requirements-stage kind
+//     (which already specializes the discovery categories)
+//   - No property redefinition — subkinds inherit all properties without
+//     redeclaring them
+//   - <<memberOf>> targets must be sortals (kinds/subkinds), not categories
+// =====================================================================
+
+// ─── Regulatory Anchors (Categories) ──────────────────────────────────
+// Categories are NOT sortals — they carry documentary properties only.
+// They cannot be <<memberOf>> targets. They remain as categories for
+// the documentary record.
+
+category Part25Compliant {
+  property certLevel: String;
+  property designAssuranceLevel: String;
+  property certificationBasisDate: String;
+  invariants {
+    true;
+  }
+}
+
+category Do178cLevelA {
+  property softwareLevel: String;
+  property objectiveCountMet: Integer;
+  property verificationIndependenceRequired: Boolean;
+  invariants {
+    true;
+  }
+}
+
+category Arp4754aCompliant {
+  property systemDevelopmentProcess: String;
+  property certificationPlanRef: String;
+  invariants {
+    true;
+  }
+}
+
+category Iso26262AsilD {
+  property asil: String;
+  property faultToleranceTimeGoalMs: Integer;
+  property singlePointFaultMetric: Real;
+  invariants {
+    true;
+  }
+}
+
+// ─── Passive Assumptions (documentary category) ───────────────────────
+category AssumptionDocumentation {
+  property assumptionId: String;
+  property assumptionText: String;
+  property assumptionOwner: String;
+  property validatedSourceRef: String;
+  property revisionDate: String;
+  invariants {
+    true;
+  }
+}
+
+// ─── Domain-Logical Invariants (Member-Quantified Categories) ─────────
+// These categories constrain the BEARER type using 'where' clause.
+// The system kind in requirements.onto WILL specialize these categories
+// (added to its specializes clause conceptually — but since we cannot
+// modify the imported file, we create a new category that aggregates
+// the constraints and declare the subkind to satisfy them via invariants).
+
+category PhysicallyPlausibleSpeed where bearer: EngineControlKind {
+  invariants {
+    bearer.maxSafeSpeed > 0.0;
+    bearer.fuelCutThreshold > 0.0;
+  }
+}
+
+category SensorRedundancyConstraint where bearer: EngineControlKind {
+  invariants {
+    bearer.sensorCount >= 3;
+    bearer.maxToleratedFaults >= 1;
+    bearer.maxToleratedFaults < bearer.sensorCount;
+  }
+}
+
+category PhaseConsistency where bearer: EngineControlKind {
+  invariants {
+    bearer.isOnGround implies (bearer.flightPhase = 'GROUND' or bearer.flightPhase = 'TAXI');
+    not bearer.isOnGround implies (bearer.flightPhase <> 'GROUND' and bearer.flightPhase <> 'TAXI');
+    bearer.continuousIgnitionEnabled implies (bearer.flightPhase = 'TAKEOFF' or bearer.flightPhase = 'LANDING');
+  }
+}
+
+// ─── Certification Record Kinds (Sortals for <<memberOf>>) ────────────
+// These are KINDS (sortals) with identity, so they CAN be <<memberOf>> targets.
+// They carry the certification documentary properties.
+
+kind Part25CertificationRecord {
+  identity: certId;
+  property certId: String;
+  property certLevel: String;
+  property designAssuranceLevel: String;
+  property certificationBasisDate: String;
+  invariants {
+    self.certId <> null;
+  }
+}
+
+kind Do178cCertificationRecord {
+  identity: certId;
+  property certId: String;
+  property softwareLevel: String;
+  property objectiveCountMet: Integer;
+  property verificationIndependenceRequired: Boolean;
+  invariants {
+    self.certId <> null;
+  }
+}
+
+kind Arp4754aCertificationRecord {
+  identity: certId;
+  property certId: String;
+  property systemDevelopmentProcess: String;
+  property certificationPlanRef: String;
+  invariants {
+    self.certId <> null;
+  }
+}
+
+kind Iso26262CertificationRecord {
+  identity: certId;
+  property certId: String;
+  property asil: String;
+  property faultToleranceTimeGoalMs: Integer;
+  property singlePointFaultMetric: Real;
+  invariants {
+    self.certId <> null;
+  }
+}
+
+// ─── <<memberOf>> Relations ───────────────────────────────────────────
+// Target MUST be a sortal (Kind). Categories are NOT sortals.
+
+relation sysPart25: <<memberOf>> from EngineControlSystem [1] to Part25CertificationRecord [1];
+relation sysDo178c: <<memberOf>> from EngineControlSystem [1] to Do178cCertificationRecord [1];
+relation sysArp4754: <<memberOf>> from EngineControlSystem [1] to Arp4754aCertificationRecord [1];
+relation sysIso26262: <<memberOf>> from EngineControlSystem [1] to Iso26262CertificationRecord [1];
+
+// ─── Invariant Enforcement via the Subkind ────────────────────────────
+// Since we CANNOT add category specializations to EngineControlSystem
+// (it's imported and we don't modify it), and a Subkind cannot specialize
+// categories, we enforce the domain-logical invariants directly as
+// invariants on the subkind.
+//
+// The Z3 verifier will check that the subkind's invariants hold for
+// all states reachable by its events (which include inherited events
+// from the parent kind). This achieves the same verification effect
+// as category membership — the invariants are enforced.
+
+subkind EngineControlSystemFormalized specializes EngineControlSystem {
+  invariants {
+    // PhysicallyPlausibleSpeed
+    self.maxSafeSpeed > 0.0;
+    self.fuelCutThreshold > 0.0;
+    
+    // SensorRedundancyConstraint
+    self.sensorCount >= 3;
+    self.maxToleratedFaults >= 1;
+    self.maxToleratedFaults < self.sensorCount;
+    
+    // PhaseConsistency
+    self.isOnGround implies (self.flightPhase = 'GROUND' or self.flightPhase = 'TAXI');
+    not self.isOnGround implies (self.flightPhase <> 'GROUND' and self.flightPhase <> 'TAXI');
+    self.continuousIgnitionEnabled implies (self.flightPhase = 'TAKEOFF' or self.flightPhase = 'LANDING');
+  }
+
+  // ─── Business Rule: Overspeed Guard ─────────────────────────────────
+  event guardOverspeedReject(requestedFuelIncrease: Real) {
+    pre: self.overspeedProtectionFitted = true;
+    pre: self.overspeedActive = true;
+    pre: requestedFuelIncrease > 0.0;
+    // @assumption ASSUME-1: Fuel metering valve independent of overspeed logic
+    post: self.overspeedActive = true;
+    post: self.fuelFlowRate <= self.fuelCutThreshold;
+    modifies: self.fuelFlowRate;
+  }
+
+  // ─── Business Rule: Reverse-In-Flight Lockout ───────────────────────
+  event guardRejectReverseCommandedInFlight(command: Boolean) {
+    pre: command = true;
+    pre: not self.isOnGround;
+    // @assumption ASSUME-2: Cockpit reverse-thrust lever mechanically interlocked
+    post: self.reverserEnabled = false;
+    modifies: self.reverserEnabled;
+  }
+
+  // ─── Business Rule: Modelled Value Must Be Available Before Fault Handling ──
+  event guardSensorFaultHandlingRequiresModelledValue(faultyId: String) {
+    pre: self.modelledValueAvailable = false;
+    // @assumption ASSUME-3: Sensor health monitor models value after detection
+    post: not self.modelledValueAvailable;
+    // no modifies — pure guard, no state change
+  }
+
+  // ─── Business Rule: Phase-Change Must Not Leave Overspeed Unhandled ───
+  event guardPhaseTransitionDuringOverspeed(newPhase: String) {
+    pre: self.flightPhase = 'TAKEOFF';
+    pre: newPhase = 'CLIMB';
+    pre: self.overspeedActive = true;
+    // @assumption ASSUME-4: Flight director will not issue phase transition during overspeed
+    post: self.fuelFlowRate <= self.fuelCutThreshold;
+    modifies: self.fuelFlowRate;
+  }
+}

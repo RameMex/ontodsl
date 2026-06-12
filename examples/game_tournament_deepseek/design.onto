@@ -1,0 +1,227 @@
+schema "onto/0.1";
+namespace game_tournament_design;
+import "./discovery.onto";
+import "./requirements.onto";
+import "./formalization.onto";
+
+// ─── DATA FLOW: end-to-end happening ────────────────────────────────
+happening MatchReportingFlowDesign {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  invariants {
+    self.flowId <> null;
+  }
+}
+
+// ─── COMPONENT 1: MatchScorer ────────────────────────────────────────
+kind MatchScorer renames {
+  targetScore -> targetScore;
+  matchCount -> matchCount;
+} {
+  identity: scorerId;
+  property scorerId: String;
+  property targetScore: Real;
+  property winnerScore: Real;
+  property loserScore: Real;
+  property matchDecided: Boolean;
+  property leftChildDecided: Boolean;
+  property rightChildDecided: Boolean;
+  property matchCount: Integer;
+
+  invariants {
+    self.scorerId <> null;
+    self.targetScore > 0.0;
+    self.winnerScore >= 0.0;
+    self.loserScore >= 0.0;
+    self.matchCount >= 0;
+  }
+
+  // Records a match result after external validation passes.
+  event recordMatchScore(playerAScore: Real, playerBScore: Real)
+    refines game_tournament_requirements::TournamentBracketSystem.reportMatchScore {
+    pre: playerAScore >= 0.0;
+    pre: playerBScore >= 0.0;
+    pre: not self.matchDecided;
+    pre: (playerAScore = self.targetScore and playerBScore < self.targetScore);
+    post: self.matchDecided = true;
+    post: self.winnerScore = if playerAScore = self.targetScore then playerAScore else playerBScore endif;
+    post: self.loserScore = if playerAScore = self.targetScore then playerBScore else playerAScore endif;
+    post: self.matchCount = self.matchCount@pre + 1;
+    modifies: self.matchDecided, self.winnerScore, self.loserScore, self.matchCount;
+  }
+
+  // Queries whether both children are decided (used by BracketManager).
+  query areChildrenDecided(): Boolean {
+    body: self.leftChildDecided and self.rightChildDecided;
+  }
+}
+
+// ─── COMPONENT 2: PlayerTracker ──────────────────────────────────────
+kind PlayerTracker renames {
+  playerLossCount -> playerLossCount;
+  playersEliminatedCount -> playersEliminatedCount;
+} {
+  identity: trackerId;
+  property trackerId: String;
+  property playerLossCount: Integer;
+  property isEliminated: Boolean;
+  property playersEliminatedCount: Integer;
+
+  invariants {
+    self.trackerId <> null;
+    self.playerLossCount >= 0;
+    self.playerLossCount <= 1;
+    self.playersEliminatedCount >= 0;
+  }
+
+  // Rejects any attempt to add an already-eliminated player.
+  event rejectEliminatedPlayer()
+    refines game_tournament_formalization::TournamentBracketSystemFormalized.rejectMatchForEliminatedPlayer {
+    pre: self.isEliminated = true;
+    post: self.isEliminated = true;
+    post: self.playerLossCount = self.playerLossCount@pre;
+    modifies: self.playerLossCount, self.isEliminated;
+  }
+
+  // Marks a player as eliminated after a loss.
+  event recordElimination()
+    refines game_tournament_requirements::TournamentBracketSystem.reportMatchScore {
+    pre: not self.isEliminated;
+    pre: self.playerLossCount = 0;
+    post: self.playerLossCount = 1;
+    post: self.isEliminated = true;
+    post: self.playersEliminatedCount = self.playersEliminatedCount@pre + 1;
+    modifies: self.playerLossCount, self.isEliminated, self.playersEliminatedCount;
+  }
+
+  // Resets player state when they fill a parent slot (new match).
+  event resetPlayerForNextMatch()
+    refines game_tournament_requirements::TournamentBracketSystem.resetPlayer {
+    pre: self.playerLossCount = 1;
+    pre: not self.isEliminated;
+    post: self.playerLossCount = 0;
+    modifies: self.playerLossCount;
+  }
+}
+
+// ─── COMPONENT 3: BracketManager ────────────────────────────────────
+kind BracketManager renames {
+  parentSlotOccupiedCount -> parentSlotOccupiedCount;
+  isPlayable -> isPlayable;
+} {
+  identity: managerId;
+  property managerId: String;
+  property parentSlotFilled: Boolean;
+  property parentSlotOccupiedCount: Integer;
+  property isPlayable: Boolean;
+  property childrenResolved: Boolean;
+
+  invariants {
+    self.managerId <> null;
+    self.parentSlotOccupiedCount >= 0;
+    self.parentSlotOccupiedCount <= 1;
+  }
+
+  // Fills the parent slot with the advancing winner.
+  event fillParentSlot()
+    refines game_tournament_requirements::TournamentBracketSystem.reportMatchScore {
+    pre: not self.parentSlotFilled;
+    pre: self.parentSlotOccupiedCount < 1;
+    post: self.parentSlotFilled = true;
+    post: self.parentSlotOccupiedCount = self.parentSlotOccupiedCount@pre + 1;
+    post: self.childrenResolved = true;
+    modifies: self.parentSlotFilled, self.parentSlotOccupiedCount, self.childrenResolved;
+  }
+
+  // Enables parent match when both children are resolved.
+  event enableParentMatch()
+    refines game_tournament_requirements::TournamentBracketSystem.enableParentMatch {
+    pre: self.parentSlotOccupiedCount = 1;
+    pre: not self.isPlayable;
+    pre: self.childrenResolved;
+    post: self.isPlayable = true;
+    post: self.parentSlotOccupiedCount = 0;
+    modifies: self.isPlayable, self.parentSlotOccupiedCount;
+  }
+
+  // Rejects double-fill attempt.
+  event rejectSlotAlreadyFilled()
+    refines game_tournament_formalization::TournamentBracketSystemFormalized.rejectSlotAlreadyFilled {
+    pre: self.parentSlotOccupiedCount >= 1;
+    post: self.parentSlotOccupiedCount = self.parentSlotOccupiedCount@pre;
+    post: self.isPlayable = self.isPlayable@pre;
+    modifies: self.parentSlotOccupiedCount, self.isPlayable;
+  }
+
+  // Rejects when parent match is not playable.
+  event rejectMatchNotPlayable()
+    refines game_tournament_formalization::TournamentBracketSystemFormalized.rejectMatchNotPlayable {
+    pre: not self.isPlayable;
+    post: self.isPlayable = false;
+    modifies: self.isPlayable;
+  }
+}
+
+// ─── INTERFACE: MatchResultChannel (relator) ──────────────────────────
+role ScorerEndpoint mediated-by MatchResultChannel of MatchScorer {
+  property scorerId: String;
+  property matchDecided: Boolean;
+  property winnerScore: Real;
+  property loserScore: Real;
+  property leftChildDecided: Boolean;
+  property rightChildDecided: Boolean;
+}
+
+role TrackerEndpoint mediated-by MatchResultChannel of PlayerTracker {
+  property trackerId: String;
+  property playerLossCount: Integer;
+  property isEliminated: Boolean;
+}
+
+role ManagerEndpoint mediated-by MatchResultChannel of BracketManager {
+  property managerId: String;
+  property parentSlotFilled: Boolean;
+  property parentSlotOccupiedCount: Integer;
+  property isPlayable: Boolean;
+  property childrenResolved: Boolean;
+}
+
+relator MatchResultChannel mediates (ScorerEndpoint, TrackerEndpoint, ManagerEndpoint) {
+  identity: channelId;
+  property channelId: String;
+  property scorerRef: ScorerEndpoint;
+  property trackerRef: TrackerEndpoint;
+  property managerRef: ManagerEndpoint;
+  property relayedWinnerAssigned: Boolean;
+  property relayedLoserEliminated: Boolean;
+  property relayedChildrenChecked: Boolean;
+
+  invariants {
+    self.channelId <> null;
+    self.scorerRef <> null;
+    self.trackerRef <> null;
+    self.managerRef <> null;
+  }
+
+  event relayMatchOutcome()
+    refines game_tournament_requirements::TournamentBracketSystem.reportMatchScore {
+    pre: self.scorerRef.matchDecided = true;
+    pre: not self.relayedWinnerAssigned;
+    pre: not self.relayedLoserEliminated;
+    pre: not self.relayedChildrenChecked;
+    post: self.relayedWinnerAssigned = true;
+    post: self.relayedLoserEliminated = true;
+    post: self.relayedChildrenChecked = self.scorerRef.leftChildDecided
+                                          and self.scorerRef.rightChildDecided;
+    modifies: self.relayedWinnerAssigned,
+              self.relayedLoserEliminated,
+              self.relayedChildrenChecked;
+  }
+}
+
+// ─── RELATIONS ──────────────────────────────────────────────────────
+relation scorerChannel: <<mediation>> from MatchResultChannel [1] to ScorerEndpoint [1];
+relation trackerChannel: <<mediation>> from MatchResultChannel [1] to TrackerEndpoint [1];
+relation managerChannel: <<mediation>> from MatchResultChannel [1] to ManagerEndpoint [1];

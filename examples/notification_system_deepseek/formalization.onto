@@ -1,0 +1,166 @@
+schema "onto/0.1";
+namespace notification_system_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =====================================================================
+// Formalization Stage — Multi-channel Notification Dispatcher
+//
+// This stage adds the WORLD's constraints on top of the system:
+//   - Regulatory/compliance anchors as categories with documentary invariants
+//   - Active business rules as new events on the formalized system subkind
+//   - Passive assumptions as a dedicated kind with @assumption annotations
+//   - Physical/domain-logical invariants as member-quantified categories
+// =====================================================================
+
+// ─── Regulatory Anchors (Categories with documentary invariants) ─────
+
+// GDPR Article 5 Compliance: data minimization & processing limitation
+category GdprArticle5Compliant where bearer: NotificationRequest {
+  invariants {
+    // NOTE: .length() is not supported on String; use a String constraint instead
+    bearer.messageBody <> null;
+    bearer.channelList <> null;
+  }
+}
+
+// ISO 27001 Compliance: audit trail & information security
+category Iso27001Compliant where bearer: NotificationDispatcherSystem {
+  invariants {
+    bearer.deliveryCount >= 0;
+    bearer.alertsRaisedCount >= 0;
+    bearer.retryCount <= bearer.allowedRetries;
+  }
+}
+
+// CAN-SPAM Act Compliance: commercial email requirements
+category CanSpamActCompliant where bearer: Channel {
+  invariants {
+    bearer.channelType = 'email' implies
+      (bearer.maxRetries <= 5 and bearer.maxRetries >= 0);
+  }
+}
+
+// ─── Physical / Domain-Logical Invariants (Member-Quantified) ────────
+
+category BackoffTimePlausibility where bearer: NotificationDispatcherSystem {
+  invariants {
+    bearer.currentRetrySeconds >= 0;
+    bearer.currentRetrySeconds <= 32;   // max 32 seconds for 5th retry (2^5 = 32)
+    bearer.backoffBaseSeconds >= 0;
+  }
+}
+
+category ChannelExclusivity where bearer: DeliveryAttempt {
+  invariants {
+    bearer.result = 'delivered' implies
+      (bearer.attemptNumber <= 1);
+    bearer.result = 'failed' implies
+      (bearer.attemptNumber >= 5);
+  }
+}
+
+// ─── Subkind of the System Kind (adds events; does NOT override) ─────
+// NOTE: Subkind can only specialize Kind or Subkind, NOT Category.
+// Categories become constraints on the parent Kind, which this inherits.
+
+subkind NotificationDispatcherSystemFormalized
+  specializes NotificationDispatcherSystem {
+
+  // Active business rule: Reject notification with invalid channel
+  event rejectInvalidChannels(requestId: String, channels: String) {
+    pre: requestId <> null;
+    pre: channels = null or channels = '';
+    post: self.deliveryCount = self.deliveryCount@pre;
+    post: self.retryCount = self.retryCount@pre;
+  }
+
+  // Active business rule: Fail notification after retry limit exceeded
+  event failAfterRetryLimit(requestId: String, channelId: String) {
+    pre: requestId <> null;
+    pre: channelId <> null;
+    pre: self.retryCount = self.allowedRetries;
+    post: self.alertsRaisedCount = self.alertsRaisedCount@pre + 1;
+    modifies: self.alertsRaisedCount;
+  }
+
+  // Active business rule: Enforce exponential backoff schedule
+  // NOTE: OCL does NOT support exponentiation operator '^'; use iterative constraint
+  event enforceBackoffSchedule(attemptNumber: Integer): Integer {
+    pre: attemptNumber >= 0;
+    pre: attemptNumber <= 5;
+    post: result >= 1;
+    post: result <= 32;
+  }
+
+  // Active business rule: Verify no duplicate delivery per channel
+  event verifyNoDuplicateDelivery(requestId: String, channelId: String): Boolean {
+    pre: requestId <> null;
+    pre: channelId <> null;
+    pre: self.deliveryCount <= 1;
+    post: result = (self.deliveryCount = 1);
+  }
+}
+
+// ─── Passive Assumptions (documentary kind with @assumption annotations) ──
+
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property assumptionCode: String;
+  property description: String;
+  property classification: String;
+  property isPassive: Boolean;
+
+  invariants {
+    self.assumptionId <> null;
+    self.assumptionCode <> null;
+    self.description <> null;
+    self.classification <> null;
+    self.isPassive = true;
+  }
+}
+
+// ─── Relation: link FormalAssumptionRecord to NotificationDispatcherSystemFormalized ──
+
+relation assumptionRecordBinding: <<memberOf>> from FormalAssumptionRecord [1..*] to NotificationDispatcherSystemFormalized [1];
+
+// ─── Member-quantified categories for the formalized subkind ─────────
+
+category DeliveryChainIntegrity where bearer: NotificationDispatcherSystemFormalized {
+  invariants {
+    bearer.deliveryCount <= 1;
+    bearer.alertsRaisedCount <= 1;
+    not (bearer.deliveryCount > 0 and bearer.alertsRaisedCount > 0);
+  }
+}
+
+category RetryScheduleCorrectness where bearer: NotificationDispatcherSystemFormalized {
+  invariants {
+    bearer.retryCount <= bearer.allowedRetries;
+    bearer.currentRetrySeconds = 2 * bearer.retryCount;
+    bearer.backoffBaseSeconds = 2;
+  }
+}
+
+// ─── Relations (formalization-specific) ──────────────────────────────
+
+// NOTE: <<memberOf>> target must be a sortal (Kind or Subkind). Categories are NOT sortals.
+// gdprComplianceBinding: <<memberOf>> from NotificationRequest [1..*] to GdprArticle5Compliant [1];  -- REMOVED, invalid
+
+relation channelExclusivityBinding: <<composition>> from Channel [1] to CanSpamActCompliant [1];
+
+// ─── Happening: Formalized Domain Story ──────────────────────────────
+// NOTE: Happening must declare identity
+
+happening FormalizedDispatchFlow {
+  identity: flowId;
+  property flowId: String;
+  property triggeredBy: String;
+  property outcome: String;
+  
+  invariants {
+    self.flowId <> null;
+    self.triggeredBy <> null;
+  }
+}

@@ -1,0 +1,135 @@
+schema "onto/0.1";
+namespace smart_thermostat_formalization;
+import "./discovery.onto";
+import "./requirements.onto";
+
+// =====================================================================
+// FORMALIZATION STAGE — what the WORLD imposes on the system
+//
+// Artifacts:
+//   • Regulatory/compliance anchors: categories with documentary invariants
+//   • Active business rules: new events on a formalized subkind
+//     (subkind ThermostatSystemFormalized specializes ThermostatSystem)
+//   • Passive assumptions: FormalAssumptionRecord kind (documentary)
+//   • Physical/domain-logical invariants: member-quantified categories
+//     that the BASE system kind specializes (categories CAN be specialized
+//     by a kind; subkind can only specialize kind/subkind)
+// =====================================================================
+
+// ─── PHYSICAL ENVIRONMENT INVARIANTS ────────────────────────────────
+// These model the real-world constraints the thermostat operates within.
+// Since a subkind cannot specialize categories directly, we declare
+// these categories without the 'where' bearer binding and instead
+// ensure the base kind specializes them in requirements.onto.
+// The formalized subkind inherits through its parent kind.
+
+// ─── REGULATORY / COMPLIANCE ANCHORS ─────────────────────────────────
+// Industry standards that apply to HVAC controllers with safety-related
+// functionality
+
+category Ul60730Compliant {
+  property ulStandardVersion: String;
+  property safetyIntegrityLevel: String;
+  invariants {
+    self.safetyIntegrityLevel = 'CLASS_II';
+  }
+}
+
+category AshraeGuideline36Compliant {
+  property ashraeDocYear: String;
+  property applicableClauses: String;
+  invariants {
+    self.applicableClauses <> null;
+  }
+}
+
+// ─── PASSIVE ASSUMPTIONS ─────────────────────────────────────────────
+// Documented assumptions about the world that are NOT enforced by the
+// system but are required for the model to be correct.
+
+kind FormalAssumptionRecord {
+  identity: assumptionId;
+  property assumptionId: String;
+  property assumptionCode: String;
+  property description: String;
+  property riskLevel: String;
+  property owner: String;
+  invariants {
+    self.assumptionId <> null;
+    self.assumptionCode <> null;
+    self.riskLevel = 'LOW' or self.riskLevel = 'MEDIUM' or self.riskLevel = 'HIGH';
+  }
+}
+
+// @assumption ASSUME-1: Temperature sensor is properly installed and calibrated per manufacturer specifications.
+// @assumption ASSUME-2: Network connectivity is available for firmware updates and remote monitoring.
+// @assumption ASSUME-3: Power supply is stable and within rated voltage range (±10%).
+// @assumption ASSUME-4: HVAC equipment is correctly sized for the conditioned space.
+// @assumption ASSUME-5: User will not physically bypass or disable the thermostat safety mechanisms.
+
+// ─── ACTIVE BUSINESS RULES ───────────────────────────────────────────
+// These are new events that enforce formal constraints NOT present in
+// the requirements. They exist as rejection/guard events that the
+// requirements stage did not model.
+
+subkind ThermostatSystemFormalized specializes ThermostatSystem {
+  // The subkind inherits all properties and events from ThermostatSystem.
+  // It adds formalization-only events below.
+
+  // ─── Active Business Rule: Reject implausible reading (pure rejection) ──
+  // IF the sensor reading is outside [-40, 150] AND the system is not
+  // already halted THEN enter safe halt and notify.
+
+  event guardPlausibleReading(reading: Real, timestamp: Real) {
+    pre: not self.halted;
+    pre: reading < self.sensorPlausibilityMin or reading > self.sensorPlausibilityMax;
+    post: self.halted = true;
+    post: self.faultAlertActive = true;
+    post: self.currentActuatorCommand = 'OFF';
+    post: self.currentTemperature = self.currentTemperature@pre;
+    post: self.currentSetpoint = self.currentSetpoint@pre;
+    post: self.lastCommandTimestamp = self.lastCommandTimestamp@pre;
+    modifies: self.halted, self.faultAlertActive, self.currentActuatorCommand;
+  }
+
+  // ─── Active Business Rule: Reject unsafe setpoint (pure rejection) ─────
+  // IF the user attempts to set a temperature outside [40, 90] THEN reject.
+
+  event guardUnsafeSetpoint(requestedSetpoint: Real) {
+    pre: not self.halted;
+    pre: requestedSetpoint < self.safeMinSetpoint or requestedSetpoint > self.safeMaxSetpoint;
+    post: true;
+  }
+
+  // ─── Active Business Rule: Enforce compressor cycling limit (guard) ────
+  // IF a command transition would violate the 5-minute minimum interval
+  // THEN reject it.
+
+  event guardCyclingViolation(newCommand: String, timestamp: Real) {
+    pre: not self.halted;
+    pre: newCommand <> self.currentActuatorCommand;
+    pre: timestamp - self.lastCommandTimestamp < self.minCycleIntervalSecs;
+    post: true;
+  }
+
+  // ─── Active Business Rule: Ensure consistent display state ─────────────
+  // IF the system is halted or has an active fault alert THEN the
+  // display shall reflect this.
+
+  event enforceDisplayConsistency() {
+    pre: self.halted or self.faultAlertActive;
+    post: self.currentTemperature <> null;
+    post: self.currentSetpoint <> null;
+    post: self.currentActuatorCommand <> null;
+    post: self.faultAlertActive = true;
+    post: self.halted = self.halted@pre;
+    post: self.currentTemperature = self.currentTemperature@pre;
+    post: self.currentSetpoint = self.currentSetpoint@pre;
+    post: self.currentActuatorCommand = self.currentActuatorCommand@pre;
+  }
+}
+
+// ─── EXPLICIT RELATIONS (OntoUML Stereotypes) ─────────────────────────
+// These connect the formalization kinds to domain objects from discovery.
+
+relation assumptionOwnedBy: <<memberOf>> from FormalAssumptionRecord [1..*] to ThermostatVendor [1];

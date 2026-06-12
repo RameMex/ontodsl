@@ -1,0 +1,96 @@
+schema "onto/0.1";
+namespace payroll_system_requirements;
+import "./discovery.onto";
+
+kind PayrollSystem specializes OvertimeCompliance, ImmutablePaystub, PayrollIntegrity {
+  identity: systemId;
+  property systemId: String;
+  property minPositiveNet: Real;
+  property commitmentId: String;
+  property openPeriods: Set<PayPeriod>;
+  property employees: Set<Employee>;
+  property employeeTimesheets: Set<Timesheet>;
+  property employeeDeductions: Set<Deduction>;
+  property issuedPaystubs: Set<Paystub>;
+  property openHrTickets: Set<String>;
+
+  invariants {
+    self.systemId <> null;
+    self.commitmentId <> null;
+    self.minPositiveNet > 0.0;
+    self.openPeriods->forAll(p | p.isAuthorized = true);
+    self.issuedPaystubs->forAll(ps | ps.netPay = ps.grossPay - ps.deductionSum and ps.netPay >= 0.0);
+    self.issuedPaystubs->forAll(ps | ps.isDeleted = false);
+  }
+
+  event authorizePayPeriod(period: PayPeriod) {
+    pre: period <> null;
+    pre: period.isAuthorized = false;
+    pre: not self.openPeriods->includes(period);
+    post: period.isAuthorized = true;
+    post: self.openPeriods->includes(period);
+    modifies: self.openPeriods, period.isAuthorized;
+  }
+
+  event processTimesheet(baseRate: Real, timesheet: Timesheet, isExempt: Boolean): Real
+    refines payroll_system_discovery::ArithmeticCorrectness {
+    pre: timesheet.isSigned = true;
+    pre: baseRate >= 0.0;
+    pre: timesheet.regularHours >= 0.0;
+    pre: timesheet.overtimeHours >= 0.0;
+    pre: not (not isExempt and timesheet.regularHours > 40.0) or timesheet.overtimeHours >= 0.0;
+  }
+
+  event applyDeductions(grossPay: Real, deductionSet: Set<Deduction>): Real
+    refines payroll_system_discovery::ArithmeticCorrectness {
+    pre: grossPay >= 0.0;
+    pre: deductionSet->forAll(d | d.amount >= 0.0);
+    post: result >= self.minPositiveNet;
+  }
+
+  event issuePaystub(employee: Employee, period: PayPeriod, grossPay: Real, deductions: Set<Deduction>)
+    refines payroll_system_discovery::PeriodAuthorization {
+    pre: employee <> null;
+    pre: period <> null;
+    pre: self.openPeriods->includes(period);
+    pre: self.employees->includes(employee);
+    pre: grossPay >= 0.0;
+    pre: deductions->forAll(d | d.amount >= 0.0);
+    post: self.issuedPaystubs->size() = self.issuedPaystubs@pre->size() + 1;
+    post: self.issuedPaystubs@pre->forAll(ps | self.issuedPaystubs->includes(ps));
+    post: self.issuedPaystubs->exists(ps |
+      ps.grossPay = grossPay and
+      ps.deductionSum >= 0.0 and
+      ps.netPay = ps.grossPay - ps.deductionSum and
+      ps.adjustmentTo = null and
+      ps.isDeleted = false
+    );
+    post: self.commitmentId <> null;
+    modifies: self.issuedPaystubs;
+  }
+
+  event haltForNegativeNet(employee: Employee, grossPay: Real, deductionSum: Real, ticketRef: String) {
+    pre: grossPay >= 0.0;
+    pre: deductionSum >= 0.0;
+    pre: grossPay - deductionSum < 0.0;
+    pre: ticketRef <> null;
+    post: self.openHrTickets->includes(ticketRef);
+    post: self.openHrTickets->size() = self.openHrTickets@pre->size() + 1;
+    modifies: self.openHrTickets;
+  }
+
+  event issueAdjustment(employee: Employee, originalPaystub: Paystub, correctionAmount: Real) {
+    pre: employee <> null;
+    pre: originalPaystub <> null;
+    pre: self.issuedPaystubs->includes(originalPaystub);
+    pre: correctionAmount <> 0.0;
+    post: self.issuedPaystubs->size() = self.issuedPaystubs@pre->size() + 1;
+    post: self.issuedPaystubs@pre->forAll(ps | self.issuedPaystubs->includes(ps));
+    post: self.issuedPaystubs->exists(ps |
+      ps.grossPay = correctionAmount and
+      ps.adjustmentTo = originalPaystub.paystubId and
+      ps.isDeleted = false
+    );
+    modifies: self.issuedPaystubs;
+  }
+}

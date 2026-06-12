@@ -1,0 +1,387 @@
+{
+  "nodes": [
+    {
+      "id": "TournamentCategory",
+      "type": "endurant",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "data": {
+        "name": "TournamentCategory",
+        "stereotype": "Kind",
+        "category": "endurant",
+        "properties": [
+          {
+            "name": "categoryId",
+            "type": "String"
+          },
+          {
+            "name": "name",
+            "type": "String"
+          },
+          {
+            "name": "inningsBase",
+            "type": "Integer"
+          },
+          {
+            "name": "basesDistanceFt",
+            "type": "Real"
+          },
+          {
+            "name": "plateToLomaFt",
+            "type": "Real"
+          },
+          {
+            "name": "maxPitchesPerGame",
+            "type": "Integer"
+          },
+          {
+            "name": "allowsCurve",
+            "type": "Boolean"
+          }
+        ],
+        "identityProperty": "categoryId",
+        "headerSlots": [],
+        "invariantCount": 6
+      }
+    },
+    {
+      "id": "Player",
+      "type": "endurant",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "data": {
+        "name": "Player",
+        "stereotype": "Kind",
+        "category": "endurant",
+        "properties": [
+          {
+            "name": "playerId",
+            "type": "String"
+          },
+          {
+            "name": "name",
+            "type": "String"
+          },
+          {
+            "name": "birthYear",
+            "type": "Integer"
+          }
+        ],
+        "identityProperty": "playerId",
+        "headerSlots": [],
+        "invariantCount": 3
+      }
+    },
+    {
+      "id": "Team",
+      "type": "endurant",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "data": {
+        "name": "Team",
+        "stereotype": "Kind",
+        "category": "endurant",
+        "properties": [
+          {
+            "name": "teamId",
+            "type": "String"
+          },
+          {
+            "name": "name",
+            "type": "String"
+          },
+          {
+            "name": "leagueCategory",
+            "type": "TournamentCategory"
+          }
+        ],
+        "identityProperty": "teamId",
+        "headerSlots": [],
+        "invariantCount": 3
+      }
+    },
+    {
+      "id": "HomeTeam",
+      "type": "endurant",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "data": {
+        "name": "HomeTeam",
+        "stereotype": "Role",
+        "category": "endurant",
+        "properties": [
+          {
+            "name": "teamId",
+            "type": "String"
+          },
+          {
+            "name": "leagueCategory",
+            "type": "TournamentCategory"
+          }
+        ],
+        "identityProperty": null,
+        "headerSlots": [
+          {
+            "label": "ofKind",
+            "value": "Team"
+          },
+          {
+            "label": "mediatedBy",
+            "value": "Game"
+          }
+        ],
+        "invariantCount": 0
+      }
+    },
+    {
+      "id": "AwayTeam",
+      "type": "endurant",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "data": {
+        "name": "AwayTeam",
+        "stereotype": "Role",
+        "category": "endurant",
+        "properties": [
+          {
+            "name": "teamId",
+            "type": "String"
+          },
+          {
+            "name": "leagueCategory",
+            "type": "TournamentCategory"
+          }
+        ],
+        "identityProperty": null,
+        "headerSlots": [
+          {
+            "label": "ofKind",
+            "value": "Team"
+          },
+          {
+            "label": "mediatedBy",
+            "value": "Game"
+          }
+        ],
+        "invariantCount": 0
+      }
+    },
+    {
+      "id": "Game",
+      "type": "relator",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "data": {
+        "name": "Game",
+        "stereotype": "Relator",
+        "category": "relator",
+        "properties": [
+          {
+            "name": "gameId",
+            "type": "String"
+          },
+          {
+            "name": "leagueCategory",
+            "type": "TournamentCategory"
+          },
+          {
+            "name": "homeTeam",
+            "type": "HomeTeam"
+          },
+          {
+            "name": "awayTeam",
+            "type": "AwayTeam"
+          },
+          {
+            "name": "status",
+            "type": "String"
+          },
+          {
+            "name": "homeScore",
+            "type": "Integer"
+          },
+          {
+            "name": "awayScore",
+            "type": "Integer"
+          },
+          {
+            "name": "isTie",
+            "type": "Boolean"
+          },
+          {
+            "name": "pitchers",
+            "type": "Set<Player>"
+          },
+          {
+            "name": "catchers",
+            "type": "Set<Player>"
+          }
+        ],
+        "identityProperty": "gameId",
+        "headerSlots": [
+          {
+            "label": "mediates",
+            "value": "HomeTeam, AwayTeam"
+          }
+        ],
+        "invariantCount": 10
+      }
+    },
+    {
+      "id": "PitcherPerformance",
+      "type": "relator",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "data": {
+        "name": "PitcherPerformance",
+        "stereotype": "Relator",
+        "category": "relator",
+        "properties": [
+          {
+            "name": "performanceId",
+            "type": "String"
+          },
+          {
+            "name": "pitchesThrown",
+            "type": "Integer"
+          },
+          {
+            "name": "pitcher",
+            "type": "Player"
+          },
+          {
+            "name": "game",
+            "type": "Game"
+          }
+        ],
+        "identityProperty": "performanceId",
+        "headerSlots": [
+          {
+            "label": "mediates",
+            "value": "Player, Game"
+          }
+        ],
+        "invariantCount": 5
+      }
+    },
+    {
+      "id": "TeamStanding",
+      "type": "endurant",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "data": {
+        "name": "TeamStanding",
+        "stereotype": "Kind",
+        "category": "endurant",
+        "properties": [
+          {
+            "name": "standingId",
+            "type": "String"
+          },
+          {
+            "name": "team",
+            "type": "Team"
+          },
+          {
+            "name": "wins",
+            "type": "Integer"
+          },
+          {
+            "name": "losses",
+            "type": "Integer"
+          },
+          {
+            "name": "pct",
+            "type": "Real"
+          }
+        ],
+        "identityProperty": "standingId",
+        "headerSlots": [],
+        "invariantCount": 5
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "Player|Team|relation",
+      "source": "Player",
+      "target": "Team",
+      "type": "relation",
+      "label": "memberOf",
+      "data": {
+        "category": "relation",
+        "label": "memberOf",
+        "sourceMultiplicity": "1..*",
+        "targetMultiplicity": "1"
+      }
+    },
+    {
+      "id": "Game|HomeTeam|relation",
+      "source": "Game",
+      "target": "HomeTeam",
+      "type": "relation",
+      "label": "mediation",
+      "data": {
+        "category": "relation",
+        "label": "mediation",
+        "sourceMultiplicity": "1",
+        "targetMultiplicity": "1"
+      }
+    },
+    {
+      "id": "Game|AwayTeam|relation",
+      "source": "Game",
+      "target": "AwayTeam",
+      "type": "relation",
+      "label": "mediation",
+      "data": {
+        "category": "relation",
+        "label": "mediation",
+        "sourceMultiplicity": "1",
+        "targetMultiplicity": "1"
+      }
+    },
+    {
+      "id": "PitcherPerformance|Player|relation",
+      "source": "PitcherPerformance",
+      "target": "Player",
+      "type": "relation",
+      "label": "mediation",
+      "data": {
+        "category": "relation",
+        "label": "mediation",
+        "sourceMultiplicity": "1",
+        "targetMultiplicity": "1"
+      }
+    },
+    {
+      "id": "PitcherPerformance|Game|relation",
+      "source": "PitcherPerformance",
+      "target": "Game",
+      "type": "relation",
+      "label": "mediation",
+      "data": {
+        "category": "relation",
+        "label": "mediation",
+        "sourceMultiplicity": "1",
+        "targetMultiplicity": "1"
+      }
+    }
+  ]
+}
