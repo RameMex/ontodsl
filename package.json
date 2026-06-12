@@ -55,5 +55,13 @@
     "node": ">=20"
   },
   "license": "FSL-1.1-MIT",
-  "author": "Rene Meza Escamilla <renemeza.escamilla@gmail.com>"
+  "author": "Rene Meza Escamilla <renemeza.escamilla@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RameMex/ontodsl.git"
+  },
+  "homepage": "https://github.com/RameMex/ontodsl#readme",
+  "bugs": {
+    "url": "https://github.com/RameMex/ontodsl/issues"
+  }
 }
