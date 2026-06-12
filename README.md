@@ -76,7 +76,7 @@ Same AST → same bytes, every time.
 ```bash
 ontodsl model.onto --out gen --target ts        # also: rust | c | tanstack
 ontodsl model.onto --out gen --verify --strict  # Z3 + promote W## to hard
-ontodsl explain S22                             # repair-catalog entry for a diagnostic
+ontodsl explain S29                             # repair-catalog entry for a diagnostic
 ontodsl gen-witness model.onto --out crate      # Rust contract-witness test crate
 ontodsl coverage model.onto                     # contract surface metrics
 ```
