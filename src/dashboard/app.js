@@ -20,11 +20,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const workspaceFilesBadge = document.getElementById("workspace-files-badge");
   
   if (apiKeyInput) {
-    let savedKey = localStorage.getItem("GEMINI_API_KEY");
-    if (!savedKey) {
-      savedKey = "AIzaSyComMIv5Br1Hum9MvOpqiA_XeGCC80HoAk";
-      localStorage.setItem("GEMINI_API_KEY", savedKey);
-    }
+    // No hardcoded key: the user supplies their own (browser keys are always
+    // user-visible, so they must be restricted by referrer/API in GCP).
+    const savedKey = localStorage.getItem("GEMINI_API_KEY") || "";
     apiKeyInput.value = savedKey;
     apiKeyInput.addEventListener("input", () => {
       localStorage.setItem("GEMINI_API_KEY", apiKeyInput.value.trim());

@@ -1,7 +1,7 @@
 // C:\Users\Rene Meza\.gemini\antigravity-ide\brain\abce5c13-68fd-4164-9336-10f9fe6b3d4b/scratch/migrate_drone.js
 
 const apiBase = "http://localhost:3000";
-const apiKey = "AIzaSyComMIv5Br1Hum9MvOpqiA_XeGCC80HoAk";
+const apiKey = process.env.GEMINI_API_KEY || ""; // set GEMINI_API_KEY in your environment
 
 async function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
